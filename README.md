@@ -67,6 +67,8 @@ File DEKs and vault/provisioning keys are serialized only as versioned XChaCha20
 
 Sensitive node metadata is also encrypted client-side. Protocol-v1 metadata envelopes contain NFC-normalized portable filenames, MIME types, plaintext hashes, conflict details, and labels. AAD binds each envelope to its opaque node ID, node type, key scope, and key version. Windows reserved names and non-portable path characters are rejected before encryption, while case is preserved for display and compared through a normalized case-insensitive key.
 
+Recovery uses a random 256-bit printable `HBXR1-...` Recovery Secret that is never uploaded. Clients derive a package key with Argon2id (19 MiB, two iterations), encrypt the User Master Key with XChaCha20-Poly1305, and bind the package to the account's opaque user ID. A server backup alone cannot restore plaintext; recovery requires this secret or an existing trusted device.
+
 ```powershell
 cd client
 flutter analyze
