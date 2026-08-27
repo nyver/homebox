@@ -57,6 +57,19 @@ go vet ./...
 go build ./cmd/homebox
 ```
 
+## Client foundation
+
+The Flutter client is in [client](client). It targets Android and Windows and currently implements the first trusted-device onboarding screen: it validates a server address and requires the server's out-of-band SHA-256 fingerprint before allowing setup to proceed. It does not transmit credentials or files until the secure transport and client E2EE milestones are implemented.
+
+```powershell
+cd client
+flutter analyze
+flutter test
+flutter build apk --debug
+```
+
+The Android SDK was verified with `D:\usr\android-cli`. Windows builds additionally require Visual Studio with the **Desktop development with C++** workload.
+
 ## Security status
 
 The full product must not be treated as production-ready until the roadmap's security gate is closed: a maintained Go/Dart secure-transport pair must be selected, tested with cross-platform vectors, and the Flutter E2EE client must implement client-side key management, provisioning, recovery, and AEAD file framing. The server intentionally contains no file decryption implementation to preserve that boundary.
