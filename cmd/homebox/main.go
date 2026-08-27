@@ -1,0 +1,142 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/homebox/homebox/internal/auth"
+	"github.com/homebox/homebox/internal/config"
+	"github.com/homebox/homebox/internal/database"
+	"github.com/homebox/homebox/internal/httpserver"
+	"github.com/homebox/homebox/internal/serveridentity"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		fatal("usage: homebox <server|fingerprint|bootstrap-admin> [options]")
+	}
+	switch os.Args[1] {
+	case "server":
+		serve(os.Args[2:])
+	case "fingerprint":
+		fingerprint(os.Args[2:])
+	case "bootstrap-admin":
+		bootstrapAdmin(os.Args[2:])
+	default:
+		fatal("unknown command %q", os.Args[1])
+	}
+}
+
+func serve(args []string) {
+	fs := flag.NewFlagSet("server", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to YAML configuration")
+	host := fs.String("host", "", "listener host override")
+	port := fs.Int("port", 0, "listener port override")
+	tlsEnabled := fs.String("tls", "", "enable or disable TLS (true or false)")
+	if err := fs.Parse(args); err != nil {
+		fatal("parse arguments: %v", err)
+	}
+	c, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config: %v", err)
+	}
+	if *host != "" {
+		c.Server.Host = *host
+	}
+	if *port != 0 {
+		c.Server.Port = *port
+	}
+	if *tlsEnabled != "" {
+		value, parseErr := strconv.ParseBool(*tlsEnabled)
+		if parseErr != nil {
+			fatal("parse --tls: %v", parseErr)
+		}
+		c.Server.TLS.Enabled = value
+	}
+	if err := c.Validate(); err != nil {
+		fatal("validate server overrides: %v", err)
+	}
+	db, err := database.Open(c.Storage.Path)
+	if err != nil {
+		fatal("open database: %v", err)
+	}
+	defer db.Close()
+	identity, err := serveridentity.LoadOrCreate(c.Storage.Path)
+	if err != nil {
+		fatal("load server identity: %v", err)
+	}
+	log.Printf("HomeBox server identity fingerprint: %s", identity.Fingerprint())
+	server := &http.Server{Addr: c.Address(), Handler: httpserver.New(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	log.Printf("HomeBox listening on %s", c.Address())
+	if c.Server.TLS.Enabled {
+		err = server.ListenAndServeTLS(c.Server.TLS.CertFile, c.Server.TLS.KeyFile)
+	} else {
+		err = server.ListenAndServe()
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		fatal("serve: %v", err)
+	}
+}
+
+func fingerprint(args []string) {
+	fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to YAML configuration")
+	if err := fs.Parse(args); err != nil {
+		fatal("parse arguments: %v", err)
+	}
+	c, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config: %v", err)
+	}
+	identity, err := serveridentity.LoadOrCreate(c.Storage.Path)
+	if err != nil {
+		fatal("load server identity: %v", err)
+	}
+	fmt.Println(identity.Fingerprint())
+}
+
+func bootstrapAdmin(args []string) {
+	fs := flag.NewFlagSet("bootstrap-admin", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to YAML configuration")
+	username := fs.String("username", "", "admin username")
+	passwordStdin := fs.Bool("password-stdin", false, "read the password from standard input")
+	if err := fs.Parse(args); err != nil {
+		fatal("parse arguments: %v", err)
+	}
+	if *username == "" || !*passwordStdin {
+		fatal("bootstrap-admin requires --username and --password-stdin")
+	}
+	c, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config: %v", err)
+	}
+	password, err := io.ReadAll(io.LimitReader(os.Stdin, 1025))
+	if err != nil {
+		fatal("read password: %v", err)
+	}
+	passwordText := strings.TrimSuffix(strings.TrimSuffix(string(password), "\n"), "\r")
+	db, err := database.Open(c.Storage.Path)
+	if err != nil {
+		fatal("open database: %v", err)
+	}
+	defer db.Close()
+	user, err := auth.New(db, c.Limits.MaxUsers).BootstrapAdmin(context.Background(), *username, passwordText)
+	if err != nil {
+		fatal("bootstrap admin: %v", err)
+	}
+	fmt.Printf("Bootstrap admin %q created (id: %s).\n", user.Username, user.ID)
+}
+
+func fatal(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "homebox: "+format+"\n", args...)
+	os.Exit(1)
+}

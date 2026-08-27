@@ -1,0 +1,13 @@
+config.yaml
+*.doc
+*.docx
+AGENTS.md
+CLAUDE.md
+openspec/
+.history/
+.claude/
+.agents/
+.gigacode/
+bin/
+data/
+

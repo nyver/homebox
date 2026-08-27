@@ -1,0 +1,33 @@
+# HomeBox stores only client-encrypted ciphertext. Do not enable server-side decryption.
+server:
+  host: "0.0.0.0"
+  port: 8787
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+storage:
+  path: "./data"
+  ciphertext_only: true
+
+limits:
+  max_users: 5
+  max_plaintext_file_size_bytes: 104857600
+  upload_chunk_plaintext_size_bytes: 4194304
+  max_ciphertext_file_size_bytes: 104859000
+
+security:
+  application_encryption:
+    enabled: true
+    required_for_http: true
+    protocol: "noise-nk-25519-chachapoly-sha256"
+    session_max_age: "60m"
+  e2ee:
+    required: true
+    server_decryption_enabled: false
+    protocol_version: 1
+
+uploads:
+  abandoned_after_hours: 24
+
