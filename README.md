@@ -3,17 +3,18 @@
 HomeBox is a self-hosted, zero-knowledge file-storage service for a small family.
 Its security boundary is deliberate: clients encrypt file content and sensitive metadata before upload; the server stores only opaque identifiers, encrypted metadata/key envelopes, and ciphertext blobs. It never receives a File DEK, vault key, folder key, user master key, or recovery secret.
 
-This repository currently provides the security-first Go server foundation and a Windows 11 Flutter desktop client foundation. The client includes the first protocol-v1 E2EE primitives; secure transport and end-to-end server integration remain roadmap milestones. Android remains a later roadmap target, not the current client deliverable.
+This repository currently provides the security-first Go server foundation and a Windows 11 Flutter desktop client foundation. The client includes the first protocol-v1 E2EE primitives and now authenticates against the server over pinned TLS; local sync, upload/download, and full sync engine integration remain roadmap milestones. Android remains a later roadmap target, not the current client deliverable.
 
 ## Current capabilities
 
 - Safe YAML configuration with mandatory E2EE and no server decryption mode.
-- SQLite database with WAL, foreign keys, and the initial zero-knowledge schema.
-- Persistent Ed25519 server transport identity and a SHA-256 fingerprint.
-- Argon2id password hashing and a first-admin bootstrap command.
-- Ciphertext-only resumable upload domain service with opaque IDs, per-chunk SHA-256 storage checks, idempotent completion, atomic blob commit, and global sync revision creation.
+- Versioned SQLite migrations (WAL, foreign keys) instead of an inline schema dump.
+- Persistent ECDSA P-256 server transport identity and a SHA-256 fingerprint (P-256, not Ed25519 — Dart's bundled TLS client rejects Ed25519 certificates; see ADR-008).
+- **Secure Transport is closed (ADR-008/009):** the server terminates TLS 1.3 using a self-signed certificate derived from its identity key. There is no plaintext HTTP mode in any configuration. Clients trust the connection by pinning the identity fingerprint, not a certificate authority.
+- Argon2id password hashing, a first-admin bootstrap command, and a full authenticated session lifecycle: login, refresh-token rotation, logout, and device registration/revocation (`/api/v1/auth/*`, `/api/v1/devices*`). Login is timing-safe against username enumeration and rate-limited per username with exponential backoff.
+- Encrypted key-envelope delivery between a user's own trusted devices (`/api/v1/devices/{id}/key-envelope`) so a newly provisioned device can fetch the vault key an existing device wrapped for it. Cross-account sharing (Family Vault, §28) is a later milestone.
+- Ciphertext-only resumable upload domain service with opaque IDs, per-chunk SHA-256 storage checks, idempotent completion, atomic blob commit, and global sync revision creation. HTTP wiring for uploads/downloads/nodes/sync is a later milestone; the domain service itself is complete and tested.
 - Health and metrics endpoints.
-- A hard plaintext-API guard: all business paths below `/api/` return `426 SECURE_TRANSPORT_REQUIRED` until the Noise/Dart interoperability security gate is completed. This is intentional; a fake or plaintext fallback would violate the specification.
 
 ## Run the server foundation
 
@@ -26,13 +27,17 @@ go build -o bin/homebox.exe ./cmd/homebox
 ./bin/homebox.exe server --config config.yaml
 ```
 
-The server exposes only the following cleartext technical endpoints:
+Every endpoint, including health and metrics, is served over TLS — there is no separate plaintext port:
 
 - `GET /health/live`
 - `GET /health/ready`
 - `GET /metrics`
+- `POST /api/v1/auth/{login,refresh,logout}`
+- `GET /api/v1/users/me`
+- `GET /api/v1/devices`, `DELETE /api/v1/devices/{id}`
+- `POST` / `GET /api/v1/devices/{id}/key-envelope`
 
-The fingerprint must be verified out of band before a client trusts the server identity. The application business API is intentionally unavailable without the specified authenticated secure transport, regardless of whether TLS is also enabled.
+The fingerprint must be verified out of band before a client trusts the server identity (ADR-009); a client must refuse to connect if the presented certificate resolves to a different fingerprint than the one it pinned. The certificate is self-signed but uses ECDSA P-256, which is broadly supported (Go, the Flutter client's bundled BoringSSL, OpenSSL, and Windows' own Schannel stack all complete the handshake), so ordinary tools like `curl.exe -k` work for manual poking as long as certificate verification is disabled — there is no CA behind this certificate on purpose.
 
 ## Server storage
 
@@ -59,7 +64,9 @@ go build ./cmd/homebox
 
 ## Client foundation
 
-The Flutter client is in [client](client) and currently targets Windows 11. Its desktop UI provides the Files, Sync, and Settings sections, uses the native Windows folder picker to select a local sync folder, and keeps the vault explicitly locked until trusted-device provisioning or Recovery Secret recovery. It does not transmit credentials or files until the secure transport and client E2EE milestones are implemented.
+The Flutter client is in [client](client) and currently targets Windows 11. Its desktop UI provides the Files, Sync, and Settings sections, uses the native Windows folder picker to select a local sync folder, and keeps the vault explicitly locked until trusted-device provisioning or Recovery Secret recovery. It does not transmit file content until the E2EE upload/download milestone is implemented; it does now transmit credentials, over a pinned TLS connection to the server (see below).
+
+The Settings page's "Connect to a HomeBox server" flow discovers a server's identity fingerprint (without trusting it), requires the user to explicitly confirm it before pinning, then supports login/logout. `core/transport/pinned_http_client.dart` mirrors the Go server's fingerprint-pinning logic: it extracts the leaf certificate's P-256 public key using the same fixed RFC 5480 SubjectPublicKeyInfo prefix the server's certificate always has, hashes it with SHA-256, and refuses the connection on any mismatch — normal certificate-authority validation is replaced by this check, not skipped. A device ID and refresh token are persisted (`flutter_secure_storage`) so the app restores its session silently on restart; the short-lived access token is not persisted and is re-derived via refresh. Server login only proves account identity — it never unlocks the E2EE vault (ADR-012), and the UI reflects that as a separate "Signed in" vs. "Vault locked" state.
 
 The client E2EE core now defines protocol-v1 file headers and independently encrypts 4 MB chunks with XChaCha20-Poly1305. Each file version uses a random 256-bit File DEK and a 128-bit nonce prefix; the big-endian chunk number completes the 192-bit nonce. AAD binds the protocol version, opaque file-version ID, chunk number, and total chunk count. Fixed vectors and tamper tests protect the protocol contract.
 
@@ -84,4 +91,4 @@ Windows builds require Visual Studio 2022 with the **Desktop development with C+
 
 ## Security status
 
-The full product must not be treated as production-ready until the roadmap's security gate is closed: a maintained Go/Dart secure-transport pair must be selected, tested with cross-platform vectors, and integrated with the client/server API. Device registration, approval UX, key-envelope delivery, vault lifecycle, and full sync integration are not complete. The server intentionally contains no file decryption implementation to preserve that boundary.
+Secure Transport is closed (ADR-008/009/020): TLS 1.3 with self-signed, fingerprint-pinned server identity, and an authenticated login/device/key-envelope API built on top of it. The full product is still not production-ready: node CRUD, the sync revision feed's HTTP layer, upload/download wiring, cross-account sharing (Family Vault), the Windows sync folder, the Android client, camera upload, and server backup/restore remain roadmap milestones. The server intentionally contains no file decryption implementation to preserve that boundary, and this document's own roadmap sections track exactly what is and isn't built yet.

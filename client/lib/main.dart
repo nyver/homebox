@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'core/e2ee/device_identity.dart';
 import 'features/device/device_setup_controller.dart';
+import 'features/server/server_connection_controller.dart';
 
 void main() => runApp(const HomeBoxApp());
 
@@ -37,7 +38,9 @@ class HomeBoxDesktopPage extends StatefulWidget {
 }
 
 class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
+  late final DeviceIdentityStore _deviceIdentityStore;
   late final DeviceSetupController _deviceSetupController;
+  late final ServerConnectionController _serverConnectionController;
   AppSection _section = AppSection.files;
   String? _syncFolder;
   bool _selectingFolder = false;
@@ -45,15 +48,17 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   @override
   void initState() {
     super.initState();
-    _deviceSetupController = DeviceSetupController(
-      widget.deviceIdentityStore ?? DeviceIdentityStore.platform(),
-    );
+    _deviceIdentityStore = widget.deviceIdentityStore ?? DeviceIdentityStore.platform();
+    _deviceSetupController = DeviceSetupController(_deviceIdentityStore);
+    _serverConnectionController = ServerConnectionController(deviceIdentityStore: _deviceIdentityStore);
     unawaited(_deviceSetupController.initialize());
+    unawaited(_serverConnectionController.initialize());
   }
 
   @override
   void dispose() {
     _deviceSetupController.dispose();
+    _serverConnectionController.dispose();
     super.dispose();
   }
 
@@ -87,6 +92,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       selectingFolder: _selectingFolder,
       onSelectSyncFolder: _selectSyncFolder,
       deviceSetupController: _deviceSetupController,
+      serverConnectionController: _serverConnectionController,
     );
     if (!wideLayout) {
       return Scaffold(
@@ -200,6 +206,7 @@ class _SectionContent extends StatelessWidget {
     required this.selectingFolder,
     required this.onSelectSyncFolder,
     required this.deviceSetupController,
+    required this.serverConnectionController,
   });
 
   final AppSection section;
@@ -207,6 +214,7 @@ class _SectionContent extends StatelessWidget {
   final bool selectingFolder;
   final Future<void> Function() onSelectSyncFolder;
   final DeviceSetupController deviceSetupController;
+  final ServerConnectionController serverConnectionController;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -221,6 +229,7 @@ class _SectionContent extends StatelessWidget {
     ),
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
+      serverConnectionController: serverConnectionController,
     ),
   };
 }
@@ -370,9 +379,13 @@ class _SyncSection extends StatelessWidget {
 }
 
 class _SettingsSection extends StatelessWidget {
-  const _SettingsSection({required this.deviceSetupController});
+  const _SettingsSection({
+    required this.deviceSetupController,
+    required this.serverConnectionController,
+  });
 
   final DeviceSetupController deviceSetupController;
+  final ServerConnectionController serverConnectionController;
 
   @override
   Widget build(BuildContext context) => _PageFrame(
@@ -380,20 +393,7 @@ class _SettingsSection extends StatelessWidget {
     subtitle: 'Connection and device security.',
     child: ListView(
       children: [
-        const Card(
-          child: ListTile(
-            leading: Icon(Icons.dns_outlined),
-            title: Text('Server'),
-            subtitle: Text('Not connected'),
-          ),
-        ),
-        const Card(
-          child: ListTile(
-            leading: Icon(Icons.fingerprint),
-            title: Text('Server fingerprint'),
-            subtitle: Text('Required before the first secure connection'),
-          ),
-        ),
+        _ServerConnectionCard(controller: serverConnectionController),
         _DeviceIdentityCard(controller: deviceSetupController),
         const Card(
           child: ListTile(
@@ -502,6 +502,190 @@ final class _DeviceIdentityCard extends StatelessWidget {
           isThreeLine: controller.status == DeviceSetupStatus.ready,
         ),
       );
+    },
+  );
+}
+
+final class _ServerConnectionCard extends StatelessWidget {
+  const _ServerConnectionCard({required this.controller});
+
+  final ServerConnectionController controller;
+
+  Future<void> _promptForServer(BuildContext context) async {
+    final urlController = TextEditingController();
+    final entered = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Connect to a HomeBox server'),
+        content: TextField(
+          controller: urlController,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Server address',
+            hintText: 'homebox.local:8787',
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, urlController.text),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    if (entered == null || entered.trim().isEmpty) return;
+    await controller.discover(entered);
+  }
+
+  Future<void> _confirmFingerprint(BuildContext context, String fingerprint) async {
+    final trust = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Verify server identity'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Compare this fingerprint with the one printed by "homebox server fingerprint" '
+              'on the server, over a channel you trust, before continuing.',
+            ),
+            const SizedBox(height: 12),
+            SelectableText(fingerprint, style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()])),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Trust this server'),
+          ),
+        ],
+      ),
+    );
+    if (trust == true) {
+      await controller.confirmTrust();
+    } else {
+      controller.cancelTrust();
+    }
+  }
+
+  Future<void> _promptForLogin(BuildContext context) async {
+    final usernameController = TextEditingController();
+    final passwordController = TextEditingController();
+    final submitted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Sign in'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: usernameController,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Username'),
+            ),
+            TextField(
+              controller: passwordController,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'Password'),
+              onSubmitted: (_) => Navigator.pop(context, true),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Sign in'),
+          ),
+        ],
+      ),
+    );
+    if (submitted == true) {
+      await controller.login(usernameController.text, passwordController.text);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: controller,
+    builder: (context, _) {
+      final cards = <Widget>[
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.dns_outlined),
+            title: const Text('Server'),
+            subtitle: Text(controller.server?.baseUrl ?? 'Not connected'),
+            trailing: switch (controller.status) {
+              ServerConnectionStatus.discovering ||
+              ServerConnectionStatus.authenticating => const SizedBox.square(
+                dimension: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              ServerConnectionStatus.disconnected ||
+              ServerConnectionStatus.failed => FilledButton(
+                onPressed: () => _promptForServer(context),
+                child: const Text('Connect'),
+              ),
+              _ => TextButton(
+                onPressed: () => controller.forgetServer(),
+                child: const Text('Forget'),
+              ),
+            },
+          ),
+        ),
+      ];
+
+      if (controller.status == ServerConnectionStatus.failed && controller.errorMessage != null) {
+        cards.add(Card(
+          child: ListTile(
+            leading: const Icon(Icons.error_outline),
+            title: const Text('Connection failed'),
+            subtitle: Text(controller.errorMessage!),
+          ),
+        ));
+      }
+
+      if (controller.status == ServerConnectionStatus.awaitingTrust && controller.discoveredFingerprint != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (context.mounted) _confirmFingerprint(context, controller.discoveredFingerprint!);
+        });
+      }
+
+      if (controller.status == ServerConnectionStatus.connectedLoggedOut ||
+          controller.status == ServerConnectionStatus.authenticated) {
+        final session = controller.session;
+        cards.add(Card(
+          child: ListTile(
+            leading: Icon(session != null ? Icons.verified_user_outlined : Icons.person_outline),
+            title: Text(session != null ? 'Signed in as ${session.user.username}' : 'Not signed in'),
+            subtitle: session == null && controller.errorMessage != null ? Text(controller.errorMessage!) : null,
+            trailing: session != null
+                ? TextButton(
+                    onPressed: () => controller.logout(),
+                    child: const Text('Sign out'),
+                  )
+                : FilledButton(
+                    onPressed: () => _promptForLogin(context),
+                    child: const Text('Sign in'),
+                  ),
+          ),
+        ));
+      }
+
+      return Column(children: cards);
     },
   );
 }

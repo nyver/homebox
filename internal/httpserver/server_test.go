@@ -9,7 +9,7 @@ import (
 func TestBusinessAPIsRejectPlaintext(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	w := httptest.NewRecorder()
-	New().ServeHTTP(w, r)
+	New(nil).ServeHTTP(w, r)
 	if w.Code != http.StatusUpgradeRequired {
 		t.Fatalf("status=%d, want %d", w.Code, http.StatusUpgradeRequired)
 	}

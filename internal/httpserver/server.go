@@ -6,15 +6,23 @@ import (
 	"time"
 )
 
-// New exposes only unauthenticated operational endpoints until a vetted,
-// interoperable secure-transport implementation is available. Business APIs
-// deliberately reject plaintext HTTP rather than silently weakening security.
-func New() http.Handler {
+// New wires operational endpoints (health/metrics) alongside the
+// authenticated business API. The whole handler is only ever served over
+// the Secure Transport TLS listener built by internal/securetransport
+// (see cmd/homebox) — there is no plaintext HTTP mode. If api is nil, every
+// business route rejects with 426 rather than silently doing nothing; this
+// lets internal packages exercise the operational endpoints in isolation
+// without an auth/database dependency.
+func New(api http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", health)
 	mux.HandleFunc("GET /health/ready", health)
 	mux.HandleFunc("GET /metrics", metrics)
-	mux.HandleFunc("/api/", secureTransportRequired)
+	if api != nil {
+		mux.Handle("/api/", api)
+	} else {
+		mux.HandleFunc("/api/", secureTransportRequired)
+	}
 	return securityHeaders(mux)
 }
 

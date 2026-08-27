@@ -24,9 +24,11 @@ const (
 )
 
 type Service struct {
-	db       *sql.DB
-	maxUsers int
-	now      func() time.Time
+	db             *sql.DB
+	maxUsers       int
+	accessTokenTTL time.Duration
+	now            func() time.Time
+	loginLimiter   *loginLimiter
 }
 
 type User struct {
@@ -35,8 +37,11 @@ type User struct {
 	Role     string
 }
 
-func New(db *sql.DB, maxUsers int) *Service {
-	return &Service{db: db, maxUsers: maxUsers, now: time.Now}
+// New builds the auth service. accessTokenTTL bounds how long an issued
+// access token is valid before a client must present its refresh token
+// (config: security.application_encryption.session_max_age).
+func New(db *sql.DB, maxUsers int, accessTokenTTL time.Duration) *Service {
+	return &Service{db: db, maxUsers: maxUsers, accessTokenTTL: accessTokenTTL, now: time.Now, loginLimiter: newLoginLimiter()}
 }
 
 func (s *Service) BootstrapAdmin(ctx context.Context, username, password string) (User, error) {

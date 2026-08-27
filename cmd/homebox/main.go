@@ -16,7 +16,10 @@ import (
 	"github.com/homebox/homebox/internal/auth"
 	"github.com/homebox/homebox/internal/config"
 	"github.com/homebox/homebox/internal/database"
+	"github.com/homebox/homebox/internal/httpapi"
 	"github.com/homebox/homebox/internal/httpserver"
+	"github.com/homebox/homebox/internal/provisioning"
+	"github.com/homebox/homebox/internal/securetransport"
 	"github.com/homebox/homebox/internal/serveridentity"
 )
 
@@ -75,12 +78,28 @@ func serve(args []string) {
 		fatal("load server identity: %v", err)
 	}
 	log.Printf("HomeBox server identity fingerprint: %s", identity.Fingerprint())
-	server := &http.Server{Addr: c.Address(), Handler: httpserver.New(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+
+	authService := auth.New(db, c.Limits.MaxUsers, c.AccessTokenTTL())
+	provisioningService := provisioning.New(db)
+	api := httpapi.New(authService, provisioningService)
+	server := &http.Server{Addr: c.Address(), Handler: httpserver.New(api), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Printf("HomeBox listening on %s", c.Address())
+
 	if c.Server.TLS.Enabled {
+		// Operator-supplied certificate (e.g. a direct Let's Encrypt cert
+		// without a reverse proxy in front). See §7.2.
 		err = server.ListenAndServeTLS(c.Server.TLS.CertFile, c.Server.TLS.KeyFile)
 	} else {
-		err = server.ListenAndServe()
+		// Default "direct HTTP + custom port" deployment mode (§7.1): the
+		// server terminates TLS itself using a self-signed certificate tied
+		// to its identity key, trusted by clients via fingerprint pinning
+		// rather than a CA (ADR-008/ADR-009). There is no plaintext fallback.
+		tlsConfig, tlsErr := securetransport.BuildTLSConfig(identity)
+		if tlsErr != nil {
+			fatal("build secure transport: %v", tlsErr)
+		}
+		server.TLSConfig = tlsConfig
+		err = server.ListenAndServeTLS("", "")
 	}
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatal("serve: %v", err)
@@ -129,7 +148,7 @@ func bootstrapAdmin(args []string) {
 		fatal("open database: %v", err)
 	}
 	defer db.Close()
-	user, err := auth.New(db, c.Limits.MaxUsers).BootstrapAdmin(context.Background(), *username, passwordText)
+	user, err := auth.New(db, c.Limits.MaxUsers, c.AccessTokenTTL()).BootstrapAdmin(context.Background(), *username, passwordText)
 	if err != nil {
 		fatal("bootstrap admin: %v", err)
 	}

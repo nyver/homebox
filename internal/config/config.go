@@ -40,6 +40,11 @@ type Config struct {
 		MaxCiphertextFileSize    int64 `yaml:"max_ciphertext_file_size_bytes"`
 	} `yaml:"limits"`
 	Security struct {
+		// ApplicationEncryption configures the Secure Transport layer that
+		// protects login/tokens/control traffic (ADR-008): TLS 1.3 with a
+		// self-signed certificate pinned by its fingerprint instead of a
+		// certificate authority. SessionMaxAge is the access-token lifetime;
+		// a session past this age must present its refresh token instead.
 		ApplicationEncryption struct {
 			Enabled         bool   `yaml:"enabled"`
 			RequiredForHTTP bool   `yaml:"required_for_http"`
@@ -69,8 +74,8 @@ func Defaults() Config {
 	c.Limits.MaxCiphertextFileSize = defaultMaxCiphertextSize
 	c.Security.ApplicationEncryption.Enabled = true
 	c.Security.ApplicationEncryption.RequiredForHTTP = true
-	c.Security.ApplicationEncryption.Protocol = "noise-nk-25519-chachapoly-sha256"
-	c.Security.ApplicationEncryption.SessionMaxAge = "60m"
+	c.Security.ApplicationEncryption.Protocol = "tls1.3-ecdsa-p256-cert-pinning"
+	c.Security.ApplicationEncryption.SessionMaxAge = "15m"
 	c.Security.E2EE.Required = true
 	c.Security.E2EE.ProtocolVersion = 1
 	c.Uploads.AbandonedAfterHours = 24
@@ -136,3 +141,11 @@ func (c Config) Validate() error {
 }
 
 func (c Config) Address() string { return net.JoinHostPort(c.Server.Host, fmt.Sprint(c.Server.Port)) }
+
+// AccessTokenTTL returns the configured access-token lifetime. Validate
+// already guarantees SessionMaxAge parses, so a config that has passed
+// Validate can call this without a second error check.
+func (c Config) AccessTokenTTL() time.Duration {
+	d, _ := time.ParseDuration(c.Security.ApplicationEncryption.SessionMaxAge)
+	return d
+}
