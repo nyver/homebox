@@ -59,7 +59,7 @@ go build ./cmd/homebox
 
 ## Client foundation
 
-The Flutter client is in [client](client). It targets Android and Windows and currently implements the first trusted-device onboarding screen: it validates a server address and requires the server's out-of-band SHA-256 fingerprint before allowing setup to proceed. It does not transmit credentials or files until the secure transport and client E2EE milestones are implemented.
+The Flutter client is in [client](client). It targets Android and Windows. The Windows UI provides the Files, Sync, and Settings sections, uses the native folder picker to select a local sync folder, and keeps the vault explicitly locked until trusted-device provisioning or Recovery Secret recovery. It does not transmit credentials or files until the secure transport and client E2EE milestones are implemented.
 
 ```powershell
 cd client

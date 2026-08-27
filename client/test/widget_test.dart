@@ -1,21 +1,28 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/main.dart';
 
 void main() {
-  testWidgets('setup requires a server fingerprint', (tester) async {
+  testWidgets('Windows client starts locked and does not expose files', (
+    tester,
+  ) async {
     await tester.pumpWidget(const HomeBoxApp());
-    expect(find.text('Set up HomeBox'), findsOneWidget);
-    final continueButton = find.widgetWithText(
-      FilledButton,
-      'Verify and continue',
-    );
-    await tester.drag(find.byType(ListView), const Offset(0, -500));
+
+    expect(find.text('Vault locked'), findsOneWidget);
+    expect(find.text('Choose your HomeBox folder'), findsOneWidget);
+    expect(find.text('Choose folder'), findsOneWidget);
+  });
+
+  testWidgets('sync page makes the locked state explicit', (tester) async {
+    await tester.pumpWidget(const HomeBoxApp());
+
+    await tester.tap(find.text('Sync'));
     await tester.pumpAndSettle();
-    await tester.tap(continueButton);
-    await tester.pump();
+
+    expect(find.text('Sync paused'), findsOneWidget);
     expect(
-      find.text('Enter the 64-character SHA-256 fingerprint.'),
+      find.text(
+        'Provision this device with a trusted device or Recovery Secret.',
+      ),
       findsOneWidget,
     );
   });
