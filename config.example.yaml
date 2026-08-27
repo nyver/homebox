@@ -26,6 +26,7 @@ security:
   e2ee:
     # File framing is fixed by protocol v1: XChaCha20-Poly1305, 4 MB plaintext chunks.
     # The server stores only authenticated key envelopes and never unwraps client keys.
+    # Filenames, MIME types, plaintext hashes, conflict details, and labels stay encrypted.
     required: true
     server_decryption_enabled: false
     protocol_version: 1

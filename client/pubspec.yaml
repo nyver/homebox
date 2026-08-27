@@ -36,6 +36,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   file_selector: ^1.1.0
   cryptography: ^2.9.0
+  unorm_dart: ^0.3.2
 
 dev_dependencies:
   flutter_test:
