@@ -43,6 +43,7 @@ final class KeyEnvelope {
   }
 
   static const List<int> _magic = [0x48, 0x42, 0x58, 0x4b]; // HBXK
+  static const int encodedLength = 4 + 2 + 1 + 4 + 24 + 32 + 16;
 
   final KeyEnvelopePurpose purpose;
   final int keyVersion;
@@ -51,7 +52,7 @@ final class KeyEnvelope {
   final Uint8List _mac;
 
   Uint8List encode() {
-    final result = Uint8List(4 + 2 + 1 + 4 + 24 + 32 + 16);
+    final result = Uint8List(encodedLength);
     result.setAll(0, _magic);
     final data = ByteData.sublistView(result);
     data.setUint16(4, homeBoxKeyEnvelopeVersion, Endian.big);
@@ -64,7 +65,7 @@ final class KeyEnvelope {
   }
 
   factory KeyEnvelope.decode(List<int> encoded) {
-    if (encoded.length != 83) {
+    if (encoded.length != encodedLength) {
       throw const FormatException('Invalid HomeBox key envelope length.');
     }
     final bytes = Uint8List.fromList(encoded);
@@ -87,7 +88,7 @@ final class KeyEnvelope {
       keyVersion: keyVersion,
       nonce: Uint8List.sublistView(bytes, 11, 35),
       ciphertext: Uint8List.sublistView(bytes, 35, 67),
-      mac: Uint8List.sublistView(bytes, 67, 83),
+      mac: Uint8List.sublistView(bytes, 67, encodedLength),
     );
   }
 }

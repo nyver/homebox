@@ -3,7 +3,7 @@
 HomeBox is a self-hosted, zero-knowledge file-storage service for a small family.
 Its security boundary is deliberate: clients encrypt file content and sensitive metadata before upload; the server stores only opaque identifiers, encrypted metadata/key envelopes, and ciphertext blobs. It never receives a File DEK, vault key, folder key, user master key, or recovery secret.
 
-This repository currently provides the security-first Go server foundation. The Windows and Android Flutter clients, including the interoperable E2EE implementation and secure transport, are the next milestones from the included roadmap.
+This repository currently provides the security-first Go server foundation and a Windows/Android Flutter client foundation. The client includes the first protocol-v1 E2EE primitives; secure transport and end-to-end server integration remain roadmap milestones.
 
 ## Current capabilities
 
@@ -69,6 +69,10 @@ Sensitive node metadata is also encrypted client-side. Protocol-v1 metadata enve
 
 Recovery uses a random 256-bit printable `HBXR1-...` Recovery Secret that is never uploaded. Clients derive a package key with Argon2id (19 MiB, two iterations), encrypt the User Master Key with XChaCha20-Poly1305, and bind the package to the account's opaque user ID. A server backup alone cannot restore plaintext; recovery requires this secret or an existing trusted device.
 
+Each installation creates an X25519 device identity. Its private key is stored only through OS secure storage: Windows Credential Manager-backed authenticated storage on Windows and Android Keystore-backed storage on Android. Android backup is disabled to prevent secure-storage ciphertext from being restored without its device-bound key. Corrupt key records fail closed instead of silently rotating the identity.
+
+Trusted-device provisioning uses ephemeral X25519 and HKDF-SHA256 to derive a one-time wrapping key, then delivers the vault key in the existing XChaCha20-Poly1305 key-envelope format. The derivation and envelope bind the vault, recipient device, key version, ephemeral public key, and random salt. Login without a valid recipient-specific envelope leaves the vault locked.
+
 ```powershell
 cd client
 flutter analyze
@@ -80,4 +84,4 @@ The Android SDK was verified with `D:\usr\android-cli`. Windows builds additiona
 
 ## Security status
 
-The full product must not be treated as production-ready until the roadmap's security gate is closed: a maintained Go/Dart secure-transport pair must be selected, tested with cross-platform vectors, and the Flutter E2EE client must implement client-side key management, provisioning, recovery, and AEAD file framing. The server intentionally contains no file decryption implementation to preserve that boundary.
+The full product must not be treated as production-ready until the roadmap's security gate is closed: a maintained Go/Dart secure-transport pair must be selected, tested with cross-platform vectors, and integrated with the client/server API. Device registration, approval UX, key-envelope delivery, vault lifecycle, and full sync integration are not complete. The server intentionally contains no file decryption implementation to preserve that boundary.
