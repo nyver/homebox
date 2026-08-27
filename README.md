@@ -61,6 +61,8 @@ go build ./cmd/homebox
 
 The Flutter client is in [client](client). It targets Android and Windows. The Windows UI provides the Files, Sync, and Settings sections, uses the native folder picker to select a local sync folder, and keeps the vault explicitly locked until trusted-device provisioning or Recovery Secret recovery. It does not transmit credentials or files until the secure transport and client E2EE milestones are implemented.
 
+The client E2EE core now defines protocol-v1 file headers and independently encrypts 4 MB chunks with XChaCha20-Poly1305. Each file version uses a random 256-bit File DEK and a 128-bit nonce prefix; the big-endian chunk number completes the 192-bit nonce. AAD binds the protocol version, opaque file-version ID, chunk number, and total chunk count. Fixed vectors and tamper tests protect the Windows/Android interoperability contract.
+
 ```powershell
 cd client
 flutter analyze

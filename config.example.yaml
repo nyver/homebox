@@ -24,10 +24,10 @@ security:
     protocol: "noise-nk-25519-chachapoly-sha256"
     session_max_age: "60m"
   e2ee:
+    # File framing is fixed by protocol v1: XChaCha20-Poly1305, 4 MB plaintext chunks.
     required: true
     server_decryption_enabled: false
     protocol_version: 1
 
 uploads:
   abandoned_after_hours: 24
-
