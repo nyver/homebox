@@ -1,9 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
 
+import 'support/memory_device_private_key_storage.dart';
+
 void main() {
   test('device identity persists in secure storage and reloads', () async {
-    final storage = _MemoryDevicePrivateKeyStorage();
+    final storage = MemoryDevicePrivateKeyStorage();
     final identityStore = DeviceIdentityStore(storage);
 
     final created = await identityStore.loadOrCreate();
@@ -23,7 +25,7 @@ void main() {
   });
 
   test('clearing a device identity removes its private key', () async {
-    final storage = _MemoryDevicePrivateKeyStorage();
+    final storage = MemoryDevicePrivateKeyStorage();
     final identityStore = DeviceIdentityStore(storage);
     final identity = await identityStore.loadOrCreate();
 
@@ -33,28 +35,11 @@ void main() {
   });
 
   test('corrupt secure storage never silently rotates identity', () async {
-    final storage = _MemoryDevicePrivateKeyStorage()
+    final storage = MemoryDevicePrivateKeyStorage()
       ..values[homeBoxDevicePrivateKeyStorageKey] = 'HBXD1-invalid';
     final identityStore = DeviceIdentityStore(storage);
 
     await expectLater(identityStore.loadOrCreate(), throwsFormatException);
     expect(storage.values[homeBoxDevicePrivateKeyStorageKey], 'HBXD1-invalid');
   });
-}
-
-final class _MemoryDevicePrivateKeyStorage implements DevicePrivateKeyStorage {
-  final Map<String, String> values = {};
-
-  @override
-  Future<void> delete(String key) async {
-    values.remove(key);
-  }
-
-  @override
-  Future<String?> read(String key) async => values[key];
-
-  @override
-  Future<void> write(String key, String value) async {
-    values[key] = value;
-  }
 }

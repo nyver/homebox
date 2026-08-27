@@ -28,7 +28,7 @@ security:
     # The server stores only authenticated key envelopes and never unwraps client keys.
     # Filenames, MIME types, plaintext hashes, conflict details, and labels stay encrypted.
     # Recovery Secrets exist only on clients; server backups contain encrypted recovery packages.
-    # Device private keys remain in OS secure storage; only public keys and recipient envelopes reach the server.
+    # Windows device private keys remain in OS secure storage; only public keys and recipient envelopes reach the server.
     required: true
     server_decryption_enabled: false
     protocol_version: 1

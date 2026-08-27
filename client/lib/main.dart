@@ -1,10 +1,18 @@
+import 'dart:async';
+
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import 'core/e2ee/device_identity.dart';
+import 'features/device/device_setup_controller.dart';
 
 void main() => runApp(const HomeBoxApp());
 
 class HomeBoxApp extends StatelessWidget {
-  const HomeBoxApp({super.key});
+  const HomeBoxApp({super.key, this.deviceIdentityStore});
+
+  final DeviceIdentityStore? deviceIdentityStore;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -13,23 +21,41 @@ class HomeBoxApp extends StatelessWidget {
       colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff176b87)),
       useMaterial3: true,
     ),
-    home: const HomeBoxDesktopPage(),
+    home: HomeBoxDesktopPage(deviceIdentityStore: deviceIdentityStore),
   );
 }
 
 enum AppSection { files, sync, settings }
 
 class HomeBoxDesktopPage extends StatefulWidget {
-  const HomeBoxDesktopPage({super.key});
+  const HomeBoxDesktopPage({super.key, this.deviceIdentityStore});
+
+  final DeviceIdentityStore? deviceIdentityStore;
 
   @override
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
 }
 
 class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
+  late final DeviceSetupController _deviceSetupController;
   AppSection _section = AppSection.files;
   String? _syncFolder;
   bool _selectingFolder = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _deviceSetupController = DeviceSetupController(
+      widget.deviceIdentityStore ?? DeviceIdentityStore.platform(),
+    );
+    unawaited(_deviceSetupController.initialize());
+  }
+
+  @override
+  void dispose() {
+    _deviceSetupController.dispose();
+    super.dispose();
+  }
 
   Future<void> _selectSyncFolder() async {
     setState(() => _selectingFolder = true);
@@ -60,6 +86,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       syncFolder: _syncFolder,
       selectingFolder: _selectingFolder,
       onSelectSyncFolder: _selectSyncFolder,
+      deviceSetupController: _deviceSetupController,
     );
     if (!wideLayout) {
       return Scaffold(
@@ -172,12 +199,14 @@ class _SectionContent extends StatelessWidget {
     required this.syncFolder,
     required this.selectingFolder,
     required this.onSelectSyncFolder,
+    required this.deviceSetupController,
   });
 
   final AppSection section;
   final String? syncFolder;
   final bool selectingFolder;
   final Future<void> Function() onSelectSyncFolder;
+  final DeviceSetupController deviceSetupController;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -190,7 +219,9 @@ class _SectionContent extends StatelessWidget {
       syncFolder: syncFolder,
       onSelectSyncFolder: onSelectSyncFolder,
     ),
-    AppSection.settings => const _SettingsSection(),
+    AppSection.settings => _SettingsSection(
+      deviceSetupController: deviceSetupController,
+    ),
   };
 }
 
@@ -339,35 +370,42 @@ class _SyncSection extends StatelessWidget {
 }
 
 class _SettingsSection extends StatelessWidget {
-  const _SettingsSection();
+  const _SettingsSection({required this.deviceSetupController});
+
+  final DeviceSetupController deviceSetupController;
+
   @override
   Widget build(BuildContext context) => _PageFrame(
     title: 'Settings',
     subtitle: 'Connection and device security.',
     child: ListView(
-      children: const [
-        Card(
+      children: [
+        const Card(
           child: ListTile(
             leading: Icon(Icons.dns_outlined),
             title: Text('Server'),
             subtitle: Text('Not connected'),
           ),
         ),
-        Card(
+        const Card(
           child: ListTile(
             leading: Icon(Icons.fingerprint),
             title: Text('Server fingerprint'),
             subtitle: Text('Required before the first secure connection'),
           ),
         ),
-        Card(
+        _DeviceIdentityCard(controller: deviceSetupController),
+        const Card(
           child: ListTile(
-            leading: Icon(Icons.devices_other_outlined),
-            title: Text('This device'),
-            subtitle: Text('Not provisioned for E2EE'),
+            leading: Icon(Icons.lock_outline),
+            title: Text('Vault access'),
+            subtitle: Text(
+              'Locked until a trusted device or Recovery Secret provisions this Windows client',
+            ),
+            trailing: Chip(label: Text('Locked')),
           ),
         ),
-        Card(
+        const Card(
           child: ListTile(
             leading: Icon(Icons.key_outlined),
             title: Text('Recovery Secret'),
@@ -376,6 +414,95 @@ class _SettingsSection extends StatelessWidget {
         ),
       ],
     ),
+  );
+}
+
+final class _DeviceIdentityCard extends StatelessWidget {
+  const _DeviceIdentityCard({required this.controller});
+
+  final DeviceSetupController controller;
+
+  Future<void> _confirmPreparation(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Prepare this Windows device?'),
+        content: const Text(
+          'HomeBox will create an X25519 private key protected by Windows secure storage. '
+          'This does not unlock the vault until a trusted device or Recovery Secret approves it.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Create identity'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await controller.prepareDevice();
+  }
+
+  Future<void> _copyFingerprint(BuildContext context, String value) async {
+    await Clipboard.setData(ClipboardData(text: value));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Device fingerprint copied.')));
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: controller,
+    builder: (context, _) {
+      final fingerprint = controller.publicKeyFingerprint;
+      final subtitle = switch (controller.status) {
+        DeviceSetupStatus.checking => 'Checking Windows secure storage…',
+        DeviceSetupStatus.missing =>
+          'No device identity. Create one before requesting provisioning.',
+        DeviceSetupStatus.creating =>
+          'Creating a device-bound X25519 identity…',
+        DeviceSetupStatus.ready =>
+          'Identity ready · Not provisioned\nFingerprint: $fingerprint',
+        DeviceSetupStatus.failed =>
+          'Windows secure storage is unavailable or contains invalid data.',
+      };
+      final trailing = switch (controller.status) {
+        DeviceSetupStatus.checking ||
+        DeviceSetupStatus.creating => const SizedBox.square(
+          dimension: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+        DeviceSetupStatus.missing => FilledButton(
+          key: const ValueKey('prepare-device'),
+          onPressed: () => _confirmPreparation(context),
+          child: const Text('Prepare device'),
+        ),
+        DeviceSetupStatus.ready => IconButton(
+          tooltip: 'Copy public-key fingerprint',
+          onPressed: fingerprint == null
+              ? null
+              : () => _copyFingerprint(context, fingerprint),
+          icon: const Icon(Icons.copy_outlined),
+        ),
+        DeviceSetupStatus.failed => TextButton(
+          onPressed: controller.initialize,
+          child: const Text('Retry'),
+        ),
+      };
+      return Card(
+        child: ListTile(
+          leading: const Icon(Icons.devices_other_outlined),
+          title: const Text('This Windows device'),
+          subtitle: Text(subtitle),
+          trailing: trailing,
+          isThreeLine: controller.status == DeviceSetupStatus.ready,
+        ),
+      );
+    },
   );
 }
 

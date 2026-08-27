@@ -3,7 +3,7 @@
 HomeBox is a self-hosted, zero-knowledge file-storage service for a small family.
 Its security boundary is deliberate: clients encrypt file content and sensitive metadata before upload; the server stores only opaque identifiers, encrypted metadata/key envelopes, and ciphertext blobs. It never receives a File DEK, vault key, folder key, user master key, or recovery secret.
 
-This repository currently provides the security-first Go server foundation and a Windows/Android Flutter client foundation. The client includes the first protocol-v1 E2EE primitives; secure transport and end-to-end server integration remain roadmap milestones.
+This repository currently provides the security-first Go server foundation and a Windows 11 Flutter desktop client foundation. The client includes the first protocol-v1 E2EE primitives; secure transport and end-to-end server integration remain roadmap milestones. Android remains a later roadmap target, not the current client deliverable.
 
 ## Current capabilities
 
@@ -59,9 +59,9 @@ go build ./cmd/homebox
 
 ## Client foundation
 
-The Flutter client is in [client](client). It targets Android and Windows. The Windows UI provides the Files, Sync, and Settings sections, uses the native folder picker to select a local sync folder, and keeps the vault explicitly locked until trusted-device provisioning or Recovery Secret recovery. It does not transmit credentials or files until the secure transport and client E2EE milestones are implemented.
+The Flutter client is in [client](client) and currently targets Windows 11. Its desktop UI provides the Files, Sync, and Settings sections, uses the native Windows folder picker to select a local sync folder, and keeps the vault explicitly locked until trusted-device provisioning or Recovery Secret recovery. It does not transmit credentials or files until the secure transport and client E2EE milestones are implemented.
 
-The client E2EE core now defines protocol-v1 file headers and independently encrypts 4 MB chunks with XChaCha20-Poly1305. Each file version uses a random 256-bit File DEK and a 128-bit nonce prefix; the big-endian chunk number completes the 192-bit nonce. AAD binds the protocol version, opaque file-version ID, chunk number, and total chunk count. Fixed vectors and tamper tests protect the Windows/Android interoperability contract.
+The client E2EE core now defines protocol-v1 file headers and independently encrypts 4 MB chunks with XChaCha20-Poly1305. Each file version uses a random 256-bit File DEK and a 128-bit nonce prefix; the big-endian chunk number completes the 192-bit nonce. AAD binds the protocol version, opaque file-version ID, chunk number, and total chunk count. Fixed vectors and tamper tests protect the protocol contract.
 
 File DEKs and vault/provisioning keys are serialized only as versioned XChaCha20-Poly1305 envelopes. Envelope AAD binds the purpose, key version, vault/folder scope, and subject file/device ID, so the server cannot substitute an envelope into a different context. Temporary extracted key buffers are erased after wrapping or unwrapping.
 
@@ -69,7 +69,7 @@ Sensitive node metadata is also encrypted client-side. Protocol-v1 metadata enve
 
 Recovery uses a random 256-bit printable `HBXR1-...` Recovery Secret that is never uploaded. Clients derive a package key with Argon2id (19 MiB, two iterations), encrypt the User Master Key with XChaCha20-Poly1305, and bind the package to the account's opaque user ID. A server backup alone cannot restore plaintext; recovery requires this secret or an existing trusted device.
 
-Each installation creates an X25519 device identity. Its private key is stored only through OS secure storage: Windows Credential Manager-backed authenticated storage on Windows and Android Keystore-backed storage on Android. Android backup is disabled to prevent secure-storage ciphertext from being restored without its device-bound key. Corrupt key records fail closed instead of silently rotating the identity.
+The Windows Settings page checks device identity state without creating a key automatically. After explicit confirmation, it creates an X25519 identity whose private key is stored only through Windows Credential Manager-backed authenticated storage. The UI displays a copyable SHA-256 public-key fingerprint while keeping the vault locked until provisioning. Corrupt key records fail closed instead of silently rotating the identity.
 
 Trusted-device provisioning uses ephemeral X25519 and HKDF-SHA256 to derive a one-time wrapping key, then delivers the vault key in the existing XChaCha20-Poly1305 key-envelope format. The derivation and envelope bind the vault, recipient device, key version, ephemeral public key, and random salt. Login without a valid recipient-specific envelope leaves the vault locked.
 
@@ -77,10 +77,10 @@ Trusted-device provisioning uses ephemeral X25519 and HKDF-SHA256 to derive a on
 cd client
 flutter analyze
 flutter test
-flutter build apk --debug
+flutter build windows --debug
 ```
 
-The Android SDK was verified with `D:\usr\android-cli`. Windows builds additionally require Visual Studio with the **Desktop development with C++** workload.
+Windows builds require Visual Studio 2022 with the **Desktop development with C++** workload and the Windows 10/11 SDK.
 
 ## Security status
 
