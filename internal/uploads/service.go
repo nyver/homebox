@@ -16,15 +16,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/homebox/homebox/internal/apierror"
 )
 
 var (
-	ErrNotFound         = errors.New("upload session not found")
-	ErrForbidden        = errors.New("upload session does not belong to this device")
-	ErrInvalidState     = errors.New("upload session is not open")
-	ErrChunkConflict    = errors.New("chunk already exists with a different ciphertext digest")
-	ErrMissingChunks    = errors.New("upload has missing ciphertext chunks")
-	ErrRevisionConflict = errors.New("node revision conflict")
+	ErrNotFound          = errors.New("upload session not found")
+	ErrForbidden         = errors.New("upload session does not belong to this device")
+	ErrInvalidState      = errors.New("upload session is not open")
+	ErrChunkConflict     = errors.New("chunk already exists with a different ciphertext digest")
+	ErrMissingChunks     = errors.New("upload has missing ciphertext chunks")
+	ErrRevisionConflict  = errors.New("node revision conflict")
+	ErrTargetNodeMissing = errors.New("target file node not found")
 )
 
 type Service struct {
@@ -77,16 +79,16 @@ func New(db *sql.DB, storagePath string, maxCiphertextSize int64, abandonedAfter
 
 func (s *Service) Create(ctx context.Context, in CreateInput) (Session, error) {
 	if !validUUID(in.TargetNodeID) || !validUUID(in.FileVersionID) || !validUUID(in.BlobID) || in.ChunkCount < 1 || in.ChunkSize < 1 || in.ChunkSize > s.maxCiphertextSize {
-		return Session{}, errors.New("invalid opaque upload framing")
+		return Session{}, apierror.NewValidation("invalid opaque upload framing")
 	}
 	if len(in.WrappedFileKey) == 0 || len(in.E2EEHeader) == 0 || len(in.MetadataCiphertext) == 0 {
-		return Session{}, errors.New("encrypted metadata, wrapped file key, and E2EE header are required")
+		return Session{}, apierror.NewValidation("encrypted metadata, wrapped file key, and E2EE header are required")
 	}
 	if err := s.validateActorAndTarget(ctx, in.UserID, in.DeviceID, in.TargetNodeID); err != nil {
 		return Session{}, err
 	}
 	if int64(in.ChunkCount)*in.ChunkSize > s.maxCiphertextSize {
-		return Session{}, errors.New("ciphertext framing exceeds the configured file limit")
+		return Session{}, apierror.NewValidation("ciphertext framing exceeds the configured file limit")
 	}
 	now := s.now().UTC()
 	session := Session{ID: uuid.NewString(), BlobID: in.BlobID, FileVersionID: in.FileVersionID, Status: "OPEN", ChunkCount: in.ChunkCount, ExpiresAt: now.Add(s.abandonedAfter)}
@@ -108,7 +110,7 @@ func (s *Service) PutChunk(ctx context.Context, userID, deviceID, uploadID strin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !validUUID(uploadID) || chunkNo < 0 || len(ciphertext) == 0 || int64(len(ciphertext)) > s.maxCiphertextSize {
-		return errors.New("invalid ciphertext chunk")
+		return apierror.NewValidation("invalid ciphertext chunk")
 	}
 	session, err := s.sessionForDevice(ctx, userID, deviceID, uploadID)
 	if err != nil {
@@ -118,7 +120,7 @@ func (s *Service) PutChunk(ctx context.Context, userID, deviceID, uploadID strin
 		return ErrInvalidState
 	}
 	if chunkNo >= session.ChunkCount {
-		return errors.New("chunk number exceeds declared chunk count")
+		return apierror.NewValidation("chunk number exceeds declared chunk count")
 	}
 	digest := sha256.Sum256(ciphertext)
 	digestText := hex.EncodeToString(digest[:])
@@ -173,11 +175,48 @@ func (s *Service) Get(ctx context.Context, userID, deviceID, uploadID string) (S
 	return session.Session, rows.Err()
 }
 
+// Abort cancels an open upload session and deletes its temporary ciphertext
+// chunks. Aborting an already-completed or already-aborted session is a
+// no-op rather than an error, so a client retrying a DELETE after a network
+// blip doesn't need special-case handling.
+func (s *Service) Abort(ctx context.Context, userID, deviceID, uploadID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.sessionForDevice(ctx, userID, deviceID, uploadID)
+	if err != nil {
+		return err
+	}
+	if session.Status != "OPEN" {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE upload_sessions SET status='ABORTED' WHERE id=?", uploadID); err != nil {
+		return fmt.Errorf("abort upload session: %w", err)
+	}
+	return os.RemoveAll(s.uploadDir(uploadID))
+}
+
+// OpenBlob resolves a FileVersion to the absolute path of its immutable
+// ciphertext blob, for streaming on download (spec §23). Callers must
+// authorize access to the owning node themselves first (see
+// internal/nodes.Service.Get) — this performs no authorization of its own.
+func (s *Service) OpenBlob(ctx context.Context, fileVersionID string) (path string, size int64, err error) {
+	var relPath string
+	err = s.db.QueryRowContext(ctx, `SELECT b.storage_rel_path, b.ciphertext_size
+		FROM file_versions f JOIN blobs b ON b.id = f.blob_id WHERE f.id = ?`, fileVersionID).Scan(&relPath, &size)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, ErrNotFound
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	return filepath.Join(s.storagePath, filepath.FromSlash(relPath)), size, nil
+}
+
 func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInput) (CompleteResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !validUUID(uploadID) || !validUUID(in.OperationID) || in.KeyScopeID == "" || in.KeyVersion < 1 {
-		return CompleteResult{}, errors.New("invalid opaque completion request")
+		return CompleteResult{}, apierror.NewValidation("invalid opaque completion request")
 	}
 	session, err := s.sessionForDevice(ctx, in.UserID, in.DeviceID, uploadID)
 	if err != nil {
@@ -202,7 +241,7 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 		return CompleteResult{}, err
 	}
 	if totalSize > s.maxCiphertextSize {
-		return CompleteResult{}, errors.New("ciphertext exceeds configured file limit")
+		return CompleteResult{}, apierror.NewValidation("ciphertext exceeds configured file limit")
 	}
 	blobPath := filepath.Join(s.storagePath, "blobs", session.BlobID+".hbxblob")
 	digest, err := s.assembleCiphertext(blobPath, chunks)
@@ -230,7 +269,7 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 	var currentRevision int64
 	if err := tx.QueryRowContext(ctx, "SELECT owner_id,revision FROM nodes WHERE id=? AND node_type='FILE' AND deleted_at IS NULL", session.targetNodeID).Scan(&ownerID, &currentRevision); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return CompleteResult{}, errors.New("target file node not found")
+			return CompleteResult{}, ErrTargetNodeMissing
 		}
 		return CompleteResult{}, err
 	}
@@ -308,7 +347,7 @@ func (s *Service) validateActorAndTarget(ctx context.Context, userID, deviceID, 
 	var ownerID string
 	if err := s.db.QueryRowContext(ctx, "SELECT owner_id FROM nodes WHERE id=? AND node_type='FILE' AND deleted_at IS NULL", nodeID).Scan(&ownerID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return errors.New("target file node not found")
+			return ErrTargetNodeMissing
 		}
 		return err
 	}

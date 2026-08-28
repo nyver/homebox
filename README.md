@@ -13,7 +13,9 @@ This repository currently provides the security-first Go server foundation and a
 - **Secure Transport is closed (ADR-008/009):** the server terminates TLS 1.3 using a self-signed certificate derived from its identity key. There is no plaintext HTTP mode in any configuration. Clients trust the connection by pinning the identity fingerprint, not a certificate authority.
 - Argon2id password hashing, a first-admin bootstrap command, and a full authenticated session lifecycle: login, refresh-token rotation, logout, and device registration/revocation (`/api/v1/auth/*`, `/api/v1/devices*`). Login is timing-safe against username enumeration and rate-limited per username with exponential backoff.
 - Encrypted key-envelope delivery between a user's own trusted devices (`/api/v1/devices/{id}/key-envelope`) so a newly provisioned device can fetch the vault key an existing device wrapped for it. Cross-account sharing (Family Vault, §28) is a later milestone.
-- Ciphertext-only resumable upload domain service with opaque IDs, per-chunk SHA-256 storage checks, idempotent completion, atomic blob commit, and global sync revision creation. HTTP wiring for uploads/downloads/nodes/sync is a later milestone; the domain service itself is complete and tested.
+- Opaque node CRUD (create/rename/move/soft-delete/restore/Trash) with optimistic concurrency and idempotent mutation (`/api/v1/nodes*`, `/api/v1/trash`), and a paged, per-account sync revision feed (`/api/v1/sync/changes`).
+- Ciphertext-only resumable upload wired end to end: create/chunk/complete/abort over HTTP (`/api/v1/uploads*`) and streamed unmodified back on download (`/api/v1/files/{id}/content`), with opaque IDs, per-chunk SHA-256 storage checks, idempotent completion, and atomic blob commit.
+- A unified error-mapping layer (`internal/httpapi`'s `writeServiceError`) that only ever returns a raw error message to the client when a domain service explicitly marked it safe to show (`internal/apierror.Validation`) — every other failure logs server-side and returns a generic `INTERNAL_ERROR`, so a database/driver error can never leak through the API.
 - Health and metrics endpoints.
 
 ## Run the server foundation
@@ -36,6 +38,10 @@ Every endpoint, including health and metrics, is served over TLS — there is no
 - `GET /api/v1/users/me`
 - `GET /api/v1/devices`, `DELETE /api/v1/devices/{id}`
 - `POST` / `GET /api/v1/devices/{id}/key-envelope`
+- `POST /api/v1/nodes`, `GET /api/v1/nodes/{id}`, `GET /api/v1/nodes/children?parentId=`, `PATCH`/`DELETE /api/v1/nodes/{id}`, `POST /api/v1/nodes/{id}/restore`, `GET /api/v1/trash`
+- `GET /api/v1/sync/changes?after=&pageSize=`
+- `POST /api/v1/uploads`, `GET`/`DELETE /api/v1/uploads/{id}`, `PUT /api/v1/uploads/{id}/chunks/{chunkNo}`, `POST /api/v1/uploads/{id}/complete`
+- `GET /api/v1/files/{id}/content`
 
 The fingerprint must be verified out of band before a client trusts the server identity (ADR-009); a client must refuse to connect if the presented certificate resolves to a different fingerprint than the one it pinned. The certificate is self-signed but uses ECDSA P-256, which is broadly supported (Go, the Flutter client's bundled BoringSSL, OpenSSL, and Windows' own Schannel stack all complete the handshake), so ordinary tools like `curl.exe -k` work for manual poking as long as certificate verification is disabled — there is no CA behind this certificate on purpose.
 
@@ -91,4 +97,4 @@ Windows builds require Visual Studio 2022 with the **Desktop development with C+
 
 ## Security status
 
-Secure Transport is closed (ADR-008/009/020): TLS 1.3 with self-signed, fingerprint-pinned server identity, and an authenticated login/device/key-envelope API built on top of it. The full product is still not production-ready: node CRUD, the sync revision feed's HTTP layer, upload/download wiring, cross-account sharing (Family Vault), the Windows sync folder, the Android client, camera upload, and server backup/restore remain roadmap milestones. The server intentionally contains no file decryption implementation to preserve that boundary, and this document's own roadmap sections track exactly what is and isn't built yet.
+Secure Transport is closed (ADR-008/009/020): TLS 1.3 with self-signed, fingerprint-pinned server identity, and an authenticated login/device/key-envelope API built on top of it. A full opaque-node + ciphertext-upload/download round trip now works end to end over that transport (see `internal/httpapi/nodes_uploads_test.go` for the integration test proving it). The full product is still not production-ready: cross-account sharing (Family Vault), the Windows sync folder, the Android client, camera upload, server backup/restore, and maintenance/GC remain roadmap milestones, and the Flutter client does not yet drive any of the node/upload/download API from its UI. The server intentionally contains no file decryption implementation to preserve that boundary, and this document's own roadmap sections track exactly what is and isn't built yet.

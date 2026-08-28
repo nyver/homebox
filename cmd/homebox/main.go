@@ -18,9 +18,12 @@ import (
 	"github.com/homebox/homebox/internal/database"
 	"github.com/homebox/homebox/internal/httpapi"
 	"github.com/homebox/homebox/internal/httpserver"
+	"github.com/homebox/homebox/internal/nodes"
 	"github.com/homebox/homebox/internal/provisioning"
 	"github.com/homebox/homebox/internal/securetransport"
 	"github.com/homebox/homebox/internal/serveridentity"
+	syncpkg "github.com/homebox/homebox/internal/sync"
+	"github.com/homebox/homebox/internal/uploads"
 )
 
 func main() {
@@ -81,7 +84,13 @@ func serve(args []string) {
 
 	authService := auth.New(db, c.Limits.MaxUsers, c.AccessTokenTTL())
 	provisioningService := provisioning.New(db)
-	api := httpapi.New(authService, provisioningService)
+	nodesService := nodes.New(db)
+	syncService := syncpkg.New(db, c.Sync.PageSize, c.Sync.MaxPageSize)
+	uploadsService, err := uploads.New(db, c.Storage.Path, c.Limits.MaxCiphertextFileSize, time.Duration(c.Uploads.AbandonedAfterHours)*time.Hour)
+	if err != nil {
+		fatal("initialize upload storage: %v", err)
+	}
+	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService)
 	server := &http.Server{Addr: c.Address(), Handler: httpserver.New(api), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Printf("HomeBox listening on %s", c.Address())
 

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -18,9 +19,12 @@ import (
 	"github.com/homebox/homebox/internal/database"
 	"github.com/homebox/homebox/internal/httpapi"
 	"github.com/homebox/homebox/internal/httpserver"
+	"github.com/homebox/homebox/internal/nodes"
 	"github.com/homebox/homebox/internal/provisioning"
 	"github.com/homebox/homebox/internal/securetransport"
 	"github.com/homebox/homebox/internal/serveridentity"
+	homeboxsync "github.com/homebox/homebox/internal/sync"
+	"github.com/homebox/homebox/internal/uploads"
 )
 
 const testPassword = "correct horse battery staple 42"
@@ -47,7 +51,11 @@ func startTestServer(t *testing.T) testServer {
 	if _, err := authService.BootstrapAdmin(context.Background(), "admin", testPassword); err != nil {
 		t.Fatal(err)
 	}
-	api := httpapi.New(authService, provisioning.New(db))
+	uploadsService, err := uploads.New(db, dir, 105*1024*1024, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := httpapi.New(authService, provisioning.New(db), nodes.New(db), homeboxsync.New(db, 500, 2000), uploadsService)
 
 	rawListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -149,6 +157,49 @@ func (s testServer) do(t *testing.T, method, path string, body any, accessToken 
 		_ = json.NewDecoder(resp.Body).Decode(&parsed)
 	}
 	return resp, parsed
+}
+
+// get is a convenience wrapper for a GET request that returns a JSON object.
+func (s testServer) get(t *testing.T, path, accessToken string) (*http.Response, map[string]any) {
+	t.Helper()
+	return s.do(t, http.MethodGet, path, nil, accessToken)
+}
+
+// doRaw sends a request with a raw byte body (or nil) and returns the raw
+// response body unparsed — needed for binary chunk uploads/downloads and
+// for endpoints whose JSON response is a top-level array, which s.do's
+// map[string]any decode can't represent.
+func (s testServer) doRaw(t *testing.T, method, path string, body []byte, accessToken string) (*http.Response, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(method, s.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp, respBody
+}
+
+func decodeArray(t *testing.T, raw []byte) []map[string]any {
+	t.Helper()
+	var decoded []map[string]any
+	if len(raw) == 0 {
+		return decoded
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode JSON array: %v (body: %s)", err, raw)
+	}
+	return decoded
 }
 
 func loginDevice(t *testing.T, s testServer, username, deviceID string) map[string]any {

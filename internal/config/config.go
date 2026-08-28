@@ -60,6 +60,10 @@ type Config struct {
 	Uploads struct {
 		AbandonedAfterHours int `yaml:"abandoned_after_hours"`
 	} `yaml:"uploads"`
+	Sync struct {
+		PageSize    int `yaml:"page_size"`
+		MaxPageSize int `yaml:"max_page_size"`
+	} `yaml:"sync"`
 }
 
 func Defaults() Config {
@@ -79,6 +83,8 @@ func Defaults() Config {
 	c.Security.E2EE.Required = true
 	c.Security.E2EE.ProtocolVersion = 1
 	c.Uploads.AbandonedAfterHours = 24
+	c.Sync.PageSize = 500
+	c.Sync.MaxPageSize = 2000
 	return c
 }
 
@@ -136,6 +142,9 @@ func (c Config) Validate() error {
 	}
 	if c.Uploads.AbandonedAfterHours < 1 {
 		return errors.New("uploads.abandoned_after_hours must be positive")
+	}
+	if c.Sync.PageSize < 1 || c.Sync.MaxPageSize < c.Sync.PageSize {
+		return errors.New("sync.page_size must be positive and no larger than sync.max_page_size")
 	}
 	return nil
 }

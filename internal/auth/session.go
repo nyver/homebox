@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/homebox/homebox/internal/apierror"
 )
 
 // refreshTokenTTL is not operator-configurable: it only bounds how long a
@@ -436,19 +437,19 @@ func randomToken() (string, error) {
 
 func validateDeviceRegistration(d DeviceRegistration) error {
 	if _, err := uuid.Parse(d.ID); err != nil {
-		return errors.New("device id must be a valid UUID")
+		return apierror.NewValidation("device id must be a valid UUID")
 	}
 	if len(d.Name) == 0 || len(d.Name) > 128 {
-		return errors.New("device name must contain 1 to 128 characters")
+		return apierror.NewValidation("device name must contain 1 to 128 characters")
 	}
 	if d.Platform != "WINDOWS" && d.Platform != "ANDROID" && d.Platform != "OTHER" {
-		return errors.New("device platform must be WINDOWS, ANDROID, or OTHER")
+		return apierror.NewValidation("device platform must be WINDOWS, ANDROID, or OTHER")
 	}
 	if len(d.PublicKey) == 0 || len(d.PublicKey) > 4096 {
-		return errors.New("device public key is required")
+		return apierror.NewValidation("device public key is required")
 	}
 	if d.KeyVersion < 1 {
-		return errors.New("device key version must be at least 1")
+		return apierror.NewValidation("device key version must be at least 1")
 	}
 	return nil
 }

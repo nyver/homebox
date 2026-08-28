@@ -18,8 +18,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/homebox/homebox/internal/apierror"
 	"github.com/homebox/homebox/internal/auth"
+	"github.com/homebox/homebox/internal/nodes"
 	"github.com/homebox/homebox/internal/provisioning"
+	"github.com/homebox/homebox/internal/sync"
+	"github.com/homebox/homebox/internal/uploads"
 )
 
 // maxRequestBodyBytes is generous for JSON control-plane payloads. File
@@ -29,10 +33,13 @@ const maxRequestBodyBytes = 1 << 20
 type API struct {
 	auth         *auth.Service
 	provisioning *provisioning.Service
+	nodes        *nodes.Service
+	sync         *sync.Service
+	uploads      *uploads.Service
 }
 
-func New(authService *auth.Service, provisioningService *provisioning.Service) http.Handler {
-	api := &API{auth: authService, provisioning: provisioningService}
+func New(authService *auth.Service, provisioningService *provisioning.Service, nodesService *nodes.Service, syncService *sync.Service, uploadsService *uploads.Service) http.Handler {
+	api := &API{auth: authService, provisioning: provisioningService, nodes: nodesService, sync: syncService, uploads: uploadsService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", api.login)
 	mux.HandleFunc("POST /api/v1/auth/refresh", api.refresh)
@@ -42,6 +49,24 @@ func New(authService *auth.Service, provisioningService *provisioning.Service) h
 	mux.Handle("DELETE /api/v1/devices/{id}", api.authenticated(api.revokeDevice))
 	mux.Handle("POST /api/v1/devices/{id}/key-envelope", api.authenticated(api.uploadKeyEnvelope))
 	mux.Handle("GET /api/v1/devices/{id}/key-envelope", api.authenticated(api.downloadKeyEnvelope))
+
+	mux.Handle("POST /api/v1/nodes", api.authenticated(api.createNode))
+	mux.Handle("GET /api/v1/nodes/children", api.authenticated(api.listChildren))
+	mux.Handle("GET /api/v1/nodes/{id}", api.authenticated(api.getNode))
+	mux.Handle("PATCH /api/v1/nodes/{id}", api.authenticated(api.updateNode))
+	mux.Handle("DELETE /api/v1/nodes/{id}", api.authenticated(api.deleteNode))
+	mux.Handle("POST /api/v1/nodes/{id}/restore", api.authenticated(api.restoreNode))
+	mux.Handle("GET /api/v1/trash", api.authenticated(api.listTrash))
+
+	mux.Handle("GET /api/v1/sync/changes", api.authenticated(api.syncChanges))
+
+	mux.Handle("POST /api/v1/uploads", api.authenticated(api.createUpload))
+	mux.Handle("GET /api/v1/uploads/{id}", api.authenticated(api.getUpload))
+	mux.Handle("PUT /api/v1/uploads/{id}/chunks/{chunkNo}", api.authenticated(api.putUploadChunk))
+	mux.Handle("POST /api/v1/uploads/{id}/complete", api.authenticated(api.completeUpload))
+	mux.Handle("DELETE /api/v1/uploads/{id}", api.authenticated(api.abortUpload))
+
+	mux.Handle("GET /api/v1/files/{id}/content", api.authenticated(api.downloadFileContent))
 	return mux
 }
 
@@ -61,7 +86,7 @@ func (a *API) authenticated(next http.HandlerFunc) http.Handler {
 		}
 		userID, deviceID, err := a.auth.Authenticate(r.Context(), token)
 		if err != nil {
-			writeAuthError(w, err)
+			writeServiceError(w, err)
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxUserIDKey, userID)
@@ -129,7 +154,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		PublicKey: publicKey, KeyVersion: req.Device.KeyVersion,
 	})
 	if err != nil {
-		writeAuthError(w, err)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toSessionResponse(session))
@@ -146,7 +171,7 @@ func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := a.auth.Refresh(r.Context(), req.RefreshToken)
 	if err != nil {
-		writeAuthError(w, err)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toSessionResponse(session))
@@ -168,7 +193,7 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 func (a *API) getMe(w http.ResponseWriter, r *http.Request) {
 	user, err := a.auth.GetUser(r.Context(), requestUserID(r))
 	if err != nil {
-		writeAuthError(w, err)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": user.ID, "username": user.Username, "role": user.Role})
@@ -221,7 +246,7 @@ func (a *API) revokeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.auth.RevokeDevice(r.Context(), requestUserID(r), targetDeviceID); err != nil {
-		writeAuthError(w, err)
+		writeServiceError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -256,16 +281,16 @@ func (a *API) uploadKeyEnvelope(w http.ResponseWriter, r *http.Request) {
 	userID := requestUserID(r)
 	target, err := a.auth.GetDevice(r.Context(), userID, targetDeviceID)
 	if err != nil {
-		writeAuthError(w, err)
+		writeServiceError(w, err)
 		return
 	}
 	if target.RevokedAt != nil {
-		writeAuthError(w, auth.ErrDeviceRevoked)
+		writeServiceError(w, auth.ErrDeviceRevoked)
 		return
 	}
 	envelope, err := a.provisioning.Upload(r.Context(), req.VaultID, userID, targetDeviceID, req.KeyVersion, ciphertext)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": envelope.ID})
@@ -286,12 +311,7 @@ func (a *API) downloadKeyEnvelope(w http.ResponseWriter, r *http.Request) {
 	}
 	envelope, err := a.provisioning.Latest(r.Context(), targetDeviceID)
 	if err != nil {
-		if errors.Is(err, provisioning.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "no key envelope is available yet")
-			return
-		}
-		log.Printf("load key envelope: %v", err)
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load key envelope")
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -353,12 +373,19 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, body)
 }
 
-// writeAuthError maps the auth package's sentinel errors to the spec §18
-// error codes. The default branch is reached only by validation errors the
-// service itself constructs (never a wrapped internal/database error), so
-// surfacing err.Error() there does not leak sensitive detail.
-func writeAuthError(w http.ResponseWriter, err error) {
+// writeServiceError maps every domain service's sentinel errors to the spec
+// §18 error codes. An *apierror.Validation is always safe to show verbatim
+// (domain services only ever construct one for malformed input, checked
+// before any database access — see internal/apierror); anything else that
+// isn't a recognized sentinel is treated as an internal error, logged
+// server-side, and never shown to the client, so a raw database/driver
+// error message can never leak through this API.
+func writeServiceError(w http.ResponseWriter, err error) {
+	var validation *apierror.Validation
 	switch {
+	case errors.As(err, &validation):
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", validation.Message)
+
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		writeError(w, http.StatusUnauthorized, "AUTH_INVALID_CREDENTIALS", "invalid username or password")
 	case errors.Is(err, auth.ErrAccountDisabled):
@@ -373,7 +400,39 @@ func writeAuthError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "not found")
 	case errors.Is(err, auth.ErrRateLimited):
 		writeError(w, http.StatusTooManyRequests, "AUTH_RATE_LIMITED", "too many failed login attempts; try again shortly")
+
+	case errors.Is(err, nodes.ErrNotFound):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "node not found")
+	case errors.Is(err, nodes.ErrForbidden):
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "node does not belong to this account")
+	case errors.Is(err, nodes.ErrRevisionConflict):
+		writeError(w, http.StatusConflict, "REVISION_CONFLICT", "node revision conflict")
+	case errors.Is(err, nodes.ErrInvalidParent):
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "parent must be an existing, non-deleted directory owned by this account")
+
+	case errors.Is(err, uploads.ErrNotFound):
+		writeError(w, http.StatusNotFound, "UPLOAD_NOT_FOUND", "upload session not found")
+	case errors.Is(err, uploads.ErrForbidden):
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "upload session does not belong to this device")
+	case errors.Is(err, uploads.ErrInvalidState):
+		writeError(w, http.StatusConflict, "UPLOAD_EXPIRED", "upload session is not open")
+	case errors.Is(err, uploads.ErrChunkConflict):
+		writeError(w, http.StatusConflict, "UPLOAD_CHUNK_INVALID", "chunk already exists with a different ciphertext digest")
+	case errors.Is(err, uploads.ErrMissingChunks):
+		writeError(w, http.StatusBadRequest, "UPLOAD_CHUNK_INVALID", "upload has missing ciphertext chunks")
+	case errors.Is(err, uploads.ErrRevisionConflict):
+		writeError(w, http.StatusConflict, "REVISION_CONFLICT", "node revision conflict")
+	case errors.Is(err, uploads.ErrTargetNodeMissing):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "target file node not found")
+
+	case errors.Is(err, sync.ErrInvalidCursor):
+		writeError(w, http.StatusBadRequest, "SYNC_CURSOR_INVALID", "sync cursor is invalid")
+
+	case errors.Is(err, provisioning.ErrNotFound):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no key envelope is available yet")
+
 	default:
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		log.Printf("internal error: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "an internal error occurred")
 	}
 }

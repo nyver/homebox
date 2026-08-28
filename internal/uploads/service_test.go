@@ -92,6 +92,41 @@ func TestConflictingRetryCannotReplaceAcceptedChunk(t *testing.T) {
 	}
 }
 
+func TestAbortRemovesTempChunksAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	userID, deviceID, nodeID := seedFileNode(t, ctx, db)
+	s, err := New(db, dir, 100, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.Create(ctx, CreateInput{UserID: userID, DeviceID: deviceID, TargetNodeID: nodeID, FileVersionID: uuid.NewString(), BlobID: uuid.NewString(),
+		ChunkSize: 50, ChunkCount: 1, MetadataCiphertext: []byte("m"), WrappedFileKey: []byte("k"), E2EEHeader: []byte("h")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutChunk(ctx, userID, deviceID, session.ID, 0, []byte("chunk")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Abort(ctx, userID, deviceID, session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(s.uploadDir(session.ID)); !os.IsNotExist(err) {
+		t.Fatalf("expected the temp upload directory to be removed, stat err=%v", err)
+	}
+	if err := s.Abort(ctx, userID, deviceID, session.ID); err != nil {
+		t.Fatalf("aborting an already-aborted session should be a no-op: %v", err)
+	}
+	if err := s.PutChunk(ctx, userID, deviceID, session.ID, 0, []byte("chunk")); err != ErrInvalidState {
+		t.Fatalf("putting a chunk after abort: error=%v, want %v", err, ErrInvalidState)
+	}
+}
+
 func seedFileNode(t *testing.T, ctx context.Context, db *sql.DB) (string, string, string) {
 	t.Helper()
 	userID, deviceID, nodeID := uuid.NewString(), uuid.NewString(), uuid.NewString()

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/homebox/homebox/internal/apierror"
 )
 
 var ErrNotFound = errors.New("no key envelope found for this device")
@@ -40,10 +41,10 @@ func New(db *sql.DB) *Service { return &Service{db: db, now: time.Now} }
 // cryptographic authorization).
 func (s *Service) Upload(ctx context.Context, vaultID, targetUserID, targetDeviceID string, keyVersion int, ciphertext []byte) (Envelope, error) {
 	if vaultID == "" || targetUserID == "" || targetDeviceID == "" || keyVersion < 1 {
-		return Envelope{}, errors.New("vault id, target user id, target device id, and key version are required")
+		return Envelope{}, apierror.NewValidation("vault id, target user id, target device id, and key version are required")
 	}
 	if len(ciphertext) == 0 || len(ciphertext) > 1<<20 {
-		return Envelope{}, errors.New("envelope ciphertext is required and must be reasonably sized")
+		return Envelope{}, apierror.NewValidation("envelope ciphertext is required and must be reasonably sized")
 	}
 	e := Envelope{
 		ID: uuid.NewString(), VaultID: vaultID, TargetUserID: targetUserID, TargetDeviceID: targetDeviceID,
