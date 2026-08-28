@@ -487,6 +487,17 @@ final class _FilesSection extends StatelessWidget {
     }
   }
 
+  Future<void> _replaceContent(BuildContext context, FileEntry entry) async {
+    final controller = this.controller;
+    if (controller == null) return;
+    final file = await openFile();
+    if (file == null) return;
+    final ok = await controller.replaceFileContent(entry, file.path);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not replace the file.')));
+    }
+  }
+
   Future<void> _renameEntry(BuildContext context, FileEntry entry) async {
     final controller = this.controller;
     if (controller == null) return;
@@ -576,13 +587,15 @@ final class _FilesSection extends StatelessWidget {
               trailing: PopupMenuButton<String>(
                 tooltip: 'More actions',
                 onSelected: (value) => switch (value) {
+                  'replace' => _replaceContent(context, entry),
                   'rename' => _renameEntry(context, entry),
                   'delete' => _deleteEntry(context, entry),
                   _ => null,
                 },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'rename', child: Text('Rename')),
-                  PopupMenuItem(value: 'delete', child: Text('Move to trash')),
+                itemBuilder: (context) => [
+                  if (!entry.isDirectory) const PopupMenuItem(value: 'replace', child: Text('Replace content…')),
+                  const PopupMenuItem(value: 'rename', child: Text('Rename')),
+                  const PopupMenuItem(value: 'delete', child: Text('Move to trash')),
                 ],
               ),
             );

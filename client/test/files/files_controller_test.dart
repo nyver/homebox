@@ -32,7 +32,7 @@ final class _FakeServer {
   final Map<String, Map<String, dynamic>> _nodes = {};
   final Map<String, List<Uint8List>> _uploadChunks = {};
   final Map<String, Map<String, dynamic>> _uploadSessions = {};
-  final Map<String, Map<String, dynamic>> _fileVersions = {}; // by nodeId
+  final Map<String, List<Map<String, dynamic>>> _fileVersions = {}; // by nodeId, newest first
   final Map<String, Uint8List> _blobs = {}; // by nodeId
 
   Future<HttpServer> start() => startFixtureServer(_handle);
@@ -144,31 +144,39 @@ final class _FakeServer {
       await request.response.close();
     } else if (method == 'POST' && path.endsWith('/complete')) {
       final uploadId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
       final session = _uploadSessions[uploadId]!;
       final nodeId = session['targetNodeId'] as String;
+      final node = _nodes[nodeId]!;
+      if (node['revision'] != body['expectedRevision']) {
+        _writeJson(request, 409, {
+          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+        });
+        return;
+      }
       final fileVersionId = session['fileVersionId'] as String;
       final blobBuilder = BytesBuilder(copy: false);
       for (final chunk in _uploadChunks[uploadId]!) {
         blobBuilder.add(chunk);
       }
       _blobs[nodeId] = blobBuilder.takeBytes();
-      _fileVersions[nodeId] = {
+      final newRevision = (node['revision'] as int) + 1;
+      _fileVersions.putIfAbsent(nodeId, () => []).insert(0, {
         'id': fileVersionId,
         'blobId': session['blobId'],
         'e2eeHeader': session['e2eeHeader'],
         'wrappedFileKey': session['wrappedFileKey'],
         'keyScopeId': 'scope',
         'keyVersion': 1,
-        'revision': 2,
+        'revision': newRevision,
         'chunkCount': session['chunkCount'],
-      };
-      _nodes[nodeId]!['currentVersionId'] = fileVersionId;
-      _nodes[nodeId]!['revision'] = 2;
-      _writeJson(request, 200, {'blobId': session['blobId'], 'fileVersionId': fileVersionId, 'revision': 2});
+      });
+      node['currentVersionId'] = fileVersionId;
+      node['revision'] = newRevision;
+      _writeJson(request, 200, {'blobId': session['blobId'], 'fileVersionId': fileVersionId, 'revision': newRevision});
     } else if (method == 'GET' && path.endsWith('/versions')) {
       final nodeId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
-      final version = _fileVersions[nodeId];
-      _writeJson(request, 200, version == null ? <dynamic>[] : [version]);
+      _writeJson(request, 200, _fileVersions[nodeId] ?? <dynamic>[]);
     } else if (method == 'GET' && path.endsWith('/content')) {
       final nodeId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
       final blob = _blobs[nodeId];
@@ -303,6 +311,41 @@ void main() {
     expect(await controller.downloadFile(uploaded, destinationPath), isTrue, reason: controller.errorMessage);
     final downloadedBytes = await File(destinationPath).readAsBytes();
     expect(downloadedBytes, originalBytes);
+  });
+
+  test('replaceFileContent adds a new version without creating a new node, and download fetches the latest', () async {
+    final fakeServer = _FakeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(userId: _FakeServer.userId);
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    addTearDown(controller.dispose);
+
+    final tempDir = await Directory.systemTemp.createTemp('homebox_files_test_');
+    addTearDown(() => tempDir.delete(recursive: true));
+    final sourceFile = File('${tempDir.path}/note.txt');
+    await sourceFile.writeAsBytes(utf8.encode('version one'));
+    expect(await controller.uploadFile(sourceFile.path), isTrue, reason: controller.errorMessage);
+    final firstVersion = controller.entries.single;
+    final revisionAfterFirstUpload = firstVersion.node.revision;
+
+    await sourceFile.writeAsBytes(utf8.encode('version two, replacing the first'));
+    expect(await controller.replaceFileContent(firstVersion, sourceFile.path), isTrue, reason: controller.errorMessage);
+    expect(controller.entries, hasLength(1), reason: 'no new node should have been created');
+    final secondVersion = controller.entries.single;
+    expect(secondVersion.node.id, firstVersion.node.id);
+    expect(secondVersion.node.revision, greaterThan(revisionAfterFirstUpload));
+    expect(fakeServer._fileVersions[firstVersion.node.id], hasLength(2), reason: 'the earlier version must remain retrievable');
+
+    final destinationPath = '${tempDir.path}/downloaded.txt';
+    expect(await controller.downloadFile(secondVersion, destinationPath), isTrue, reason: controller.errorMessage);
+    expect(await File(destinationPath).readAsString(), 'version two, replacing the first');
   });
 
   test('renameNode and deleteNode apply locally right away and reach the server through the outbox', () async {

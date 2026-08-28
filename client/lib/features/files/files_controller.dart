@@ -10,8 +10,6 @@ import 'package:crypto/crypto.dart' show sha256;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 
-import '../../core/e2ee/file_cipher.dart';
-import '../../core/e2ee/key_envelope.dart';
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
@@ -80,8 +78,6 @@ final class FilesController extends ChangeNotifier {
   final VaultKeyStore _vaultKeyStore;
   final SyncEngine _syncEngine;
   final MetadataCipher _metadataCipher = MetadataCipher();
-  final E2eeFileCipher _fileCipher = E2eeFileCipher();
-  final KeyEnvelopeCipher _keyEnvelopeCipher = KeyEnvelopeCipher();
 
   FilesStatus _status = FilesStatus.idle;
   String? _errorMessage;
@@ -337,10 +333,7 @@ final class FilesController extends ChangeNotifier {
       final plaintextHash = sha256.convert(bytes).toString();
 
       final nodeId = generateUuidV4();
-      final fileVersionId = generateUuidV4();
-      final blobId = generateUuidV4();
       final nodeIdBytes = uuidStringToBytes(nodeId);
-      final fileVersionIdBytes = uuidStringToBytes(fileVersionId);
 
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(fileName: fileName, plaintextSha256: plaintextHash),
@@ -350,6 +343,7 @@ final class FilesController extends ChangeNotifier {
         scopeId: ctx.vaultId,
         nodeId: nodeIdBytes,
       );
+      final metadataCiphertext = metadataEnvelope.encode();
 
       final createdNode = await ctx.api.createNode(
         ctx.accessToken,
@@ -357,65 +351,103 @@ final class FilesController extends ChangeNotifier {
         operationId: generateUuidV4(),
         parentId: _currentParentId,
         nodeType: 'FILE',
-        metadataCiphertext: metadataEnvelope.encode(),
+        metadataCiphertext: metadataCiphertext,
         metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
       );
       _upsertFromServer(createdNode);
 
-      final fileKey = await _fileCipher.newFileKey();
-      final header = _fileCipher.newHeader();
-      final totalChunks = bytes.isEmpty ? 1 : (bytes.length / homeBoxPlaintextChunkSize).ceil();
-      final frames = <Uint8List>[];
-      for (var i = 0; i < totalChunks; i++) {
-        final start = i * homeBoxPlaintextChunkSize;
-        final end = start + homeBoxPlaintextChunkSize < bytes.length ? start + homeBoxPlaintextChunkSize : bytes.length;
-        final frame = await _fileCipher.encryptChunk(
-          plaintext: Uint8List.sublistView(bytes, start, end),
-          fileKey: fileKey,
-          header: header,
-          fileVersionId: fileVersionIdBytes,
-          chunkNumber: i,
-          totalChunks: totalChunks,
-        );
-        frames.add(frame);
-        _setProgress((i + 1) / (totalChunks * 2));
-      }
-
-      final wrappedFileKey = await _keyEnvelopeCipher.wrapKey(
-        wrappingKey: ctx.vaultKey,
-        keyToWrap: fileKey,
-        purpose: KeyEnvelopePurpose.fileKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
-        scopeId: ctx.vaultId,
-        subjectId: fileVersionIdBytes,
-      );
-
-      final uploadSession = await ctx.api.createUpload(
-        ctx.accessToken,
-        targetNodeId: nodeId,
-        fileVersionId: fileVersionId,
-        blobId: blobId,
-        chunkSize: homeBoxPlaintextChunkSize + homeBoxChunkMacLength,
-        chunkCount: totalChunks,
-        metadataCiphertext: metadataEnvelope.encode(),
-        wrappedFileKey: wrappedFileKey.encode(),
-        e2eeHeader: header.encode(),
-      );
-
-      for (var i = 0; i < totalChunks; i++) {
-        await ctx.api.putUploadChunk(ctx.accessToken, uploadSession.id, i, frames[i]);
-        _setProgress(0.5 + (i + 1) / (totalChunks * 2));
-      }
-
-      await ctx.api.completeUpload(
-        ctx.accessToken,
-        uploadSession.id,
-        operationId: generateUuidV4(),
+      final updatedNode = await uploadFileVersion(
+        api: ctx.api,
+        accessToken: ctx.accessToken,
+        vaultKey: ctx.vaultKey,
+        vaultId: ctx.vaultId,
         keyScopeId: ctx.userId,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
+        targetNodeId: nodeId,
         expectedRevision: createdNode.revision,
+        bytes: bytes,
+        metadataCiphertext: metadataCiphertext,
+        onProgress: _setProgress,
       );
-      _upsertFromServer(await ctx.api.getNode(ctx.accessToken, nodeId));
+      _upsertFromServer(updatedNode);
+
+      await refresh();
+      return true;
+    } catch (e) {
+      // Broad on purpose: StateError/ArgumentError (thrown by this class's
+      // own checks) do not extend Exception, so `on Exception` would miss
+      // them and crash instead of surfacing errorMessage.
+      _errorMessage = '$e';
+      notifyListeners();
+      return false;
+    } finally {
+      _setBusy(false);
+    }
+  }
+
+  /// Uploads [localPath] as a new version of an already-existing file
+  /// [entry] (spec §22, versioned): unlike [uploadFile], no new node is
+  /// created — the current version and revision are simply advanced, and
+  /// every earlier version remains retrievable through the node's version
+  /// history. Fails with a clear error (surfaced via [errorMessage]) if the
+  /// node was concurrently modified elsewhere (`REVISION_CONFLICT`), rather
+  /// than silently overwriting someone else's change.
+  ///
+  /// This is two separate server mutations (upload-complete, then a
+  /// metadata update carrying over the new plaintext hash — see below), not
+  /// one atomic step. If another device's mutation lands in the narrow
+  /// window between them, the second call can itself hit
+  /// `REVISION_CONFLICT`; the upload has still succeeded at that point, but
+  /// the node's recorded hash is left pointing at the *previous* content
+  /// until this is retried (downloads would fail integrity verification in
+  /// the meantime). Rare in practice at this app's scale, and the error is
+  /// surfaced rather than silently dropped, but a real fix would need a
+  /// combined upload+metadata endpoint server-side.
+  Future<bool> replaceFileContent(FileEntry entry, String localPath) async {
+    if (entry.isDirectory) return false;
+    final ctx = await _requireContext();
+    if (ctx == null) return false;
+    _setBusy(true);
+    try {
+      final bytes = await File(localPath).readAsBytes();
+      if (bytes.length > 100 * 1024 * 1024) {
+        throw const FormatException('HomeBox files are limited to 100 MB.');
+      }
+      final plaintextHash = sha256.convert(bytes).toString();
+      final metadataEnvelope = await _metadataCipher.encrypt(
+        metadata: SensitiveNodeMetadata(fileName: entry.name, plaintextSha256: plaintextHash),
+        metadataKey: ctx.vaultKey,
+        keyVersion: homeBoxPersonalVaultKeyVersion,
+        nodeType: MetadataNodeType.file,
+        scopeId: ctx.vaultId,
+        nodeId: uuidStringToBytes(entry.node.id),
+      );
+      final metadataCiphertext = metadataEnvelope.encode();
+
+      final uploadedNode = await uploadFileVersion(
+        api: ctx.api,
+        accessToken: ctx.accessToken,
+        vaultKey: ctx.vaultKey,
+        vaultId: ctx.vaultId,
+        keyScopeId: ctx.userId,
+        targetNodeId: entry.node.id,
+        expectedRevision: entry.node.revision,
+        bytes: bytes,
+        metadataCiphertext: metadataCiphertext,
+        onProgress: _setProgress,
+      );
+      // Completing an upload only advances the node's current version and
+      // revision (spec §22) — it does not, by itself, update the node's own
+      // encrypted metadata, so the new plaintext hash would otherwise never
+      // reach it. A second, explicit metadata update carries that over.
+      final updatedNode = await ctx.api.updateNode(
+        ctx.accessToken,
+        entry.node.id,
+        operationId: generateUuidV4(),
+        expectedRevision: uploadedNode.revision,
+        metadataCiphertext: metadataCiphertext,
+        metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+      );
+      _upsertFromServer(updatedNode);
 
       await refresh();
       return true;
