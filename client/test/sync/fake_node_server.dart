@@ -17,7 +17,7 @@ final class FakeNodeServer {
   final List<Map<String, dynamic>> _changes = [];
   final Map<String, Map<String, dynamic>> _uploadSessions = {};
   final Map<String, List<Uint8List>> _uploadChunks = {};
-  final Map<String, Map<String, dynamic>> _fileVersions = {}; // by nodeId
+  final Map<String, List<Map<String, dynamic>>> _fileVersions = {}; // by nodeId, newest first
   final Map<String, Uint8List> _blobs = {}; // by nodeId
   int _revision = 0;
 
@@ -164,34 +164,41 @@ final class FakeNodeServer {
     }
     if (method == 'POST' && path.endsWith('/complete')) {
       final uploadId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
       final session = _uploadSessions[uploadId]!;
       final nodeId = session['targetNodeId'] as String;
+      final node = _nodes[nodeId]!;
+      if (node['revision'] != body['expectedRevision']) {
+        _writeJson(request, 409, {
+          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+        });
+        return;
+      }
       final fileVersionId = session['fileVersionId'] as String;
       final blobBuilder = BytesBuilder(copy: false);
       for (final chunk in _uploadChunks[uploadId]!) {
         blobBuilder.add(chunk);
       }
       _blobs[nodeId] = blobBuilder.takeBytes();
-      _fileVersions[nodeId] = {
+      final newRevision = _recordChange(nodeId, 'UPDATE');
+      _fileVersions.putIfAbsent(nodeId, () => []).insert(0, {
         'id': fileVersionId,
         'blobId': session['blobId'],
         'e2eeHeader': session['e2eeHeader'],
         'wrappedFileKey': session['wrappedFileKey'],
         'keyScopeId': 'scope',
         'keyVersion': 1,
-        'revision': _recordChange(nodeId, 'UPDATE'),
+        'revision': newRevision,
         'chunkCount': session['chunkCount'],
-      };
-      final node = _nodes[nodeId]!;
+      });
       node['currentVersionId'] = fileVersionId;
-      node['revision'] = _fileVersions[nodeId]!['revision'];
-      _writeJson(request, 200, {'blobId': session['blobId'], 'fileVersionId': fileVersionId, 'revision': node['revision']});
+      node['revision'] = newRevision;
+      _writeJson(request, 200, {'blobId': session['blobId'], 'fileVersionId': fileVersionId, 'revision': newRevision});
       return;
     }
     if (method == 'GET' && path.endsWith('/versions')) {
       final nodeId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
-      final version = _fileVersions[nodeId];
-      _writeJson(request, 200, version == null ? <dynamic>[] : [version]);
+      _writeJson(request, 200, _fileVersions[nodeId] ?? <dynamic>[]);
       return;
     }
     if (method == 'GET' && path.endsWith('/content')) {

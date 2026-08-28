@@ -2,6 +2,8 @@ import 'dart:typed_data';
 
 import 'package:sqlite3/sqlite3.dart';
 
+import '../transport/homebox_api_client.dart' as transport;
+
 /// The local, offline-available mirror of one server node row. Metadata
 /// stays ciphertext here too — this cache exists so the Files page can
 /// render instantly and work briefly offline, not to weaken the E2EE
@@ -41,6 +43,25 @@ final class LocalNode {
   bool get isDeleted => deletedAt != null;
   bool get isDirectory => nodeType == 'DIRECTORY';
 }
+
+/// Converts a server-confirmed node into its local-cache representation.
+/// Shared by every call site that upserts a fetched/created/updated node
+/// into [NodeCache] (`SyncEngine`, `FilesController`, and the local
+/// sync-folder uploader), so they can never drift into copying different
+/// subsets of fields.
+LocalNode localNodeFromServerNode(transport.NodeInfo node, {bool pendingCreate = false}) => LocalNode(
+      id: node.id,
+      parentId: node.parentId,
+      nodeType: node.nodeType,
+      metadataCiphertext: node.metadataCiphertext,
+      metadataKeyVersion: node.metadataKeyVersion,
+      currentVersionId: node.currentVersionId,
+      revision: node.revision,
+      createdAt: node.createdAt,
+      updatedAt: node.updatedAt,
+      deletedAt: node.deletedAt,
+      pendingCreate: pendingCreate,
+    );
 
 /// CRUD for the local `nodes` cache table (spec §13). Every method is
 /// synchronous: `package:sqlite3` is a synchronous FFI binding, and these

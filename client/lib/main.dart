@@ -11,6 +11,7 @@ import 'features/device/device_setup_controller.dart';
 import 'features/files/files_controller.dart';
 import 'features/server/server_connection_controller.dart';
 import 'features/sync/sync_engine.dart';
+import 'features/syncfolder/local_folder_uploader.dart';
 import 'features/syncfolder/sync_folder_materializer.dart';
 import 'features/syncfolder/sync_folder_store.dart';
 import 'features/vault/vault_setup_controller.dart';
@@ -81,9 +82,12 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   SyncEngine? _syncEngine;
   FilesController? _filesController;
   SyncFolderMaterializer? _syncFolderMaterializer;
+  LocalFolderUploader? _localFolderUploader;
   String? _syncEngineFingerprint;
   bool _rebuildingSyncEngine = false;
   bool _pendingRebuildFingerprint = false;
+  bool _syncFolderPassRunning = false;
+  bool _pendingSyncFolderPass = false;
   AppSection _section = AppSection.files;
   String? _syncFolder;
   bool _selectingFolder = false;
@@ -118,7 +122,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     final saved = await _syncFolderStore.load();
     if (!mounted || saved == null) return;
     setState(() => _syncFolder = saved);
-    _maybeMaterializeSyncFolder();
+    unawaited(_runSyncFolderPass());
   }
 
   void _onServerConnectionChanged() {
@@ -147,19 +151,23 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       final oldFiles = _filesController;
       final oldEngine = _syncEngine;
       final oldMaterializer = _syncFolderMaterializer;
+      final oldUploader = _localFolderUploader;
       if (mounted) {
         setState(() {
           _filesController = null;
           _syncEngine = null;
           _syncFolderMaterializer = null;
+          _localFolderUploader = null;
         });
       } else {
         _filesController = null;
         _syncEngine = null;
         _syncFolderMaterializer = null;
+        _localFolderUploader = null;
       }
       oldFiles?.dispose();
       oldMaterializer?.dispose();
+      oldUploader?.dispose();
       oldEngine?.dispose(); // also closes its LocalDatabase.
       _syncEngineFingerprint = fingerprint;
       if (fingerprint != null) {
@@ -175,9 +183,15 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
           vaultKeyStore: _vaultKeyStore,
           syncEngine: engine,
         );
+        final uploader = LocalFolderUploader(
+          serverConnection: _serverConnectionController,
+          vaultKeyStore: _vaultKeyStore,
+          syncEngine: engine,
+        );
         if (!mounted) {
           files.dispose();
           materializer.dispose();
+          uploader.dispose();
           engine.dispose();
           return;
         }
@@ -185,11 +199,12 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
           _syncEngine = engine;
           _filesController = files;
           _syncFolderMaterializer = materializer;
+          _localFolderUploader = uploader;
         });
         engine.addListener(_onSyncEngineSettled);
         engine.start();
         _maybeRefreshFiles();
-        _maybeMaterializeSyncFolder();
+        unawaited(_runSyncFolderPass());
       }
     } finally {
       _rebuildingSyncEngine = false;
@@ -213,14 +228,35 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   /// changes made from another device show up on disk without the user
   /// having to reselect the folder.
   void _onSyncEngineSettled() {
-    if (_syncEngine?.status == SyncStatus.idle) _maybeMaterializeSyncFolder();
+    if (_syncEngine?.status == SyncStatus.idle) unawaited(_runSyncFolderPass());
   }
 
-  void _maybeMaterializeSyncFolder() {
+  /// Downloads pulled changes to disk, then uploads local edits — always in
+  /// that order, and never overlapping with another call to this method,
+  /// since [LocalFolderUploader] relies on every pull having already been
+  /// fully materialized to tell "not downloaded yet" apart from "the user
+  /// deleted this" (see its class doc comment). A call that arrives while
+  /// one is already running is not dropped: it is coalesced into a single
+  /// follow-up pass once the current one finishes.
+  Future<void> _runSyncFolderPass() async {
     final folder = _syncFolder;
     final materializer = _syncFolderMaterializer;
-    if (folder != null && materializer != null) {
-      unawaited(materializer.materialize(folder));
+    final uploader = _localFolderUploader;
+    if (folder == null || materializer == null || uploader == null) return;
+    if (_syncFolderPassRunning) {
+      _pendingSyncFolderPass = true;
+      return;
+    }
+    _syncFolderPassRunning = true;
+    try {
+      await materializer.materialize(folder);
+      await uploader.scan(folder);
+    } finally {
+      _syncFolderPassRunning = false;
+    }
+    if (_pendingSyncFolderPass) {
+      _pendingSyncFolderPass = false;
+      await _runSyncFolderPass();
     }
   }
 
@@ -230,6 +266,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _vaultSetupController.removeListener(_maybeRefreshFiles);
     _filesController?.dispose();
     _syncFolderMaterializer?.dispose();
+    _localFolderUploader?.dispose();
     _syncEngine?.dispose();
     _vaultSetupController.dispose();
     _deviceSetupController.dispose();
@@ -246,7 +283,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       if (!mounted || folder == null) return;
       setState(() => _syncFolder = folder);
       await _syncFolderStore.save(folder);
-      _maybeMaterializeSyncFolder();
+      unawaited(_runSyncFolderPass());
     } on Exception {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -274,6 +311,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       filesController: _filesController,
       syncEngine: _syncEngine,
       syncFolderMaterializer: _syncFolderMaterializer,
+      localFolderUploader: _localFolderUploader,
     );
     if (!wideLayout) {
       return Scaffold(
@@ -401,6 +439,7 @@ class _SectionContent extends StatelessWidget {
     required this.filesController,
     required this.syncEngine,
     required this.syncFolderMaterializer,
+    required this.localFolderUploader,
   });
 
   final AppSection section;
@@ -413,6 +452,7 @@ class _SectionContent extends StatelessWidget {
   final FilesController? filesController;
   final SyncEngine? syncEngine;
   final SyncFolderMaterializer? syncFolderMaterializer;
+  final LocalFolderUploader? localFolderUploader;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -422,6 +462,7 @@ class _SectionContent extends StatelessWidget {
       onSelectSyncFolder: onSelectSyncFolder,
       syncEngine: syncEngine,
       syncFolderMaterializer: syncFolderMaterializer,
+      localFolderUploader: localFolderUploader,
     ),
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
@@ -672,11 +713,13 @@ class _SyncSection extends StatelessWidget {
     required this.onSelectSyncFolder,
     required this.syncEngine,
     required this.syncFolderMaterializer,
+    required this.localFolderUploader,
   });
   final String? syncFolder;
   final Future<void> Function() onSelectSyncFolder;
   final SyncEngine? syncEngine;
   final SyncFolderMaterializer? syncFolderMaterializer;
+  final LocalFolderUploader? localFolderUploader;
 
   @override
   Widget build(BuildContext context) {
@@ -725,7 +768,7 @@ class _SyncSection extends StatelessWidget {
               subtitle: Text(
                 syncFolder == null
                     ? 'Not selected — files stay reachable only through the Files page.'
-                    : '$syncFolder\nMirrors the vault to disk; files added here are not yet uploaded automatically.',
+                    : '$syncFolder\nFiles added or edited inside an existing folder here are uploaded automatically; new subfolders are not yet picked up.',
               ),
               isThreeLine: syncFolder != null,
               trailing: TextButton(
@@ -750,6 +793,27 @@ class _SyncSection extends StatelessWidget {
                     title: Text(label),
                     subtitle: materializer.status == SyncFolderStatus.error && materializer.errorMessage != null
                         ? Text(materializer.errorMessage!)
+                        : null,
+                  ),
+                );
+              },
+            ),
+          if (syncFolder != null && localFolderUploader != null)
+            AnimatedBuilder(
+              animation: localFolderUploader!,
+              builder: (context, _) {
+                final uploader = localFolderUploader!;
+                final (icon, label) = switch (uploader.status) {
+                  LocalUploadStatus.idle => (Icons.check_circle_outline, 'No local changes pending'),
+                  LocalUploadStatus.scanning => (Icons.upload_outlined, 'Uploading local changes…'),
+                  LocalUploadStatus.error => (Icons.error_outline, 'Could not upload local changes'),
+                };
+                return Card(
+                  child: ListTile(
+                    leading: Icon(icon),
+                    title: Text(label),
+                    subtitle: uploader.status == LocalUploadStatus.error && uploader.errorMessage != null
+                        ? Text(uploader.errorMessage!)
                         : null,
                   ),
                 );

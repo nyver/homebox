@@ -217,7 +217,7 @@ final class SyncEngine extends ChangeNotifier {
   }) async {
     try {
       final node = await api.getNode(accessToken, nodeId);
-      nodeCache.upsert(_toLocalNode(node));
+      nodeCache.upsert(localNodeFromServerNode(node));
     } on transport.HomeBoxApiException catch (e) {
       if (allowMissing && (e.code == 'NOT_FOUND' || e.code == 'FORBIDDEN')) {
         nodeCache.remove(nodeId);
@@ -226,20 +226,6 @@ final class SyncEngine extends ChangeNotifier {
       rethrow;
     }
   }
-
-  LocalNode _toLocalNode(transport.NodeInfo node) => LocalNode(
-        id: node.id,
-        parentId: node.parentId,
-        nodeType: node.nodeType,
-        metadataCiphertext: node.metadataCiphertext,
-        metadataKeyVersion: node.metadataKeyVersion,
-        currentVersionId: node.currentVersionId,
-        revision: node.revision,
-        createdAt: node.createdAt,
-        updatedAt: node.updatedAt,
-        deletedAt: node.deletedAt,
-        pendingCreate: false,
-      );
 
   void _setStatus(SyncStatus status) {
     _status = status;

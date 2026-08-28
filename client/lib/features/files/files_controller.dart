@@ -498,19 +498,7 @@ final class FilesController extends ChangeNotifier {
   }
 
   void _upsertFromServer(transport.NodeInfo node) {
-    _syncEngine.nodeCache.upsert(LocalNode(
-      id: node.id,
-      parentId: node.parentId,
-      nodeType: node.nodeType,
-      metadataCiphertext: node.metadataCiphertext,
-      metadataKeyVersion: node.metadataKeyVersion,
-      currentVersionId: node.currentVersionId,
-      revision: node.revision,
-      createdAt: node.createdAt,
-      updatedAt: node.updatedAt,
-      deletedAt: node.deletedAt,
-      pendingCreate: false,
-    ));
+    _syncEngine.nodeCache.upsert(localNodeFromServerNode(node));
   }
 
   Future<SensitiveNodeMetadata> _decryptMetadata(LocalNode node, _UploadContext ctx) {
