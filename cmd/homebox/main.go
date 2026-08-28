@@ -20,6 +20,7 @@ import (
 	"github.com/homebox/homebox/internal/database"
 	"github.com/homebox/homebox/internal/httpapi"
 	"github.com/homebox/homebox/internal/httpserver"
+	"github.com/homebox/homebox/internal/maintenance"
 	"github.com/homebox/homebox/internal/nodes"
 	"github.com/homebox/homebox/internal/provisioning"
 	"github.com/homebox/homebox/internal/securetransport"
@@ -30,7 +31,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: homebox <server|fingerprint|bootstrap-admin|backup|restore> [options]")
+		fatal("usage: homebox <server|fingerprint|bootstrap-admin|backup|restore|maintenance> [options]")
 	}
 	switch os.Args[1] {
 	case "server":
@@ -43,6 +44,8 @@ func main() {
 		createBackup(os.Args[2:])
 	case "restore":
 		restoreBackup(os.Args[2:])
+	case "maintenance":
+		runMaintenance(os.Args[2:])
 	default:
 		fatal("unknown command %q", os.Args[1])
 	}
@@ -97,6 +100,39 @@ func restoreBackup(args []string) {
 		fatal("restore backup: %v", err)
 	}
 	fmt.Printf("Backup restored to %s. Start the server and verify its pinned fingerprint before reconnecting clients.\n", c.Storage.Path)
+}
+
+func runMaintenance(args []string) {
+	fs := flag.NewFlagSet("maintenance", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to YAML configuration")
+	if err := fs.Parse(args); err != nil {
+		fatal("parse arguments: %v", err)
+	}
+	if fs.NArg() != 0 {
+		fatal("usage: homebox maintenance [--config config.yaml]")
+	}
+	c, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(c.Storage.Path, "database", "homebox.db")); err != nil {
+		fatal("inspect storage: %v", err)
+	}
+	db, err := database.Open(c.Storage.Path)
+	if err != nil {
+		fatal("open database: %v", err)
+	}
+	defer db.Close()
+	service, err := maintenance.New(db, c.Storage.Path, time.Duration(c.Maintenance.OrphanBlobGraceHours)*time.Hour)
+	if err != nil {
+		fatal("initialize maintenance: %v", err)
+	}
+	result, err := service.Run(context.Background())
+	if err != nil {
+		fatal("run maintenance: %v", err)
+	}
+	fmt.Printf("Maintenance complete: expired uploads=%d, access tokens=%d, refresh tokens=%d, idempotency operations=%d, unreferenced blobs=%d, orphan blob files=%d.\n",
+		result.ExpiredUploads, result.ExpiredAccessTokens, result.ExpiredRefreshTokens, result.ExpiredOperations, result.UnreferencedBlobs, result.OrphanBlobFiles)
 }
 
 func serve(args []string) {

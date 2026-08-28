@@ -18,6 +18,7 @@ This repository currently provides the security-first Go server foundation and a
 - A unified error-mapping layer (`internal/httpapi`'s `writeServiceError`) that only ever returns a raw error message to the client when a domain service explicitly marked it safe to show (`internal/apierror.Validation`) — every other failure logs server-side and returns a generic `INTERNAL_ERROR`, so a database/driver error can never leak through the API.
 - Health and metrics endpoints.
 - Atomic ciphertext-only server backup and safe restore commands. A backup contains a consistent SQLite snapshot, immutable ciphertext blobs, the transport identity key, the supplied server config, and a SHA-256 manifest. It never contains a Recovery Secret or client private E2EE key.
+- A manually invoked maintenance command that removes expired sessions, abandoned upload ciphertext, expired idempotency records, and unreachable ciphertext blobs only after a two-pass grace period. It never decrypts content or removes versions/Trash items.
 
 ## Run the server foundation
 
@@ -64,6 +65,14 @@ To restore, prepare a configuration whose `storage.path` is a new, absent direct
 ```
 
 Verify the server's pinned fingerprint before reconnecting a client. A server backup alone cannot decrypt or recover files: retain at least one trusted client or the user's Recovery Secret separately and offline.
+
+## Run maintenance / ciphertext GC
+
+Run maintenance periodically as a scheduled server-side job. It removes expired access/refresh tokens and idempotency records, deletes expired incomplete-upload chunks, and performs two-phase GC for unreferenced ciphertext blobs. The first pass marks an unreachable blob; a later pass deletes it only after `maintenance.orphan_blob_grace_hours` has elapsed and the blob is still unreachable. This is deliberately conservative and does not yet remove file versions or Trash entries.
+
+```powershell
+./bin/homebox.exe maintenance --config config.yaml
+```
 
 ## Server storage
 
@@ -127,6 +136,6 @@ Windows builds require Visual Studio 2022 with the **Desktop development with C+
 
 ## Security status
 
-Ciphertext-only server backup/restore now validates the SQLite snapshot, transport identity, and every database-referenced blob before placing a restore into a new storage directory.
+Ciphertext-only server backup/restore now validates the SQLite snapshot, transport identity, and every database-referenced blob before placing a restore into a new storage directory. Manual maintenance safely cleans expired server state and uses a two-pass grace period for ciphertext garbage collection.
 
-Secure Transport is closed (ADR-008/009/020): TLS 1.3 with self-signed, fingerprint-pinned server identity, and an authenticated login/device/key-envelope API built on top of it. A full opaque-node + ciphertext-upload/download round trip now works end to end from the real Flutter UI down to the Go server and back — create a folder, upload a file, download it, and get the exact original bytes back — proven by both `internal/httpapi/nodes_uploads_test.go` (server side) and `client/test/files/files_controller_test.dart` (client side, including the vault bootstrap this required). Folder metadata mutations now go through a local SQLite cache and durable outbox (`client/lib/features/sync/sync_engine.dart`), so they apply offline and sync opportunistically once connectivity returns, and an optional local folder mirrors the vault's decrypted contents to disk and uploads local changes back (`client/lib/features/syncfolder/*.dart`) on the same periodic cadence. The full product is still not production-ready: cross-account sharing (Family Vault), a real-time filesystem watcher and tray integration, the Android client, camera upload, and maintenance/GC remain roadmap milestones. The server intentionally contains no file decryption implementation to preserve that boundary, and this document's own roadmap sections track exactly what is and isn't built yet.
+Secure Transport is closed (ADR-008/009/020): TLS 1.3 with self-signed, fingerprint-pinned server identity, and an authenticated login/device/key-envelope API built on top of it. A full opaque-node + ciphertext-upload/download round trip now works end to end from the real Flutter UI down to the Go server and back — create a folder, upload a file, download it, and get the exact original bytes back — proven by both `internal/httpapi/nodes_uploads_test.go` (server side) and `client/test/files/files_controller_test.dart` (client side, including the vault bootstrap this required). Folder metadata mutations now go through a local SQLite cache and durable outbox (`client/lib/features/sync/sync_engine.dart`), so they apply offline and sync opportunistically once connectivity returns, and an optional local folder mirrors the vault's decrypted contents to disk and uploads local changes back (`client/lib/features/syncfolder/*.dart`) on the same periodic cadence. The full product is still not production-ready: cross-account sharing (Family Vault), a real-time filesystem watcher and tray integration, and the Android client/camera upload remain roadmap milestones. Retention policies for old versions and Trash are also intentionally deferred. The server intentionally contains no file decryption implementation to preserve that boundary, and this document's own roadmap sections track exactly what is and isn't built yet.

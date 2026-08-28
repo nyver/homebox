@@ -13,6 +13,7 @@ type migration struct {
 var migrations = []migration{
 	{1, "initial_schema", migration0001InitialSchema},
 	{2, "access_tokens", migration0002AccessTokens},
+	{3, "maintenance_gc_candidates", migration0003MaintenanceGCCandidates},
 }
 
 const migration0001InitialSchema = `
@@ -103,4 +104,18 @@ CREATE TABLE IF NOT EXISTS access_tokens (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_access_tokens_hash ON access_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_access_tokens_expires ON access_tokens(expires_at);
+`
+
+// migration0003MaintenanceGCCandidates records the first pass of two-phase
+// ciphertext garbage collection. A candidate must remain unreachable through
+// a full grace period before maintenance may remove it.
+const migration0003MaintenanceGCCandidates = `
+CREATE TABLE IF NOT EXISTS gc_blob_candidates (
+  blob_id TEXT PRIMARY KEY REFERENCES blobs(id), marked_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS gc_orphan_blob_files (
+  storage_rel_path TEXT PRIMARY KEY, marked_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gc_blob_candidates_marked_at ON gc_blob_candidates(marked_at);
+CREATE INDEX IF NOT EXISTS idx_gc_orphan_blob_files_marked_at ON gc_orphan_blob_files(marked_at);
 `

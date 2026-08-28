@@ -64,6 +64,9 @@ type Config struct {
 		PageSize    int `yaml:"page_size"`
 		MaxPageSize int `yaml:"max_page_size"`
 	} `yaml:"sync"`
+	Maintenance struct {
+		OrphanBlobGraceHours int `yaml:"orphan_blob_grace_hours"`
+	} `yaml:"maintenance"`
 }
 
 func Defaults() Config {
@@ -85,6 +88,7 @@ func Defaults() Config {
 	c.Uploads.AbandonedAfterHours = 24
 	c.Sync.PageSize = 500
 	c.Sync.MaxPageSize = 2000
+	c.Maintenance.OrphanBlobGraceHours = 168
 	return c
 }
 
@@ -145,6 +149,9 @@ func (c Config) Validate() error {
 	}
 	if c.Sync.PageSize < 1 || c.Sync.MaxPageSize < c.Sync.PageSize {
 		return errors.New("sync.page_size must be positive and no larger than sync.max_page_size")
+	}
+	if c.Maintenance.OrphanBlobGraceHours < 1 {
+		return errors.New("maintenance.orphan_blob_grace_hours must be positive")
 	}
 	return nil
 }

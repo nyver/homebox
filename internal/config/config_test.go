@@ -20,3 +20,11 @@ func TestRejectsInsecureHTTPConfiguration(t *testing.T) {
 		t.Fatal("unencrypted HTTP configuration must be rejected")
 	}
 }
+
+func TestRejectsNonPositiveOrphanBlobGracePeriod(t *testing.T) {
+	c := Defaults()
+	c.Maintenance.OrphanBlobGraceHours = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("non-positive orphan blob grace period must be rejected")
+	}
+}
