@@ -23,6 +23,7 @@ import (
 	"github.com/homebox/homebox/internal/provisioning"
 	"github.com/homebox/homebox/internal/securetransport"
 	"github.com/homebox/homebox/internal/serveridentity"
+	"github.com/homebox/homebox/internal/sharing"
 	homeboxsync "github.com/homebox/homebox/internal/sync"
 	"github.com/homebox/homebox/internal/uploads"
 )
@@ -56,7 +57,7 @@ func startTestServer(t *testing.T) testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := httpapi.New(authService, provisioning.New(db), nodes.New(db), homeboxsync.New(db, 500, 2000), uploadsService)
+	api := httpapi.New(authService, provisioning.New(db), nodes.New(db), homeboxsync.New(db, 500, 2000), uploadsService, sharing.New(db))
 
 	rawListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

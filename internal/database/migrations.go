@@ -14,6 +14,7 @@ var migrations = []migration{
 	{1, "initial_schema", migration0001InitialSchema},
 	{2, "access_tokens", migration0002AccessTokens},
 	{3, "maintenance_gc_candidates", migration0003MaintenanceGCCandidates},
+	{4, "share_device_envelopes", migration0004ShareDeviceEnvelopes},
 }
 
 const migration0001InitialSchema = `
@@ -118,4 +119,20 @@ CREATE TABLE IF NOT EXISTS gc_orphan_blob_files (
 );
 CREATE INDEX IF NOT EXISTS idx_gc_blob_candidates_marked_at ON gc_blob_candidates(marked_at);
 CREATE INDEX IF NOT EXISTS idx_gc_orphan_blob_files_marked_at ON gc_orphan_blob_files(marked_at);
+`
+
+// migration0004ShareDeviceEnvelopes adds recipient-device envelopes without
+// changing the server's zero-knowledge boundary. The legacy shares envelope
+// remains opaque compatibility data; all new sharing reads use this table.
+const migration0004ShareDeviceEnvelopes = `
+CREATE TABLE IF NOT EXISTS share_device_envelopes (
+  id TEXT PRIMARY KEY, share_id TEXT NOT NULL REFERENCES shares(id),
+  target_device_id TEXT NOT NULL REFERENCES devices(id), key_version INTEGER NOT NULL,
+  envelope_ciphertext BLOB NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT,
+  UNIQUE(share_id,target_device_id,key_version)
+);
+CREATE INDEX IF NOT EXISTS idx_active_share_per_recipient
+  ON shares(node_id,target_user_id,revoked_at);
+CREATE INDEX IF NOT EXISTS idx_share_device_envelopes_recipient
+  ON share_device_envelopes(target_device_id,share_id) WHERE revoked_at IS NULL;
 `

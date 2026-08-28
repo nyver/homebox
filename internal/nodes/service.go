@@ -126,7 +126,7 @@ func (s *Service) Get(ctx context.Context, userID, nodeID string) (Node, error) 
 	if err != nil {
 		return Node{}, err
 	}
-	if n.OwnerID != userID {
+	if n.OwnerID != userID && (n.IsDeleted() || !s.hasReadShare(ctx, userID, nodeID)) {
 		return Node{}, ErrForbidden
 	}
 	return n, nil
@@ -138,12 +138,18 @@ func (s *Service) ListChildren(ctx context.Context, userID string, parentID *str
 	var rows *sql.Rows
 	var err error
 	if parentID == nil {
-		rows, err = s.db.QueryContext(ctx, selectNodeColumns+" FROM nodes WHERE owner_id = ? AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at", userID)
+		rows, err = s.db.QueryContext(ctx, `SELECT n.id,n.owner_id,n.parent_id,n.node_type,n.metadata_ciphertext,n.metadata_key_version,n.current_version_id,n.revision,n.created_at,n.updated_at,n.deleted_at
+			FROM nodes n WHERE n.owner_id=? AND n.parent_id IS NULL AND n.deleted_at IS NULL
+			UNION ALL
+			SELECT n.id,n.owner_id,n.parent_id,n.node_type,n.metadata_ciphertext,n.metadata_key_version,n.current_version_id,n.revision,n.created_at,n.updated_at,n.deleted_at
+			FROM nodes n JOIN shares sh ON sh.node_id=n.id
+			WHERE sh.target_user_id=? AND sh.permission='READ' AND sh.revoked_at IS NULL AND n.deleted_at IS NULL
+			ORDER BY created_at`, userID, userID)
 	} else {
-		if err := s.requireDirectory(ctx, nil, userID, *parentID); err != nil {
+		if err := s.requireReadableDirectory(ctx, userID, *parentID); err != nil {
 			return nil, err
 		}
-		rows, err = s.db.QueryContext(ctx, selectNodeColumns+" FROM nodes WHERE owner_id = ? AND parent_id = ? AND deleted_at IS NULL ORDER BY created_at", userID, *parentID)
+		rows, err = s.db.QueryContext(ctx, selectNodeColumns+" FROM nodes WHERE parent_id = ? AND deleted_at IS NULL ORDER BY created_at", *parentID)
 	}
 	if err != nil {
 		return nil, err
@@ -158,6 +164,36 @@ func (s *Service) ListChildren(ctx context.Context, userID string, parentID *str
 		nodes = append(nodes, n)
 	}
 	return nodes, rows.Err()
+}
+
+func (s *Service) requireReadableDirectory(ctx context.Context, userID, nodeID string) error {
+	var nodeType string
+	var deleted sql.NullString
+	var ownerID string
+	err := s.db.QueryRowContext(ctx, "SELECT owner_id,node_type,deleted_at FROM nodes WHERE id=?", nodeID).Scan(&ownerID, &nodeType, &deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrInvalidParent
+	}
+	if err != nil {
+		return err
+	}
+	if nodeType != "DIRECTORY" || deleted.Valid || (ownerID != userID && !s.hasReadShare(ctx, userID, nodeID)) {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// hasReadShare authorizes any descendant of a shared folder, not just the
+// root itself. The recursive walk is bounded by SQLite's recursion limit and
+// the existing node mutation cycle checks.
+func (s *Service) hasReadShare(ctx context.Context, userID, nodeID string) bool {
+	var allowed bool
+	err := s.db.QueryRowContext(ctx, `WITH RECURSIVE ancestors(id,parent_id) AS (
+		SELECT id,parent_id FROM nodes WHERE id=?
+		UNION ALL SELECT n.id,n.parent_id FROM nodes n JOIN ancestors a ON a.parent_id=n.id
+	) SELECT EXISTS(SELECT 1 FROM shares sh JOIN ancestors a ON a.id=sh.node_id
+		WHERE sh.target_user_id=? AND sh.permission='READ' AND sh.revoked_at IS NULL)`, nodeID, userID).Scan(&allowed)
+	return err == nil && allowed
 }
 
 type UpdateInput struct {

@@ -25,6 +25,7 @@ import (
 	"github.com/homebox/homebox/internal/provisioning"
 	"github.com/homebox/homebox/internal/securetransport"
 	"github.com/homebox/homebox/internal/serveridentity"
+	"github.com/homebox/homebox/internal/sharing"
 	syncpkg "github.com/homebox/homebox/internal/sync"
 	"github.com/homebox/homebox/internal/uploads"
 )
@@ -185,7 +186,7 @@ func serve(args []string) {
 	if err != nil {
 		fatal("initialize upload storage: %v", err)
 	}
-	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService)
+	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService, sharing.New(db))
 	server := &http.Server{Addr: c.Address(), Handler: httpserver.New(api), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Printf("HomeBox listening on %s", c.Address())
 

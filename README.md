@@ -13,7 +13,7 @@ This repository currently provides the security-first Go server foundation and a
 - **Secure Transport is closed (ADR-008/009):** the server terminates TLS 1.3 using a self-signed certificate derived from its identity key. There is no plaintext HTTP mode in any configuration. Clients trust the connection by pinning the identity fingerprint, not a certificate authority.
 - Argon2id password hashing, a first-admin bootstrap command, and a full authenticated session lifecycle: login, refresh-token rotation, logout, and device registration/revocation (`/api/v1/auth/*`, `/api/v1/devices*`). Login is timing-safe against username enumeration and rate-limited per username with exponential backoff.
 - Encrypted key-envelope delivery between a user's own trusted devices (`/api/v1/devices/{id}/key-envelope`) so a newly provisioned device can fetch the vault key an existing device wrapped for it. Cross-account sharing (Family Vault, §28) is being delivered in vertical slices.
-- Family Vault server onboarding groundwork: a local operator can create a separate family account, and an authenticated invitee who knows that account's opaque ID can retrieve its active device public keys to prepare recipient-specific E2EE envelopes. Folder ACLs, envelope delivery, and client UX remain the next sharing slice.
+- Family Vault server support: a local operator can create a separate family account, an authenticated invitee who knows that account's opaque ID can retrieve its active device public keys, and an owner can grant a folder READ access with a distinct client-encrypted envelope for every recipient device. Recipients can browse/download the shared root and descendants; revoke immediately removes server access. Shared writes, key rotation, and Flutter UX remain the next sharing slice.
 - Opaque node CRUD (create/rename/move/soft-delete/restore/Trash) with optimistic concurrency and idempotent mutation (`/api/v1/nodes*`, `/api/v1/trash`), and a paged, per-account sync revision feed (`/api/v1/sync/changes`).
 - Ciphertext-only resumable upload wired end to end: create/chunk/complete/abort over HTTP (`/api/v1/uploads*`) and streamed unmodified back on download (`/api/v1/files/{id}/content`), with opaque IDs, per-chunk SHA-256 storage checks, idempotent completion, and atomic blob commit.
 - A unified error-mapping layer (`internal/httpapi`'s `writeServiceError`) that only ever returns a raw error message to the client when a domain service explicitly marked it safe to show (`internal/apierror.Validation`) — every other failure logs server-side and returns a generic `INTERNAL_ERROR`, so a database/driver error can never leak through the API.
@@ -41,6 +41,7 @@ Every endpoint, including health and metrics, is served over TLS — there is no
 - `POST /api/v1/auth/{login,refresh,logout}`
 - `GET /api/v1/users/me`
 - `GET /api/v1/users/{id}/share-devices`
+- `POST /api/v1/shares`, `GET /api/v1/shares/{incoming,outgoing}`, `DELETE /api/v1/shares/{id}`
 - `GET /api/v1/devices`, `DELETE /api/v1/devices/{id}`
 - `POST` / `GET /api/v1/devices/{id}/key-envelope`
 - `POST /api/v1/nodes`, `GET /api/v1/nodes/{id}`, `GET /api/v1/nodes/children?parentId=`, `PATCH`/`DELETE /api/v1/nodes/{id}`, `POST /api/v1/nodes/{id}/restore`, `GET /api/v1/trash`

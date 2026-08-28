@@ -22,6 +22,7 @@ import (
 	"github.com/homebox/homebox/internal/auth"
 	"github.com/homebox/homebox/internal/nodes"
 	"github.com/homebox/homebox/internal/provisioning"
+	"github.com/homebox/homebox/internal/sharing"
 	"github.com/homebox/homebox/internal/sync"
 	"github.com/homebox/homebox/internal/uploads"
 )
@@ -36,16 +37,21 @@ type API struct {
 	nodes        *nodes.Service
 	sync         *sync.Service
 	uploads      *uploads.Service
+	shares       *sharing.Service
 }
 
-func New(authService *auth.Service, provisioningService *provisioning.Service, nodesService *nodes.Service, syncService *sync.Service, uploadsService *uploads.Service) http.Handler {
-	api := &API{auth: authService, provisioning: provisioningService, nodes: nodesService, sync: syncService, uploads: uploadsService}
+func New(authService *auth.Service, provisioningService *provisioning.Service, nodesService *nodes.Service, syncService *sync.Service, uploadsService *uploads.Service, sharingService *sharing.Service) http.Handler {
+	api := &API{auth: authService, provisioning: provisioningService, nodes: nodesService, sync: syncService, uploads: uploadsService, shares: sharingService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", api.login)
 	mux.HandleFunc("POST /api/v1/auth/refresh", api.refresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", api.logout)
 	mux.Handle("GET /api/v1/users/me", api.authenticated(api.getMe))
 	mux.Handle("GET /api/v1/users/{id}/share-devices", api.authenticated(api.listShareDevices))
+	mux.Handle("POST /api/v1/shares", api.authenticated(api.createShare))
+	mux.Handle("GET /api/v1/shares/incoming", api.authenticated(api.listIncomingShares))
+	mux.Handle("GET /api/v1/shares/outgoing", api.authenticated(api.listOutgoingShares))
+	mux.Handle("DELETE /api/v1/shares/{id}", api.authenticated(api.revokeShare))
 	mux.Handle("GET /api/v1/devices", api.authenticated(api.listDevices))
 	mux.Handle("DELETE /api/v1/devices/{id}", api.authenticated(api.revokeDevice))
 	mux.Handle("POST /api/v1/devices/{id}/key-envelope", api.authenticated(api.uploadKeyEnvelope))
@@ -466,6 +472,13 @@ func writeServiceError(w http.ResponseWriter, err error) {
 
 	case errors.Is(err, provisioning.ErrNotFound):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no key envelope is available yet")
+
+	case errors.Is(err, sharing.ErrNotFound), errors.Is(err, sharing.ErrTargetNotFound):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share or recipient was not found")
+	case errors.Is(err, sharing.ErrForbidden):
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "share is not owned by this account")
+	case errors.Is(err, sharing.ErrAlreadyShared):
+		writeError(w, http.StatusConflict, "REVISION_CONFLICT", "folder is already shared with this account")
 
 	default:
 		log.Printf("internal error: %v", err)

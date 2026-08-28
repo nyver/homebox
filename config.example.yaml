@@ -22,6 +22,8 @@ storage:
 
 limits:
   # `homebox create-user` can create up to this number of separate family accounts.
+  # Family Vault grants remain client-encrypted device envelopes; this server
+  # setting never enables decryption or server-side key recovery.
   max_users: 5
   max_plaintext_file_size_bytes: 104857600
   upload_chunk_plaintext_size_bytes: 4194304
