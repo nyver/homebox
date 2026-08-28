@@ -127,7 +127,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     final saved = await _syncFolderStore.load();
     if (!mounted || saved == null) return;
     setState(() => _syncFolder = saved);
-    _syncFolderWatcher.start(saved);
+    if (_syncEngine?.isPaused != true) _syncFolderWatcher.start(saved);
     unawaited(_runSyncFolderPass());
   }
 
@@ -250,9 +250,16 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   /// follow-up pass once the current one finishes.
   Future<void> _runSyncFolderPass() async {
     final folder = _syncFolder;
+    final engine = _syncEngine;
     final materializer = _syncFolderMaterializer;
     final uploader = _localFolderUploader;
-    if (folder == null || materializer == null || uploader == null) return;
+    if (folder == null ||
+        engine == null ||
+        engine.isPaused ||
+        materializer == null ||
+        uploader == null) {
+      return;
+    }
     if (_syncFolderPassRunning) {
       _pendingSyncFolderPass = true;
       return;
@@ -267,6 +274,20 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     if (_pendingSyncFolderPass) {
       _pendingSyncFolderPass = false;
       await _runSyncFolderPass();
+    }
+  }
+
+  void _toggleSyncPause() {
+    final engine = _syncEngine;
+    if (engine == null) return;
+    if (engine.isPaused) {
+      engine.resume();
+      final folder = _syncFolder;
+      if (folder != null) _syncFolderWatcher.start(folder);
+      unawaited(_runSyncFolderPass());
+    } else {
+      _syncFolderWatcher.stop();
+      engine.pause();
     }
   }
 
@@ -294,7 +315,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       if (!mounted || folder == null) return;
       setState(() => _syncFolder = folder);
       await _syncFolderStore.save(folder);
-      _syncFolderWatcher.start(folder);
+      if (_syncEngine?.isPaused != true) _syncFolderWatcher.start(folder);
       unawaited(_runSyncFolderPass());
     } on Exception {
       if (mounted) {
@@ -325,6 +346,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       syncFolderMaterializer: _syncFolderMaterializer,
       localFolderUploader: _localFolderUploader,
       syncFolderWatcher: _syncFolderWatcher,
+      onToggleSyncPause: _toggleSyncPause,
     );
     if (!wideLayout) {
       return Scaffold(
@@ -457,6 +479,7 @@ class _SectionContent extends StatelessWidget {
     required this.syncFolderMaterializer,
     required this.localFolderUploader,
     required this.syncFolderWatcher,
+    required this.onToggleSyncPause,
   });
 
   final AppSection section;
@@ -471,6 +494,7 @@ class _SectionContent extends StatelessWidget {
   final SyncFolderMaterializer? syncFolderMaterializer;
   final LocalFolderUploader? localFolderUploader;
   final SyncFolderWatcher syncFolderWatcher;
+  final VoidCallback onToggleSyncPause;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -482,6 +506,7 @@ class _SectionContent extends StatelessWidget {
       syncFolderMaterializer: syncFolderMaterializer,
       localFolderUploader: localFolderUploader,
       syncFolderWatcher: syncFolderWatcher,
+      onToggleSyncPause: onToggleSyncPause,
     ),
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
@@ -810,6 +835,7 @@ class _SyncSection extends StatelessWidget {
     required this.syncFolderMaterializer,
     required this.localFolderUploader,
     required this.syncFolderWatcher,
+    required this.onToggleSyncPause,
   });
   final String? syncFolder;
   final Future<void> Function() onSelectSyncFolder;
@@ -817,6 +843,7 @@ class _SyncSection extends StatelessWidget {
   final SyncFolderMaterializer? syncFolderMaterializer;
   final LocalFolderUploader? localFolderUploader;
   final SyncFolderWatcher syncFolderWatcher;
+  final VoidCallback onToggleSyncPause;
 
   @override
   Widget build(BuildContext context) {
@@ -846,6 +873,10 @@ class _SyncSection extends StatelessWidget {
                 final (icon, label) = switch (engine.status) {
                   SyncStatus.idle => (Icons.check_circle_outline, 'Up to date'),
                   SyncStatus.syncing => (Icons.sync, 'Syncing…'),
+                  SyncStatus.paused => (
+                    Icons.pause_circle_outline,
+                    'Sync paused',
+                  ),
                   SyncStatus.offline => (Icons.cloud_off_outlined, 'Offline'),
                   SyncStatus.error => (Icons.error_outline, 'Sync error'),
                 };
@@ -857,7 +888,20 @@ class _SyncSection extends StatelessWidget {
                         engine.status == SyncStatus.error &&
                             engine.errorMessage != null
                         ? Text(engine.errorMessage!)
+                        : engine.isPaused
+                        ? const Text(
+                            'No new sync pass starts until you resume.',
+                          )
                         : null,
+                    trailing: OutlinedButton.icon(
+                      onPressed: onToggleSyncPause,
+                      icon: Icon(
+                        engine.isPaused
+                            ? Icons.play_arrow_outlined
+                            : Icons.pause_outlined,
+                      ),
+                      label: Text(engine.isPaused ? 'Resume' : 'Pause'),
+                    ),
                   ),
                 );
               },
