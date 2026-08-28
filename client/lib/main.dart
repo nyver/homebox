@@ -5,15 +5,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'core/e2ee/device_identity.dart';
+import 'core/e2ee/vault_key_store.dart';
 import 'features/device/device_setup_controller.dart';
+import 'features/files/files_controller.dart';
 import 'features/server/server_connection_controller.dart';
+import 'features/vault/vault_setup_controller.dart';
 
 void main() => runApp(const HomeBoxApp());
 
 class HomeBoxApp extends StatelessWidget {
-  const HomeBoxApp({super.key, this.deviceIdentityStore});
+  const HomeBoxApp({super.key, this.deviceIdentityStore, this.serverConnectionController, this.vaultKeyStore});
 
   final DeviceIdentityStore? deviceIdentityStore;
+  final ServerConnectionController? serverConnectionController;
+  final VaultKeyStore? vaultKeyStore;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -22,16 +27,26 @@ class HomeBoxApp extends StatelessWidget {
       colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff176b87)),
       useMaterial3: true,
     ),
-    home: HomeBoxDesktopPage(deviceIdentityStore: deviceIdentityStore),
+    home: HomeBoxDesktopPage(
+      deviceIdentityStore: deviceIdentityStore,
+      serverConnectionController: serverConnectionController,
+      vaultKeyStore: vaultKeyStore,
+    ),
   );
 }
 
 enum AppSection { files, sync, settings }
 
 class HomeBoxDesktopPage extends StatefulWidget {
-  const HomeBoxDesktopPage({super.key, this.deviceIdentityStore});
+  const HomeBoxDesktopPage({super.key, this.deviceIdentityStore, this.serverConnectionController, this.vaultKeyStore});
 
   final DeviceIdentityStore? deviceIdentityStore;
+
+  // Overridable purely so tests can supply in-memory-backed instances
+  // instead of ones backed by real OS secure storage (see widget_test.dart)
+  // — matching the same reason deviceIdentityStore above is overridable.
+  final ServerConnectionController? serverConnectionController;
+  final VaultKeyStore? vaultKeyStore;
 
   @override
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
@@ -41,6 +56,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final DeviceIdentityStore _deviceIdentityStore;
   late final DeviceSetupController _deviceSetupController;
   late final ServerConnectionController _serverConnectionController;
+  late final VaultKeyStore _vaultKeyStore;
+  late final VaultSetupController _vaultSetupController;
+  late final FilesController _filesController;
   AppSection _section = AppSection.files;
   String? _syncFolder;
   bool _selectingFolder = false;
@@ -50,13 +68,34 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     super.initState();
     _deviceIdentityStore = widget.deviceIdentityStore ?? DeviceIdentityStore.platform();
     _deviceSetupController = DeviceSetupController(_deviceIdentityStore);
-    _serverConnectionController = ServerConnectionController(deviceIdentityStore: _deviceIdentityStore);
+    _serverConnectionController =
+        widget.serverConnectionController ?? ServerConnectionController(deviceIdentityStore: _deviceIdentityStore);
+    _vaultKeyStore = widget.vaultKeyStore ?? VaultKeyStore();
+    _vaultSetupController = VaultSetupController(_vaultKeyStore);
+    _filesController = FilesController(serverConnection: _serverConnectionController, vaultKeyStore: _vaultKeyStore);
     unawaited(_deviceSetupController.initialize());
     unawaited(_serverConnectionController.initialize());
+    unawaited(_vaultSetupController.initialize());
+    // Whenever the connection or the vault reaches a state where files
+    // might actually be listable, refresh — cheap no-ops otherwise (see
+    // FilesController._requireContext).
+    _serverConnectionController.addListener(_maybeRefreshFiles);
+    _vaultSetupController.addListener(_maybeRefreshFiles);
+  }
+
+  void _maybeRefreshFiles() {
+    if (_serverConnectionController.status == ServerConnectionStatus.authenticated &&
+        _vaultSetupController.status == VaultSetupStatus.ready) {
+      unawaited(_filesController.refresh());
+    }
   }
 
   @override
   void dispose() {
+    _serverConnectionController.removeListener(_maybeRefreshFiles);
+    _vaultSetupController.removeListener(_maybeRefreshFiles);
+    _filesController.dispose();
+    _vaultSetupController.dispose();
     _deviceSetupController.dispose();
     _serverConnectionController.dispose();
     super.dispose();
@@ -93,12 +132,14 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       onSelectSyncFolder: _selectSyncFolder,
       deviceSetupController: _deviceSetupController,
       serverConnectionController: _serverConnectionController,
+      vaultSetupController: _vaultSetupController,
+      filesController: _filesController,
     );
     if (!wideLayout) {
       return Scaffold(
         appBar: AppBar(
           title: const Text('HomeBox'),
-          actions: const [_VaultStateChip()],
+          actions: [_VaultStateChip(controller: _vaultSetupController)],
         ),
         body: content,
         bottomNavigationBar: NavigationBar(
@@ -169,7 +210,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
                           style: Theme.of(context).textTheme.headlineSmall,
                         ),
                         const Spacer(),
-                        const _VaultStateChip(),
+                        _VaultStateChip(controller: _vaultSetupController),
                       ],
                     ),
                   ),
@@ -186,16 +227,25 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
 }
 
 class _VaultStateChip extends StatelessWidget {
-  const _VaultStateChip();
+  const _VaultStateChip({required this.controller});
+
+  final VaultSetupController controller;
 
   @override
-  Widget build(BuildContext context) => const Tooltip(
-    message:
-        'A trusted device or Recovery Secret is required to unlock E2EE data.',
-    child: Chip(
-      avatar: Icon(Icons.lock_outline, size: 18),
-      label: Text('Vault locked'),
-    ),
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: controller,
+    builder: (context, _) {
+      final ready = controller.status == VaultSetupStatus.ready;
+      return Tooltip(
+        message: ready
+            ? 'This vault was created on this device. A trusted device or Recovery Secret is required on any other device.'
+            : 'Create or restore this account\'s vault in Settings to unlock E2EE data.',
+        child: Chip(
+          avatar: Icon(ready ? Icons.lock_open_outlined : Icons.lock_outline, size: 18),
+          label: Text(ready ? 'Vault unlocked' : 'Vault locked'),
+        ),
+      );
+    },
   );
 }
 
@@ -207,6 +257,8 @@ class _SectionContent extends StatelessWidget {
     required this.onSelectSyncFolder,
     required this.deviceSetupController,
     required this.serverConnectionController,
+    required this.vaultSetupController,
+    required this.filesController,
   });
 
   final AppSection section;
@@ -215,14 +267,12 @@ class _SectionContent extends StatelessWidget {
   final Future<void> Function() onSelectSyncFolder;
   final DeviceSetupController deviceSetupController;
   final ServerConnectionController serverConnectionController;
+  final VaultSetupController vaultSetupController;
+  final FilesController filesController;
 
   @override
   Widget build(BuildContext context) => switch (section) {
-    AppSection.files => _FilesSection(
-      syncFolder: syncFolder,
-      selectingFolder: selectingFolder,
-      onSelectSyncFolder: onSelectSyncFolder,
-    ),
+    AppSection.files => _FilesSection(controller: filesController),
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,
       onSelectSyncFolder: onSelectSyncFolder,
@@ -230,43 +280,141 @@ class _SectionContent extends StatelessWidget {
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
       serverConnectionController: serverConnectionController,
+      vaultSetupController: vaultSetupController,
     ),
   };
 }
 
-class _FilesSection extends StatelessWidget {
-  const _FilesSection({
-    required this.syncFolder,
-    required this.selectingFolder,
-    required this.onSelectSyncFolder,
-  });
+final class _FilesSection extends StatelessWidget {
+  const _FilesSection({required this.controller});
 
-  final String? syncFolder;
-  final bool selectingFolder;
-  final Future<void> Function() onSelectSyncFolder;
+  final FilesController controller;
+
+  Future<void> _createFolder(BuildContext context) async {
+    final nameController = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('New folder'),
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Folder name'),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, nameController.text), child: const Text('Create')),
+        ],
+      ),
+    );
+    if (name == null || name.trim().isEmpty) return;
+    final ok = await controller.createFolder(name.trim());
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not create the folder.')));
+    }
+  }
+
+  Future<void> _uploadFile(BuildContext context) async {
+    final file = await openFile();
+    if (file == null) return;
+    final ok = await controller.uploadFile(file.path);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Upload failed.')));
+    }
+  }
+
+  Future<void> _downloadFile(BuildContext context, FileEntry entry) async {
+    final destination = await getSaveLocation(suggestedName: entry.name);
+    if (destination == null) return;
+    final ok = await controller.downloadFile(entry, destination.path);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(ok ? 'Saved to ${destination.path}' : (controller.errorMessage ?? 'Download failed.')),
+      ));
+    }
+  }
 
   @override
-  Widget build(BuildContext context) => _PageFrame(
-    title: 'Files',
-    subtitle: syncFolder == null
-        ? 'Choose a local folder before syncing files.'
-        : syncFolder!,
-    child: syncFolder == null
-        ? _EmptyFolderState(
-            selectingFolder: selectingFolder,
-            onSelectSyncFolder: onSelectSyncFolder,
-          )
-        : const _LockedFilesState(),
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: controller,
+    builder: (context, _) {
+      final Widget body;
+      if (controller.status == FilesStatus.idle) {
+        body = const _FilesMessageState(
+          icon: Icons.cloud_off_outlined,
+          message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+        );
+      } else if (controller.status == FilesStatus.failed) {
+        body = _FilesMessageState(
+          icon: Icons.error_outline,
+          message: controller.errorMessage ?? 'Files are unavailable.',
+        );
+      } else if (controller.status == FilesStatus.loading && controller.entries.isEmpty) {
+        body = const Center(child: CircularProgressIndicator());
+      } else if (controller.entries.isEmpty) {
+        body = const _FilesMessageState(icon: Icons.folder_open_outlined, message: 'This folder is empty.');
+      } else {
+        body = ListView.separated(
+          itemCount: controller.entries.length,
+          separatorBuilder: (context, _) => const Divider(height: 1),
+          itemBuilder: (context, index) {
+            final entry = controller.entries[index];
+            return ListTile(
+              leading: Icon(entry.isDirectory ? Icons.folder_outlined : Icons.insert_drive_file_outlined),
+              title: Text(entry.name),
+              subtitle: entry.isDirectory ? null : Text(entry.metadata.mimeType ?? 'Encrypted file'),
+              onTap: entry.isDirectory ? () => controller.openFolder(entry) : () => _downloadFile(context, entry),
+            );
+          },
+        );
+      }
+      return _PageFrame(
+        title: 'Files',
+        subtitle: controller.breadcrumbNames.isEmpty ? 'Root' : controller.breadcrumbNames.join(' / '),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                if (controller.canGoUp)
+                  IconButton(onPressed: controller.goToRoot, icon: const Icon(Icons.home_outlined), tooltip: 'Root'),
+                const Spacer(),
+                if (controller.busy)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2, value: controller.progress),
+                    ),
+                  ),
+                OutlinedButton.icon(
+                  onPressed: controller.busy ? null : () => _createFolder(context),
+                  icon: const Icon(Icons.create_new_folder_outlined),
+                  label: const Text('New folder'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.icon(
+                  onPressed: controller.busy ? null : () => _uploadFile(context),
+                  icon: const Icon(Icons.upload_outlined),
+                  label: const Text('Upload'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Expanded(child: body),
+          ],
+        ),
+      );
+    },
   );
 }
 
-class _EmptyFolderState extends StatelessWidget {
-  const _EmptyFolderState({
-    required this.selectingFolder,
-    required this.onSelectSyncFolder,
-  });
-  final bool selectingFolder;
-  final Future<void> Function() onSelectSyncFolder;
+final class _FilesMessageState extends StatelessWidget {
+  const _FilesMessageState({required this.icon, required this.message});
+
+  final IconData icon;
+  final String message;
 
   @override
   Widget build(BuildContext context) => Center(
@@ -275,54 +423,9 @@ class _EmptyFolderState extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.folder_copy_outlined, size: 72),
+          Icon(icon, size: 72),
           const SizedBox(height: 16),
-          Text(
-            'Choose your HomeBox folder',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Files in this folder will be encrypted on this computer before any upload.',
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: selectingFolder ? null : onSelectSyncFolder,
-            icon: selectingFolder
-                ? const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.folder_open),
-            label: const Text('Choose folder'),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-class _LockedFilesState extends StatelessWidget {
-  const _LockedFilesState();
-  @override
-  Widget build(BuildContext context) => Center(
-    child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 460),
-      child: const Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.lock_outline, size: 72),
-          SizedBox(height: 16),
-          Text(
-            'Unlock your E2EE vault to browse files',
-            textAlign: TextAlign.center,
-          ),
-          SizedBox(height: 8),
-          Text(
-            'HomeBox will not show encrypted filenames until this device is provisioned.',
-            textAlign: TextAlign.center,
-          ),
+          Text(message, textAlign: TextAlign.center),
         ],
       ),
     ),
@@ -382,10 +485,12 @@ class _SettingsSection extends StatelessWidget {
   const _SettingsSection({
     required this.deviceSetupController,
     required this.serverConnectionController,
+    required this.vaultSetupController,
   });
 
   final DeviceSetupController deviceSetupController;
   final ServerConnectionController serverConnectionController;
+  final VaultSetupController vaultSetupController;
 
   @override
   Widget build(BuildContext context) => _PageFrame(
@@ -395,23 +500,7 @@ class _SettingsSection extends StatelessWidget {
       children: [
         _ServerConnectionCard(controller: serverConnectionController),
         _DeviceIdentityCard(controller: deviceSetupController),
-        const Card(
-          child: ListTile(
-            leading: Icon(Icons.lock_outline),
-            title: Text('Vault access'),
-            subtitle: Text(
-              'Locked until a trusted device or Recovery Secret provisions this Windows client',
-            ),
-            trailing: Chip(label: Text('Locked')),
-          ),
-        ),
-        const Card(
-          child: ListTile(
-            leading: Icon(Icons.key_outlined),
-            title: Text('Recovery Secret'),
-            subtitle: Text('Required if all trusted devices are lost'),
-          ),
-        ),
+        _VaultSetupCard(controller: vaultSetupController, serverConnectionController: serverConnectionController),
       ],
     ),
   );
@@ -686,6 +775,126 @@ final class _ServerConnectionCard extends StatelessWidget {
       }
 
       return Column(children: cards);
+    },
+  );
+}
+
+final class _VaultSetupCard extends StatelessWidget {
+  const _VaultSetupCard({required this.controller, required this.serverConnectionController});
+
+  final VaultSetupController controller;
+  final ServerConnectionController serverConnectionController;
+
+  Future<void> _createVault(BuildContext context) async {
+    final userId = serverConnectionController.session?.user.id;
+    if (userId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Sign in to the server before creating a vault.')));
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Create this account\'s vault?'),
+        content: const Text(
+          'HomeBox generates the encryption keys that protect your files on this server, plus a Recovery Secret you must save. '
+          'If every trusted device and the Recovery Secret are lost, nobody — including HomeBox — can recover your files.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Create vault')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final secret = await controller.createVault(userId);
+    if (secret == null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not create the vault.')));
+      }
+      return;
+    }
+    if (context.mounted) await _showRecoverySecret(context, secret);
+  }
+
+  Future<void> _showRecoverySecret(BuildContext context, String secret) => showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (context) {
+      var confirmedSaved = false;
+      // A single StatefulBuilder wraps the whole dialog so toggling the
+      // checkbox also rebuilds the "Done" button's enabled state — two
+      // separate StatefulBuilders (one per widget) would each keep their
+      // own rebuild scope and never see the other's state change.
+      return StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Save your Recovery Secret'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('This is shown only once. Without it — and without another trusted device — your files can never be recovered.'),
+              const SizedBox(height: 12),
+              SelectableText(secret, style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()])),
+              const SizedBox(height: 12),
+              CheckboxListTile(
+                value: confirmedSaved,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                onChanged: (value) => setState(() => confirmedSaved = value ?? false),
+                title: const Text('I have saved this Recovery Secret somewhere safe.'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton.icon(
+              onPressed: () => Clipboard.setData(ClipboardData(text: secret)),
+              icon: const Icon(Icons.copy_outlined),
+              label: const Text('Copy'),
+            ),
+            FilledButton(
+              onPressed: confirmedSaved ? () => Navigator.pop(context) : null,
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: controller,
+    builder: (context, _) {
+      final subtitle = switch (controller.status) {
+        VaultSetupStatus.checking => 'Checking for an existing vault…',
+        VaultSetupStatus.locked =>
+          'No vault on this device yet. Create one here, or unlock this device from an existing trusted device / Recovery Secret.',
+        VaultSetupStatus.creating => 'Creating vault keys…',
+        VaultSetupStatus.ready => 'Vault ready on this device.',
+        VaultSetupStatus.failed => controller.errorMessage ?? 'Vault storage is unavailable.',
+      };
+      final trailing = switch (controller.status) {
+        VaultSetupStatus.checking ||
+        VaultSetupStatus.creating => const SizedBox.square(
+          dimension: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+        VaultSetupStatus.locked => FilledButton(
+          onPressed: () => _createVault(context),
+          child: const Text('Create vault'),
+        ),
+        VaultSetupStatus.ready => const Icon(Icons.check_circle_outline),
+        VaultSetupStatus.failed => TextButton(onPressed: controller.initialize, child: const Text('Retry')),
+      };
+      return Card(
+        child: ListTile(
+          leading: const Icon(Icons.enhanced_encryption_outlined),
+          title: const Text('Personal vault'),
+          subtitle: Text(subtitle),
+          trailing: trailing,
+          isThreeLine: true,
+        ),
+      );
     },
   );
 }

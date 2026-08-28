@@ -212,6 +212,54 @@ func (s *Service) OpenBlob(ctx context.Context, fileVersionID string) (path stri
 	return filepath.Join(s.storagePath, filepath.FromSlash(relPath)), size, nil
 }
 
+// FileVersion is an encrypted version descriptor (spec §17.6): everything a
+// client needs to unwrap a File DEK and decrypt the corresponding blob, and
+// nothing the server can use to do the same.
+type FileVersion struct {
+	ID                string
+	NodeID            string
+	BlobID            string
+	E2EEHeader        []byte
+	WrappedFileKey    []byte
+	KeyScopeID        string
+	KeyVersion        int
+	CreatedAt         time.Time
+	CreatedByDeviceID string
+	Revision          int64
+	// ChunkCount lets a downloading client split the concatenated ciphertext
+	// blob (server storage has no per-chunk delimiters) back into the
+	// individual AEAD frames it needs to decrypt: every chunk but the last
+	// is exactly the client's fixed plaintext chunk size (ADR-010) plus the
+	// AEAD tag, so knowing the count is enough to infer the last chunk's
+	// length from the total blob size.
+	ChunkCount int
+}
+
+// ListVersions returns every version of a node, newest first. Callers must
+// authorize access to the owning node themselves first (see
+// internal/nodes.Service.Get) — this performs no authorization of its own.
+func (s *Service) ListVersions(ctx context.Context, nodeID string) ([]FileVersion, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT f.id,f.node_id,f.blob_id,f.e2ee_header,f.wrapped_file_key,f.key_scope_id,f.key_version,f.created_at,f.created_by_device_id,f.revision,b.chunk_count
+		FROM file_versions f JOIN blobs b ON b.id = f.blob_id WHERE f.node_id = ? ORDER BY f.created_at DESC`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var versions []FileVersion
+	for rows.Next() {
+		var v FileVersion
+		var createdAt string
+		if err := rows.Scan(&v.ID, &v.NodeID, &v.BlobID, &v.E2EEHeader, &v.WrappedFileKey, &v.KeyScopeID, &v.KeyVersion, &createdAt, &v.CreatedByDeviceID, &v.Revision, &v.ChunkCount); err != nil {
+			return nil, err
+		}
+		if v.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	return versions, rows.Err()
+}
+
 func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInput) (CompleteResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

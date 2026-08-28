@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/homebox/homebox/internal/uploads"
 )
@@ -187,4 +188,52 @@ func (a *API) downloadFileContent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, file)
+}
+
+type fileVersionResponse struct {
+	ID                string `json:"id"`
+	BlobID            string `json:"blobId"`
+	E2eeHeader        string `json:"e2eeHeader"`     // base64
+	WrappedFileKey    string `json:"wrappedFileKey"` // base64
+	KeyScopeID        string `json:"keyScopeId"`
+	KeyVersion        int    `json:"keyVersion"`
+	CreatedAt         string `json:"createdAt"`
+	CreatedByDeviceID string `json:"createdByDeviceId"`
+	Revision          int64  `json:"revision"`
+	ChunkCount        int    `json:"chunkCount"`
+}
+
+// listFileVersions returns every encrypted version descriptor for a node,
+// newest first (spec §17.6), so a client can unwrap the File DEK and
+// decrypt whichever version it downloads — including restoring an older
+// one later, once that endpoint exists.
+func (a *API) listFileVersions(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	node, err := a.nodes.Get(r.Context(), requestUserID(r), id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if node.NodeType != "FILE" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "node is not a file")
+		return
+	}
+	versions, err := a.uploads.ListVersions(r.Context(), id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	out := make([]fileVersionResponse, 0, len(versions))
+	for _, v := range versions {
+		out = append(out, fileVersionResponse{
+			ID: v.ID, BlobID: v.BlobID, E2eeHeader: base64.StdEncoding.EncodeToString(v.E2EEHeader),
+			WrappedFileKey: base64.StdEncoding.EncodeToString(v.WrappedFileKey), KeyScopeID: v.KeyScopeID,
+			KeyVersion: v.KeyVersion, CreatedAt: v.CreatedAt.Format(time.RFC3339Nano),
+			CreatedByDeviceID: v.CreatedByDeviceID, Revision: v.Revision, ChunkCount: v.ChunkCount,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }

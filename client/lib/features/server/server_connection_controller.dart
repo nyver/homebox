@@ -73,6 +73,12 @@ final class ServerConnectionController extends ChangeNotifier {
   String? get discoveredFingerprint => _discoveredFingerprint;
   String? get errorMessage => _errorMessage;
 
+  /// The API client for the currently pinned server, or null before a
+  /// server has been trusted (see [confirmTrust]). Available even before
+  /// login succeeds, since some callers (none yet) might need unauthenticated
+  /// calls; authenticated calls still need [session]'s access token.
+  HomeBoxApiClient? get api => _api;
+
   Future<void> initialize() async {
     final saved = await _serverStore.load();
     if (saved == null) {

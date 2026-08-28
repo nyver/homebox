@@ -1,6 +1,6 @@
-import 'dart:math' as math;
-
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import '../../core/e2ee/opaque_id.dart';
 
 abstract interface class SessionStorage {
   Future<String?> read(String key);
@@ -48,17 +48,8 @@ final class SessionStore {
   Future<String> loadOrCreateDeviceId() async {
     final existing = await _storage.read(_deviceIdKey);
     if (existing != null) return existing;
-    final generated = _generateUuidV4(math.Random.secure());
+    final generated = generateUuidV4();
     await _storage.write(_deviceIdKey, generated);
     return generated;
   }
-}
-
-String _generateUuidV4(math.Random random) {
-  final bytes = List<int>.generate(16, (_) => random.nextInt(256));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-  bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
-  String hexRange(int start, int end) =>
-      bytes.sublist(start, end).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  return '${hexRange(0, 4)}-${hexRange(4, 6)}-${hexRange(6, 8)}-${hexRange(8, 10)}-${hexRange(10, 16)}';
 }

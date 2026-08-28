@@ -114,6 +114,94 @@ final class KeyEnvelope {
   final Uint8List ciphertext;
 }
 
+final class NodeInfo {
+  const NodeInfo({
+    required this.id,
+    required this.parentId,
+    required this.nodeType,
+    required this.metadataCiphertext,
+    required this.metadataKeyVersion,
+    required this.currentVersionId,
+    required this.revision,
+    required this.createdAt,
+    required this.updatedAt,
+    this.deletedAt,
+  });
+
+  final String id;
+  final String? parentId;
+  final String nodeType; // FILE | DIRECTORY
+  final Uint8List metadataCiphertext;
+  final int metadataKeyVersion;
+  final String? currentVersionId;
+  final int revision;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final DateTime? deletedAt;
+
+  bool get isDeleted => deletedAt != null;
+}
+
+final class FileVersionInfo {
+  const FileVersionInfo({
+    required this.id,
+    required this.blobId,
+    required this.e2eeHeader,
+    required this.wrappedFileKey,
+    required this.keyScopeId,
+    required this.keyVersion,
+    required this.revision,
+    required this.chunkCount,
+  });
+
+  final String id;
+  final String blobId;
+  final Uint8List e2eeHeader;
+  final Uint8List wrappedFileKey;
+  final String keyScopeId;
+  final int keyVersion;
+  final int revision;
+
+  /// How many AEAD chunk frames the ciphertext blob is made of. Needed to
+  /// split the concatenated blob (no delimiters in storage) back into
+  /// individual frames on decrypt — every chunk but the last is exactly
+  /// the fixed plaintext chunk size (ADR-010) plus its AEAD tag.
+  final int chunkCount;
+}
+
+final class UploadSessionInfo {
+  const UploadSessionInfo({required this.id, required this.chunkCount, required this.receivedChunks});
+
+  final String id;
+  final int chunkCount;
+  final List<int> receivedChunks;
+}
+
+final class CompleteUploadResult {
+  const CompleteUploadResult({required this.blobId, required this.fileVersionId, required this.revision});
+
+  final String blobId;
+  final String fileVersionId;
+  final int revision;
+}
+
+final class SyncChange {
+  const SyncChange({required this.revision, required this.nodeId, required this.operation, required this.createdAt});
+
+  final int revision;
+  final String? nodeId;
+  final String operation;
+  final DateTime createdAt;
+}
+
+final class SyncPage {
+  const SyncPage({required this.changes, required this.nextAfter, required this.hasMore});
+
+  final List<SyncChange> changes;
+  final int nextAfter;
+  final bool hasMore;
+}
+
 /// Talks to the HomeBox server's authenticated business API (spec §17) over
 /// a [PinnedHttpClient]. This class only ever moves opaque identifiers and
 /// base64 ciphertext blobs — it has no access to, and no dependency on, the
@@ -198,6 +286,208 @@ final class HomeBoxApiClient {
     );
   }
 
+  // --- nodes ---
+
+  Future<NodeInfo> createNode(
+    String accessToken, {
+    required String id,
+    required String operationId,
+    String? parentId,
+    required String nodeType,
+    required Uint8List metadataCiphertext,
+    required int metadataKeyVersion,
+  }) async {
+    final json = await _postJson('/api/v1/nodes', accessToken: accessToken, body: {
+      'id': id,
+      'operationId': operationId,
+      'parentId': parentId,
+      'nodeType': nodeType,
+      'metadataCiphertext': base64Encode(metadataCiphertext),
+      'metadataKeyVersion': metadataKeyVersion,
+    });
+    return _nodeFromJson(json);
+  }
+
+  Future<NodeInfo> getNode(String accessToken, String nodeId) async =>
+      _nodeFromJson(await _getJson('/api/v1/nodes/$nodeId', accessToken: accessToken));
+
+  Future<List<NodeInfo>> listChildren(String accessToken, {String? parentId}) async {
+    final path = parentId == null ? '/api/v1/nodes/children' : '/api/v1/nodes/children?parentId=$parentId';
+    final body = await _send('GET', path, accessToken: accessToken);
+    final decoded = jsonDecode(body) as List<dynamic>;
+    return decoded.map((entry) => _nodeFromJson(entry as Map<String, dynamic>)).toList(growable: false);
+  }
+
+  Future<List<NodeInfo>> listTrash(String accessToken) async {
+    final body = await _send('GET', '/api/v1/trash', accessToken: accessToken);
+    final decoded = jsonDecode(body) as List<dynamic>;
+    return decoded.map((entry) => _nodeFromJson(entry as Map<String, dynamic>)).toList(growable: false);
+  }
+
+  /// Renames/moves a node and/or replaces its encrypted metadata (spec
+  /// §17.3). Pass [metadataCiphertext] to change the encrypted name/MIME/
+  /// hash; pass [moveParent] true (with [parentId] null for root, or a
+  /// directory ID) to move it. At least one must be requested.
+  Future<NodeInfo> updateNode(
+    String accessToken,
+    String nodeId, {
+    required String operationId,
+    required int expectedRevision,
+    Uint8List? metadataCiphertext,
+    int metadataKeyVersion = 1,
+    bool moveParent = false,
+    String? parentId,
+  }) async {
+    final json = await _postJsonMethod('PATCH', '/api/v1/nodes/$nodeId', accessToken: accessToken, body: {
+      'operationId': operationId,
+      'expectedRevision': expectedRevision,
+      if (metadataCiphertext != null) 'metadataCiphertext': base64Encode(metadataCiphertext),
+      if (metadataCiphertext != null) 'metadataKeyVersion': metadataKeyVersion,
+      'moveParent': moveParent,
+      'parentId': parentId,
+    });
+    return _nodeFromJson(json);
+  }
+
+  Future<void> deleteNode(String accessToken, String nodeId, {required String operationId, required int expectedRevision}) =>
+      _send('DELETE', '/api/v1/nodes/$nodeId', accessToken: accessToken, body: {
+        'operationId': operationId,
+        'expectedRevision': expectedRevision,
+      });
+
+  Future<NodeInfo> restoreNode(String accessToken, String nodeId, {required String operationId}) async {
+    final json = await _postJson('/api/v1/nodes/$nodeId/restore', accessToken: accessToken, body: {'operationId': operationId});
+    return _nodeFromJson(json);
+  }
+
+  // --- sync ---
+
+  Future<SyncPage> syncChanges(String accessToken, {int after = 0, int pageSize = 0}) async {
+    final query = pageSize > 0 ? '?after=$after&pageSize=$pageSize' : '?after=$after';
+    final body = await _send('GET', '/api/v1/sync/changes$query', accessToken: accessToken);
+    final json = jsonDecode(body) as Map<String, dynamic>;
+    final changes = (json['changes'] as List<dynamic>).map((entry) {
+      final e = entry as Map<String, dynamic>;
+      return SyncChange(
+        revision: e['revision'] as int,
+        nodeId: e['nodeId'] as String?,
+        operation: e['operation'] as String,
+        createdAt: DateTime.parse(e['createdAt'] as String),
+      );
+    }).toList(growable: false);
+    return SyncPage(changes: changes, nextAfter: json['nextAfter'] as int, hasMore: json['hasMore'] as bool);
+  }
+
+  // --- uploads ---
+
+  Future<UploadSessionInfo> createUpload(
+    String accessToken, {
+    required String targetNodeId,
+    required String fileVersionId,
+    required String blobId,
+    int? expectedRevision,
+    required int chunkSize,
+    required int chunkCount,
+    required Uint8List metadataCiphertext,
+    required Uint8List wrappedFileKey,
+    required Uint8List e2eeHeader,
+  }) async {
+    final json = await _postJson('/api/v1/uploads', accessToken: accessToken, body: {
+      'targetNodeId': targetNodeId,
+      'fileVersionId': fileVersionId,
+      'blobId': blobId,
+      'expectedRevision': ?expectedRevision,
+      'chunkSize': chunkSize,
+      'chunkCount': chunkCount,
+      'metadataCiphertext': base64Encode(metadataCiphertext),
+      'wrappedFileKey': base64Encode(wrappedFileKey),
+      'e2eeHeader': base64Encode(e2eeHeader),
+    });
+    return UploadSessionInfo(
+      id: json['id'] as String,
+      chunkCount: json['chunkCount'] as int,
+      receivedChunks: (json['receivedChunks'] as List<dynamic>? ?? const []).cast<int>(),
+    );
+  }
+
+  Future<void> putUploadChunk(String accessToken, String uploadId, int chunkNo, Uint8List ciphertext) => _sendRaw(
+        'PUT',
+        '/api/v1/uploads/$uploadId/chunks/$chunkNo',
+        accessToken: accessToken,
+        body: ciphertext,
+      );
+
+  Future<CompleteUploadResult> completeUpload(
+    String accessToken,
+    String uploadId, {
+    required String operationId,
+    required String keyScopeId,
+    required int keyVersion,
+    int? expectedRevision,
+    Uint8List? syncPayloadCiphertext,
+  }) async {
+    final encodedPayload = syncPayloadCiphertext != null ? base64Encode(syncPayloadCiphertext) : null;
+    final json = await _postJson('/api/v1/uploads/$uploadId/complete', accessToken: accessToken, body: {
+      'operationId': operationId,
+      'keyScopeId': keyScopeId,
+      'keyVersion': keyVersion,
+      'expectedRevision': ?expectedRevision,
+      'syncPayloadCiphertext': ?encodedPayload,
+    });
+    return CompleteUploadResult(
+      blobId: json['blobId'] as String,
+      fileVersionId: json['fileVersionId'] as String,
+      revision: json['revision'] as int,
+    );
+  }
+
+  Future<void> abortUpload(String accessToken, String uploadId) =>
+      _send('DELETE', '/api/v1/uploads/$uploadId', accessToken: accessToken);
+
+  // --- file content / versions ---
+
+  /// Downloads a node's current-version ciphertext unchanged (spec §23).
+  /// The caller must unwrap the File DEK (via [listFileVersions]) and run
+  /// it through the E2EE file cipher before this is meaningful plaintext.
+  Future<Uint8List> downloadFileContent(String accessToken, String nodeId) =>
+      _sendRaw('GET', '/api/v1/files/$nodeId/content', accessToken: accessToken);
+
+  Future<List<FileVersionInfo>> listFileVersions(String accessToken, String nodeId) async {
+    final body = await _send('GET', '/api/v1/files/$nodeId/versions', accessToken: accessToken);
+    final decoded = jsonDecode(body) as List<dynamic>;
+    return decoded.map((entry) {
+      final e = entry as Map<String, dynamic>;
+      return FileVersionInfo(
+        id: e['id'] as String,
+        blobId: e['blobId'] as String,
+        e2eeHeader: base64Decode(e['e2eeHeader'] as String),
+        wrappedFileKey: base64Decode(e['wrappedFileKey'] as String),
+        keyScopeId: e['keyScopeId'] as String,
+        keyVersion: e['keyVersion'] as int,
+        revision: e['revision'] as int,
+        chunkCount: e['chunkCount'] as int,
+      );
+    }).toList(growable: false);
+  }
+
+  NodeInfo _nodeFromJson(Map<String, dynamic> json) => NodeInfo(
+        id: json['id'] as String,
+        parentId: json['parentId'] as String?,
+        nodeType: json['nodeType'] as String,
+        metadataCiphertext: base64Decode(json['metadataCiphertext'] as String),
+        metadataKeyVersion: json['metadataKeyVersion'] as int,
+        currentVersionId: json['currentVersionId'] as String?,
+        revision: json['revision'] as int,
+        createdAt: DateTime.parse(json['createdAt'] as String),
+        updatedAt: DateTime.parse(json['updatedAt'] as String),
+        deletedAt: json['deletedAt'] != null ? DateTime.parse(json['deletedAt'] as String) : null,
+      );
+
+  Future<Map<String, dynamic>> _postJsonMethod(String method, String path, {Map<String, dynamic>? body, String? accessToken}) async {
+    final response = await _send(method, path, accessToken: accessToken, body: body);
+    return jsonDecode(response) as Map<String, dynamic>;
+  }
+
   Future<Map<String, dynamic>> _postJson(String path, {Map<String, dynamic>? body, String? accessToken}) async {
     final response = await _send('POST', path, accessToken: accessToken, body: body);
     return jsonDecode(response) as Map<String, dynamic>;
@@ -209,18 +499,40 @@ final class HomeBoxApiClient {
   }
 
   Future<String> _send(String method, String path, {String? accessToken, Map<String, dynamic>? body}) async {
+    final bytes = await _sendRaw(
+      method,
+      path,
+      accessToken: accessToken,
+      body: body != null ? utf8.encode(jsonEncode(body)) : null,
+      contentType: 'application/json; charset=utf-8',
+    );
+    return utf8.decode(bytes);
+  }
+
+  /// Sends a request with a raw byte body (used for ciphertext chunk PUTs)
+  /// and returns the raw response bytes (used for ciphertext downloads).
+  /// [_send] is built on top of this rather than duplicating it, so a
+  /// binary download is never accidentally routed through a UTF-8 decode
+  /// step that would corrupt it.
+  Future<Uint8List> _sendRaw(
+    String method,
+    String path, {
+    String? accessToken,
+    List<int>? body,
+    String contentType = 'application/octet-stream',
+  }) async {
     final HttpClientResponse response;
     try {
       // The TLS handshake happens during openUrl (connection setup), not
       // during close(), so badCertificateCallback rejections surface here —
       // both calls must be inside this try block.
       final request = await _transport.client.openUrl(method, _baseUrl.resolve(path));
-      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
       if (accessToken != null) {
         request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $accessToken');
       }
       if (body != null) {
-        request.add(utf8.encode(jsonEncode(body)));
+        request.headers.set(HttpHeaders.contentTypeHeader, contentType);
+        request.add(body);
       }
       response = await request.close();
     } on HandshakeException {
@@ -230,11 +542,15 @@ final class HomeBoxApiClient {
       // error (spec §18 SERVER_IDENTITY_CHANGED).
       throw ServerIdentityMismatchException(_transport.pinnedFingerprint);
     }
-    final responseBody = await response.transform(utf8.decoder).join();
-    if (response.statusCode >= 200 && response.statusCode < 300) {
-      return responseBody;
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in response) {
+      builder.add(chunk);
     }
-    throw _errorFrom(response.statusCode, responseBody);
+    final responseBytes = builder.takeBytes();
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return responseBytes;
+    }
+    throw _errorFrom(response.statusCode, utf8.decode(responseBytes, allowMalformed: true));
   }
 
   HomeBoxApiException _errorFrom(int statusCode, String responseBody) {

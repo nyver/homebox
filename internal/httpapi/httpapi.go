@@ -67,6 +67,7 @@ func New(authService *auth.Service, provisioningService *provisioning.Service, n
 	mux.Handle("DELETE /api/v1/uploads/{id}", api.authenticated(api.abortUpload))
 
 	mux.Handle("GET /api/v1/files/{id}/content", api.authenticated(api.downloadFileContent))
+	mux.Handle("GET /api/v1/files/{id}/versions", api.authenticated(api.listFileVersions))
 	return mux
 }
 

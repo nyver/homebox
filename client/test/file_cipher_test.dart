@@ -124,6 +124,52 @@ void main() {
       throwsA(isA<FormatException>()),
     );
   });
+
+  test('splitChunkFrames reconstructs frame boundaries and round-trips through decrypt', () async {
+    const plaintextChunkSize = 8; // small size so the test doesn't need megabytes of data
+    final plaintexts = [
+      List<int>.generate(plaintextChunkSize, (i) => i),
+      List<int>.generate(plaintextChunkSize, (i) => 100 + i),
+      List<int>.generate(3, (i) => 200 + i), // shorter last chunk
+    ];
+    final frames = <int>[];
+    for (var i = 0; i < plaintexts.length; i++) {
+      frames.addAll(await cipher.encryptChunk(
+        plaintext: plaintexts[i],
+        fileKey: key,
+        header: header,
+        fileVersionId: versionId,
+        chunkNumber: i,
+        totalChunks: plaintexts.length,
+      ));
+    }
+
+    final split = splitChunkFrames(
+      Uint8List.fromList(frames),
+      chunkCount: plaintexts.length,
+      plaintextChunkSize: plaintextChunkSize,
+    );
+    expect(split, hasLength(plaintexts.length));
+
+    for (var i = 0; i < plaintexts.length; i++) {
+      final decrypted = await cipher.decryptChunk(
+        ciphertextFrame: split[i],
+        fileKey: key,
+        header: header,
+        fileVersionId: versionId,
+        chunkNumber: i,
+        totalChunks: plaintexts.length,
+      );
+      expect(decrypted, plaintexts[i]);
+    }
+  });
+
+  test('splitChunkFrames rejects a blob whose length disagrees with chunkCount', () {
+    expect(
+      () => splitChunkFrames(Uint8List.fromList(const [1, 2, 3]), chunkCount: 3, plaintextChunkSize: 8),
+      throwsFormatException,
+    );
+  });
 }
 
 String _hex(List<int> bytes) =>

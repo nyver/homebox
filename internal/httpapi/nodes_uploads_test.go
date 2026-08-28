@@ -77,6 +77,30 @@ func TestFullNodeUploadDownloadAndSyncFlow(t *testing.T) {
 		t.Fatalf("unexpected blob id: %v", completeBody["blobId"])
 	}
 
+	// The version descriptor must carry back exactly what the client needs
+	// to unwrap the File DEK and decrypt the blob it downloads.
+	resp, versionsBody := s.doRaw(t, http.MethodGet, "/api/v1/files/"+fileID+"/versions", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list versions status=%d", resp.StatusCode)
+	}
+	versions := decodeArray(t, versionsBody)
+	if len(versions) != 1 {
+		t.Fatalf("expected exactly one file version, got %#v", versions)
+	}
+	version := versions[0]
+	if version["id"] != fileVersionID || version["blobId"] != blobID {
+		t.Fatalf("unexpected version descriptor: %#v", version)
+	}
+	if int(version["chunkCount"].(float64)) != 2 {
+		t.Fatalf("unexpected chunkCount: %v", version["chunkCount"])
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(version["wrappedFileKey"].(string)); err != nil || string(decoded) != "wrapped-file-key" {
+		t.Fatalf("unexpected wrappedFileKey: %v (err=%v)", version["wrappedFileKey"], err)
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(version["e2eeHeader"].(string)); err != nil || string(decoded) != "e2ee-header" {
+		t.Fatalf("unexpected e2eeHeader: %v (err=%v)", version["e2eeHeader"], err)
+	}
+
 	// Download the content back and verify it matches the concatenated chunks byte-for-byte.
 	resp, downloaded := s.doRaw(t, http.MethodGet, "/api/v1/files/"+fileID+"/content", nil, token)
 	if resp.StatusCode != http.StatusOK {
