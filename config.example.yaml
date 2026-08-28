@@ -58,6 +58,7 @@ uploads:
 sync:
   # Windows clients can start an immediate local reconciliation from a native
   # filesystem event and pause new passes without cancelling in-flight writes;
+  # notification-area show/hide is client-local and changes no server setting.
   # this server feed remains the authoritative remote source.
   # Default and maximum number of changes returned per GET /api/v1/sync/changes page.
   page_size: 500
