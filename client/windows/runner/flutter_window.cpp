@@ -4,6 +4,7 @@
 #include <shellapi.h>
 
 #include "flutter/generated_plugin_registrant.h"
+#include <flutter/standard_method_codec.h>
 #include "resource.h"
 
 namespace {
@@ -11,6 +12,8 @@ namespace {
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT kTrayShowCommand = 1;
 constexpr UINT kTrayExitCommand = 2;
+constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kRunValue[] = L"HomeBox";
 
 }  // namespace
 
@@ -35,6 +38,7 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  ConfigurePlatformChannel();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -141,4 +145,56 @@ void FlutterWindow::RemoveTrayIcon() {
 void FlutterWindow::ShowFromTray() {
   ShowWindow(GetHandle(), SW_RESTORE);
   SetForegroundWindow(GetHandle());
+}
+
+void FlutterWindow::ConfigurePlatformChannel() {
+  platform_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "homebox/windows",
+      &flutter::StandardMethodCodec::GetInstance());
+  platform_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() == "getAutostart") {
+          result->Success(flutter::EncodableValue(IsAutostartEnabled()));
+          return;
+        }
+        if (call.method_name() == "setAutostart") {
+          const auto* enabled = call.arguments() == nullptr
+                                    ? nullptr
+                                    : std::get_if<bool>(call.arguments());
+          if (enabled == nullptr) {
+            result->Error("invalid-argument", "Expected a boolean enabled value.");
+            return;
+          }
+          if (!SetAutostartEnabled(*enabled)) {
+            result->Error("registry-error", "Could not update Windows autostart.");
+            return;
+          }
+          result->Success(flutter::EncodableValue(*enabled));
+          return;
+        }
+        result->NotImplemented();
+      });
+}
+
+bool FlutterWindow::IsAutostartEnabled() const {
+  DWORD value_type = 0;
+  wchar_t value[MAX_PATH]{};
+  DWORD value_size = sizeof(value);
+  return RegGetValue(HKEY_CURRENT_USER, kRunKey, kRunValue, RRF_RT_REG_SZ,
+                     &value_type, value, &value_size) == ERROR_SUCCESS;
+}
+
+bool FlutterWindow::SetAutostartEnabled(bool enabled) const {
+  if (!enabled) {
+    const LONG status = RegDeleteKeyValue(HKEY_CURRENT_USER, kRunKey, kRunValue);
+    return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+  }
+  wchar_t path[MAX_PATH]{};
+  const DWORD length = GetModuleFileName(nullptr, path, MAX_PATH);
+  if (length == 0 || length == MAX_PATH) return false;
+  const std::wstring command = L"\"" + std::wstring(path) + L"\"";
+  return RegSetKeyValue(HKEY_CURRENT_USER, kRunKey, kRunValue, REG_SZ,
+                        command.c_str(),
+                        static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
 }

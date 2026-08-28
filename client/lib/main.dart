@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'core/e2ee/device_identity.dart';
 import 'core/e2ee/vault_key_store.dart';
+import 'core/platform/windows_autostart.dart';
 import 'core/storage/local_database.dart';
 import 'features/device/device_setup_controller.dart';
 import 'features/files/files_controller.dart';
@@ -1049,7 +1050,63 @@ class _SettingsSection extends StatelessWidget {
           controller: vaultSetupController,
           serverConnectionController: serverConnectionController,
         ),
+        const _AutostartCard(),
       ],
+    ),
+  );
+}
+
+final class _AutostartCard extends StatefulWidget {
+  const _AutostartCard();
+
+  @override
+  State<_AutostartCard> createState() => _AutostartCardState();
+}
+
+final class _AutostartCardState extends State<_AutostartCard> {
+  final WindowsAutostart _autostart = WindowsAutostart();
+  bool? _enabled;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final enabled = await _autostart.enabled();
+    if (mounted) {
+      setState(() {
+        _enabled = enabled;
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _set(bool value) async {
+    setState(() => _loading = true);
+    final enabled = await _autostart.setEnabled(value);
+    if (mounted) {
+      setState(() {
+        _enabled = enabled;
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: SwitchListTile(
+      secondary: const Icon(Icons.rocket_launch_outlined),
+      title: const Text('Start HomeBox with Windows'),
+      subtitle: Text(
+        _enabled == null
+            ? 'Available in the Windows desktop build.'
+            : 'Uses your current Windows account only.',
+      ),
+      value: _enabled ?? false,
+      onChanged: _loading || _enabled == null ? null : _set,
     ),
   );
 }
