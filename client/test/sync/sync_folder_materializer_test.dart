@@ -18,7 +18,9 @@ import '../support/memory_session_storage.dart';
 import '../support/memory_vault_key_storage.dart';
 import 'fake_node_server.dart';
 
-Future<ServerConnectionController> _connectedAndSignedIn(HttpServer httpServer) async {
+Future<ServerConnectionController> _connectedAndSignedIn(
+  HttpServer httpServer,
+) async {
   final controller = ServerConnectionController(
     deviceIdentityStore: DeviceIdentityStore(MemoryDevicePrivateKeyStorage()),
     serverStore: PinnedServerStore(MemoryPinnedServerStorage()),
@@ -28,7 +30,9 @@ Future<ServerConnectionController> _connectedAndSignedIn(HttpServer httpServer) 
   await controller.confirmTrust();
   await controller.login('admin', 'correct horse battery staple');
   if (controller.status != ServerConnectionStatus.authenticated) {
-    throw StateError('test setup failed to authenticate: ${controller.errorMessage}');
+    throw StateError(
+      'test setup failed to authenticate: ${controller.errorMessage}',
+    );
   }
   return controller;
 }
@@ -55,19 +59,40 @@ void main() {
     addTearDown(serverConnection.dispose);
 
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: FakeNodeServer.userId);
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: FakeNodeServer.userId,
+    );
     recoverySecret.destroy();
 
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
-    final filesController = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final filesController = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(filesController.dispose);
-    final materializer = SyncFolderMaterializer(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final materializer = SyncFolderMaterializer(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(materializer.dispose);
 
-    final rootDir = await Directory.systemTemp.createTemp('homebox_syncfolder_root_');
+    final rootDir = await Directory.systemTemp.createTemp(
+      'homebox_syncfolder_root_',
+    );
     addTearDown(() => rootDir.delete(recursive: true));
-    final sourceDir = await Directory.systemTemp.createTemp('homebox_syncfolder_source_');
+    final alternateRootDir = await Directory.systemTemp.createTemp(
+      'homebox_syncfolder_alternate_',
+    );
+    addTearDown(() => alternateRootDir.delete(recursive: true));
+    final sourceDir = await Directory.systemTemp.createTemp(
+      'homebox_syncfolder_source_',
+    );
     addTearDown(() => sourceDir.delete(recursive: true));
 
     expect(await filesController.createFolder('Docs'), isTrue);
@@ -78,15 +103,29 @@ void main() {
 
     final sourceFile = File('${sourceDir.path}/note.txt');
     await sourceFile.writeAsBytes(utf8.encode('hello sync folder'));
-    expect(await filesController.uploadFile(sourceFile.path), isTrue, reason: filesController.errorMessage);
+    expect(
+      await filesController.uploadFile(sourceFile.path),
+      isTrue,
+      reason: filesController.errorMessage,
+    );
     final uploaded = filesController.entries.single;
 
     await materializer.materialize(rootDir.path);
-    expect(materializer.status, SyncFolderStatus.idle, reason: materializer.errorMessage);
+    expect(
+      materializer.status,
+      SyncFolderStatus.idle,
+      reason: materializer.errorMessage,
+    );
 
     final materializedFile = File('${rootDir.path}/Docs/note.txt');
     expect(await materializedFile.exists(), isTrue);
     expect(await materializedFile.readAsString(), 'hello sync folder');
+
+    // The materialization record is global to this pinned server, but a new
+    // local sync root still needs a physical copy of every current file.
+    await materializer.materialize(alternateRootDir.path);
+    final alternateFile = File('${alternateRootDir.path}/Docs/note.txt');
+    expect(await alternateFile.readAsString(), 'hello sync folder');
 
     // A second pass with nothing changed must not re-download the content;
     // corrupt the fake server's stored blob and confirm the local file (and
@@ -101,13 +140,20 @@ void main() {
     expect(await filesController.renameNode(uploaded, 'renamed.txt'), isTrue);
     await _awaitBackgroundSync(syncEngine);
     await materializer.materialize(rootDir.path);
-    expect(await materializedFile.exists(), isFalse, reason: 'the old path should be gone after the rename');
+    expect(
+      await materializedFile.exists(),
+      isFalse,
+      reason: 'the old path should be gone after the rename',
+    );
     final renamedFile = File('${rootDir.path}/Docs/renamed.txt');
     expect(await renamedFile.exists(), isTrue);
     expect(await renamedFile.readAsString(), 'hello sync folder');
 
     // Deleting the node should prune the mirrored file on the next pass.
-    expect(await filesController.deleteNode(filesController.entries.single), isTrue);
+    expect(
+      await filesController.deleteNode(filesController.entries.single),
+      isTrue,
+    );
     await _awaitBackgroundSync(syncEngine);
     await materializer.materialize(rootDir.path);
     expect(await renamedFile.exists(), isFalse);

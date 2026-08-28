@@ -22,7 +22,9 @@ import '../support/memory_session_storage.dart';
 import '../support/memory_vault_key_storage.dart';
 import 'fake_node_server.dart';
 
-Future<ServerConnectionController> _connectedAndSignedIn(HttpServer httpServer) async {
+Future<ServerConnectionController> _connectedAndSignedIn(
+  HttpServer httpServer,
+) async {
   final controller = ServerConnectionController(
     deviceIdentityStore: DeviceIdentityStore(MemoryDevicePrivateKeyStorage()),
     serverStore: PinnedServerStore(MemoryPinnedServerStorage()),
@@ -32,7 +34,9 @@ Future<ServerConnectionController> _connectedAndSignedIn(HttpServer httpServer) 
   await controller.confirmTrust();
   await controller.login('admin', 'correct horse battery staple');
   if (controller.status != ServerConnectionStatus.authenticated) {
-    throw StateError('test setup failed to authenticate: ${controller.errorMessage}');
+    throw StateError(
+      'test setup failed to authenticate: ${controller.errorMessage}',
+    );
   }
   return controller;
 }
@@ -58,24 +62,45 @@ void main() {
     final serverConnection = await _connectedAndSignedIn(httpServer);
     addTearDown(serverConnection.dispose);
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: FakeNodeServer.userId);
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: FakeNodeServer.userId,
+    );
     recoverySecret.destroy();
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
-    final filesController = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final filesController = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(filesController.dispose);
-    final materializer = SyncFolderMaterializer(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final materializer = SyncFolderMaterializer(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(materializer.dispose);
-    final uploader = LocalFolderUploader(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final uploader = LocalFolderUploader(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(uploader.dispose);
 
-    final rootDir = await Directory.systemTemp.createTemp('homebox_uploader_root_');
+    final rootDir = await Directory.systemTemp.createTemp(
+      'homebox_uploader_root_',
+    );
     addTearDown(() => rootDir.delete(recursive: true));
 
     expect(await filesController.createFolder('Docs'), isTrue);
     await _awaitBackgroundSync(syncEngine);
     final folder = filesController.entries.single;
-    await materializer.materialize(rootDir.path); // creates the physical Docs directory.
+    await materializer.materialize(
+      rootDir.path,
+    ); // creates the physical Docs directory.
     expect(await Directory('${rootDir.path}/Docs').exists(), isTrue);
 
     // Drop a brand new file directly on disk, bypassing the app entirely.
@@ -83,7 +108,11 @@ void main() {
     await newFile.writeAsBytes(utf8.encode('dropped by the user'));
 
     await uploader.scan(rootDir.path);
-    expect(uploader.status, LocalUploadStatus.idle, reason: uploader.errorMessage);
+    expect(
+      uploader.status,
+      LocalUploadStatus.idle,
+      reason: uploader.errorMessage,
+    );
 
     final children = syncEngine.nodeCache.listChildren(folder.node.id);
     expect(children, hasLength(1));
@@ -109,25 +138,50 @@ void main() {
     final serverConnection = await _connectedAndSignedIn(httpServer);
     addTearDown(serverConnection.dispose);
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: FakeNodeServer.userId);
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: FakeNodeServer.userId,
+    );
     recoverySecret.destroy();
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
-    final filesController = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final filesController = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(filesController.dispose);
-    final materializer = SyncFolderMaterializer(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final materializer = SyncFolderMaterializer(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(materializer.dispose);
-    final uploader = LocalFolderUploader(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final uploader = LocalFolderUploader(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(uploader.dispose);
 
-    final rootDir = await Directory.systemTemp.createTemp('homebox_uploader_root_');
+    final rootDir = await Directory.systemTemp.createTemp(
+      'homebox_uploader_root_',
+    );
     addTearDown(() => rootDir.delete(recursive: true));
-    final sourceDir = await Directory.systemTemp.createTemp('homebox_uploader_source_');
+    final sourceDir = await Directory.systemTemp.createTemp(
+      'homebox_uploader_source_',
+    );
     addTearDown(() => sourceDir.delete(recursive: true));
 
     final sourceFile = File('${sourceDir.path}/note.txt');
     await sourceFile.writeAsBytes(utf8.encode('original content'));
-    expect(await filesController.uploadFile(sourceFile.path), isTrue, reason: filesController.errorMessage);
+    expect(
+      await filesController.uploadFile(sourceFile.path),
+      isTrue,
+      reason: filesController.errorMessage,
+    );
     final uploaded = filesController.entries.single;
 
     await materializer.materialize(rootDir.path);
@@ -138,14 +192,25 @@ void main() {
     await localFile.writeAsString('edited by the user');
 
     await uploader.scan(rootDir.path);
-    expect(uploader.status, LocalUploadStatus.idle, reason: uploader.errorMessage);
+    expect(
+      uploader.status,
+      LocalUploadStatus.idle,
+      reason: uploader.errorMessage,
+    );
 
     final updatedNode = syncEngine.nodeCache.getById(uploaded.node.id)!;
     expect(updatedNode.currentVersionId, isNot(uploaded.node.currentVersionId));
 
     final session = serverConnection.session!;
-    final versions = await serverConnection.api!.listFileVersions(session.accessToken, uploaded.node.id);
-    expect(versions, hasLength(2), reason: 'the original version must remain retrievable');
+    final versions = await serverConnection.api!.listFileVersions(
+      session.accessToken,
+      uploaded.node.id,
+    );
+    expect(
+      versions,
+      hasLength(2),
+      reason: 'the original version must remain retrievable',
+    );
     final downloaded = await downloadAndDecryptFile(
       api: serverConnection.api!,
       accessToken: session.accessToken,
@@ -163,25 +228,50 @@ void main() {
     final serverConnection = await _connectedAndSignedIn(httpServer);
     addTearDown(serverConnection.dispose);
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: FakeNodeServer.userId);
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: FakeNodeServer.userId,
+    );
     recoverySecret.destroy();
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
-    final filesController = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final filesController = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(filesController.dispose);
-    final materializer = SyncFolderMaterializer(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final materializer = SyncFolderMaterializer(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(materializer.dispose);
-    final uploader = LocalFolderUploader(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final uploader = LocalFolderUploader(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(uploader.dispose);
 
-    final rootDir = await Directory.systemTemp.createTemp('homebox_uploader_root_');
+    final rootDir = await Directory.systemTemp.createTemp(
+      'homebox_uploader_root_',
+    );
     addTearDown(() => rootDir.delete(recursive: true));
-    final sourceDir = await Directory.systemTemp.createTemp('homebox_uploader_source_');
+    final sourceDir = await Directory.systemTemp.createTemp(
+      'homebox_uploader_source_',
+    );
     addTearDown(() => sourceDir.delete(recursive: true));
 
     final sourceFile = File('${sourceDir.path}/note.txt');
     await sourceFile.writeAsBytes(utf8.encode('will be deleted locally'));
-    expect(await filesController.uploadFile(sourceFile.path), isTrue, reason: filesController.errorMessage);
+    expect(
+      await filesController.uploadFile(sourceFile.path),
+      isTrue,
+      reason: filesController.errorMessage,
+    );
     final uploaded = filesController.entries.single;
 
     await materializer.materialize(rootDir.path);
@@ -190,7 +280,11 @@ void main() {
     await localFile.delete();
 
     await uploader.scan(rootDir.path);
-    expect(uploader.status, LocalUploadStatus.idle, reason: uploader.errorMessage);
+    expect(
+      uploader.status,
+      LocalUploadStatus.idle,
+      reason: uploader.errorMessage,
+    );
 
     expect(syncEngine.nodeCache.getById(uploaded.node.id)!.isDeleted, isTrue);
   });
@@ -202,19 +296,38 @@ void main() {
     final serverConnection = await _connectedAndSignedIn(httpServer);
     addTearDown(serverConnection.dispose);
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: FakeNodeServer.userId);
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: FakeNodeServer.userId,
+    );
     recoverySecret.destroy();
     final vaultKey = (await vaultKeyStore.loadVaultKey())!;
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
-    final filesController = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final filesController = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(filesController.dispose);
-    final materializer = SyncFolderMaterializer(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final materializer = SyncFolderMaterializer(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(materializer.dispose);
-    final uploader = LocalFolderUploader(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final uploader = LocalFolderUploader(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(uploader.dispose);
 
-    final rootDir = await Directory.systemTemp.createTemp('homebox_uploader_root_');
+    final rootDir = await Directory.systemTemp.createTemp(
+      'homebox_uploader_root_',
+    );
     addTearDown(() => rootDir.delete(recursive: true));
 
     // A file node that was created (e.g. by another device) but whose
@@ -240,36 +353,77 @@ void main() {
     await syncEngine.runOnce();
     expect(syncEngine.nodeCache.getById(nodeId), isNotNull);
 
-    await materializer.materialize(rootDir.path); // no content to download; writes nothing for this node.
+    await materializer.materialize(
+      rootDir.path,
+    ); // no content to download; writes nothing for this node.
     expect(syncEngine.materializedFiles.getById(nodeId), isNull);
 
     await uploader.scan(rootDir.path);
-    expect(uploader.status, LocalUploadStatus.idle, reason: uploader.errorMessage);
+    expect(
+      uploader.status,
+      LocalUploadStatus.idle,
+      reason: uploader.errorMessage,
+    );
 
-    expect(syncEngine.nodeCache.getById(nodeId)!.isDeleted, isFalse, reason: 'a never-downloaded file must never be treated as user-deleted');
+    expect(
+      syncEngine.nodeCache.getById(nodeId)!.isDeleted,
+      isFalse,
+      reason: 'a never-downloaded file must never be treated as user-deleted',
+    );
   });
 
-  test('scan ignores files placed inside a brand-new, untracked local subfolder', () async {
-    final fakeServer = FakeNodeServer();
-    final httpServer = await fakeServer.start();
-    addTearDown(() => httpServer.close(force: true));
-    final serverConnection = await _connectedAndSignedIn(httpServer);
-    addTearDown(serverConnection.dispose);
-    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: FakeNodeServer.userId);
-    recoverySecret.destroy();
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
-    addTearDown(syncEngine.dispose);
-    final uploader = LocalFolderUploader(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
-    addTearDown(uploader.dispose);
+  test(
+    'scan creates a brand-new local subfolder and uploads its initial files',
+    () async {
+      final fakeServer = FakeNodeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final recoverySecret = await vaultKeyStore.createVault(
+        userId: FakeNodeServer.userId,
+      );
+      recoverySecret.destroy();
+      final syncEngine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(syncEngine.dispose);
+      final uploader = LocalFolderUploader(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(uploader.dispose);
 
-    final rootDir = await Directory.systemTemp.createTemp('homebox_uploader_root_');
-    addTearDown(() => rootDir.delete(recursive: true));
-    final newSubfolder = await Directory('${rootDir.path}/New Folder').create();
-    await File('${newSubfolder.path}/inside.txt').writeAsBytes(utf8.encode('should not be uploaded'));
+      final rootDir = await Directory.systemTemp.createTemp(
+        'homebox_uploader_root_',
+      );
+      addTearDown(() => rootDir.delete(recursive: true));
+      final newSubfolder = await Directory('${rootDir.path}/New Folder')
+          .create();
+      await File('${newSubfolder.path}/inside.txt')
+          .writeAsBytes(utf8.encode('nested local file'));
 
-    await uploader.scan(rootDir.path);
-    expect(uploader.status, LocalUploadStatus.idle, reason: uploader.errorMessage);
-    expect(syncEngine.nodeCache.listChildren(null), isEmpty, reason: 'new subfolders are out of scope for this slice');
-  });
+      await uploader.scan(rootDir.path);
+      expect(
+        uploader.status,
+        LocalUploadStatus.idle,
+        reason: uploader.errorMessage,
+      );
+      final directory = syncEngine.nodeCache.listChildren(null).single;
+      expect(directory.isDirectory, isTrue);
+      final file = syncEngine.nodeCache.listChildren(directory.id).single;
+      expect(file.isDirectory, isFalse);
+      final downloaded = await downloadAndDecryptFile(
+        api: serverConnection.api!,
+        accessToken: serverConnection.session!.accessToken,
+        vaultKey: (await vaultKeyStore.loadVaultKey())!,
+        vaultId: uuidStringToBytes(FakeNodeServer.userId),
+        nodeId: file.id,
+      );
+      expect(utf8.decode(downloaded), 'nested local file');
+    },
+  );
 }

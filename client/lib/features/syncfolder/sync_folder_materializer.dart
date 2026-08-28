@@ -25,10 +25,9 @@ enum SyncFolderStatus { idle, materializing, error }
 /// by [SyncEngine]'s local cache only — it never talks to the server for
 /// listings, just for downloading content that changed.
 ///
-/// This intentionally only mirrors server -> disk. Detecting edits made
-/// directly in the folder and uploading them (the watcher / upload
-/// direction) is a separate, later piece — see the roadmap notes in
-/// README.md.
+/// Local edits are observed by the sync-folder watcher, which asks the
+/// desktop coordinator to run this pull pass before the uploader's push pass.
+/// This class remains server -> disk only.
 ///
 /// Known limitation: only files are tracked for pruning/relocation
 /// ([MaterializedFilesStore] has no directory-level equivalent), so an
@@ -40,9 +39,9 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     required ServerConnectionController serverConnection,
     required VaultKeyStore vaultKeyStore,
     required SyncEngine syncEngine,
-  })  : _serverConnection = serverConnection,
-        _vaultKeyStore = vaultKeyStore,
-        _syncEngine = syncEngine;
+  }) : _serverConnection = serverConnection,
+       _vaultKeyStore = vaultKeyStore,
+       _syncEngine = syncEngine;
 
   final ServerConnectionController _serverConnection;
   final VaultKeyStore _vaultKeyStore;
@@ -116,7 +115,9 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         continue;
       }
       seenNodeIds.add(node.id);
-      final childRelativePath = relativePath.isEmpty ? metadata.fileName : '$relativePath/${metadata.fileName}';
+      final childRelativePath = relativePath.isEmpty
+          ? metadata.fileName
+          : '$relativePath/${metadata.fileName}';
       if (node.isDirectory) {
         await Directory('$rootPath/$childRelativePath').create(recursive: true);
         await _materializeDirectory(
@@ -160,7 +161,8 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     // rename/move bumps the revision too (it is just another UPDATE) but
     // does not create a new file version, so this is the only reliable way
     // to tell "just moved" apart from "content actually changed."
-    if (existing != null && existing.contentVersionId == node.currentVersionId) {
+    if (existing != null &&
+        existing.contentVersionId == node.currentVersionId) {
       if (existing.relativePath != relativePath) {
         // Only the name/location changed since last time; relocate the
         // bytes already on disk instead of re-downloading them.
@@ -168,12 +170,22 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         if (await oldFile.exists()) {
           await Directory(File(targetPath).parent.path).create(recursive: true);
           await oldFile.rename(targetPath);
+          _syncEngine.materializedFiles.upsert(
+            MaterializedFile(
+              nodeId: node.id,
+              relativePath: relativePath,
+              contentVersionId: node.currentVersionId,
+            ),
+          );
         }
-        _syncEngine.materializedFiles.upsert(MaterializedFile(nodeId: node.id, relativePath: relativePath, contentVersionId: node.currentVersionId));
       }
-      return; // content unchanged; nothing else to do.
+      if (await File(targetPath).exists()) {
+        return; // content is unchanged and present at its target path.
+      }
     }
-    if (node.currentVersionId == null) return; // node created but no content uploaded yet.
+    if (node.currentVersionId == null) {
+      return; // node created but no content uploaded yet.
+    }
     try {
       final bytes = await downloadAndDecryptFile(
         api: api,
@@ -186,14 +198,21 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       await Directory(File(targetPath).parent.path).create(recursive: true);
       final tempPath = '$targetPath.homebox-tmp';
       await File(tempPath).writeAsBytes(bytes, flush: true);
-      await File(tempPath).rename(targetPath); // atomic replace on the same volume.
+      await File(tempPath)
+          .rename(targetPath); // atomic replace on the same volume.
       if (existing != null && existing.relativePath != relativePath) {
         // Content changed and it moved/was renamed in the same pass -
         // clean up the stale copy at its old location.
         final oldFile = File('$rootPath/${existing.relativePath}');
         if (await oldFile.exists()) await oldFile.delete();
       }
-      _syncEngine.materializedFiles.upsert(MaterializedFile(nodeId: node.id, relativePath: relativePath, contentVersionId: node.currentVersionId));
+      _syncEngine.materializedFiles.upsert(
+        MaterializedFile(
+          nodeId: node.id,
+          relativePath: relativePath,
+          contentVersionId: node.currentVersionId,
+        ),
+      );
     } catch (_) {
       // Broad on purpose: downloadAndDecryptFile can throw StateError
       // (e.g. hash mismatch), which does not extend Exception. Leave this
@@ -213,12 +232,18 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     }
   }
 
-  Future<SensitiveNodeMetadata> _decryptMetadata(LocalNode node, SecretKey vaultKey, Uint8List vaultId) {
+  Future<SensitiveNodeMetadata> _decryptMetadata(
+    LocalNode node,
+    SecretKey vaultKey,
+    Uint8List vaultId,
+  ) {
     final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
     return _metadataCipher.decrypt(
       envelope: envelope,
       metadataKey: vaultKey,
-      nodeType: node.isDirectory ? MetadataNodeType.directory : MetadataNodeType.file,
+      nodeType: node.isDirectory
+          ? MetadataNodeType.directory
+          : MetadataNodeType.file,
       scopeId: vaultId,
       nodeId: uuidStringToBytes(node.id),
     );

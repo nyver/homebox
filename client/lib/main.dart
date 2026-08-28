@@ -14,6 +14,7 @@ import 'features/sync/sync_engine.dart';
 import 'features/syncfolder/local_folder_uploader.dart';
 import 'features/syncfolder/sync_folder_materializer.dart';
 import 'features/syncfolder/sync_folder_store.dart';
+import 'features/syncfolder/sync_folder_watcher.dart';
 import 'features/vault/vault_setup_controller.dart';
 
 void main() => runApp(const HomeBoxApp());
@@ -79,6 +80,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final VaultKeyStore _vaultKeyStore;
   late final VaultSetupController _vaultSetupController;
   late final SyncFolderStore _syncFolderStore;
+  late final SyncFolderWatcher _syncFolderWatcher;
   SyncEngine? _syncEngine;
   FilesController? _filesController;
   SyncFolderMaterializer? _syncFolderMaterializer;
@@ -95,13 +97,16 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   @override
   void initState() {
     super.initState();
-    _deviceIdentityStore = widget.deviceIdentityStore ?? DeviceIdentityStore.platform();
+    _deviceIdentityStore =
+        widget.deviceIdentityStore ?? DeviceIdentityStore.platform();
     _deviceSetupController = DeviceSetupController(_deviceIdentityStore);
     _serverConnectionController =
-        widget.serverConnectionController ?? ServerConnectionController(deviceIdentityStore: _deviceIdentityStore);
+        widget.serverConnectionController ??
+        ServerConnectionController(deviceIdentityStore: _deviceIdentityStore);
     _vaultKeyStore = widget.vaultKeyStore ?? VaultKeyStore();
     _vaultSetupController = VaultSetupController(_vaultKeyStore);
     _syncFolderStore = widget.syncFolderStore ?? SyncFolderStore();
+    _syncFolderWatcher = SyncFolderWatcher(onChange: _runSyncFolderPass);
     unawaited(_deviceSetupController.initialize());
     unawaited(_initializeServerConnection());
     unawaited(_vaultSetupController.initialize());
@@ -122,6 +127,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     final saved = await _syncFolderStore.load();
     if (!mounted || saved == null) return;
     setState(() => _syncFolder = saved);
+    _syncFolderWatcher.start(saved);
     unawaited(_runSyncFolderPass());
   }
 
@@ -172,7 +178,10 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       _syncEngineFingerprint = fingerprint;
       if (fingerprint != null) {
         final localDatabase = await LocalDatabase.open(fingerprint);
-        final engine = SyncEngine(serverConnection: _serverConnectionController, localDatabase: localDatabase);
+        final engine = SyncEngine(
+          serverConnection: _serverConnectionController,
+          localDatabase: localDatabase,
+        );
         final files = FilesController(
           serverConnection: _serverConnectionController,
           vaultKeyStore: _vaultKeyStore,
@@ -218,7 +227,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   void _maybeRefreshFiles() {
     final files = _filesController;
     if (files != null &&
-        _serverConnectionController.status == ServerConnectionStatus.authenticated &&
+        _serverConnectionController.status ==
+            ServerConnectionStatus.authenticated &&
         _vaultSetupController.status == VaultSetupStatus.ready) {
       unawaited(files.refresh());
     }
@@ -267,6 +277,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _filesController?.dispose();
     _syncFolderMaterializer?.dispose();
     _localFolderUploader?.dispose();
+    _syncFolderWatcher.dispose();
     _syncEngine?.dispose();
     _vaultSetupController.dispose();
     _deviceSetupController.dispose();
@@ -283,6 +294,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       if (!mounted || folder == null) return;
       setState(() => _syncFolder = folder);
       await _syncFolderStore.save(folder);
+      _syncFolderWatcher.start(folder);
       unawaited(_runSyncFolderPass());
     } on Exception {
       if (mounted) {
@@ -312,6 +324,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       syncEngine: _syncEngine,
       syncFolderMaterializer: _syncFolderMaterializer,
       localFolderUploader: _localFolderUploader,
+      syncFolderWatcher: _syncFolderWatcher,
     );
     if (!wideLayout) {
       return Scaffold(
@@ -419,7 +432,10 @@ class _VaultStateChip extends StatelessWidget {
             ? 'This vault was created on this device. A trusted device or Recovery Secret is required on any other device.'
             : 'Create or restore this account\'s vault in Settings to unlock E2EE data.',
         child: Chip(
-          avatar: Icon(ready ? Icons.lock_open_outlined : Icons.lock_outline, size: 18),
+          avatar: Icon(
+            ready ? Icons.lock_open_outlined : Icons.lock_outline,
+            size: 18,
+          ),
           label: Text(ready ? 'Vault unlocked' : 'Vault locked'),
         ),
       );
@@ -440,6 +456,7 @@ class _SectionContent extends StatelessWidget {
     required this.syncEngine,
     required this.syncFolderMaterializer,
     required this.localFolderUploader,
+    required this.syncFolderWatcher,
   });
 
   final AppSection section;
@@ -453,6 +470,7 @@ class _SectionContent extends StatelessWidget {
   final SyncEngine? syncEngine;
   final SyncFolderMaterializer? syncFolderMaterializer;
   final LocalFolderUploader? localFolderUploader;
+  final SyncFolderWatcher syncFolderWatcher;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -463,6 +481,7 @@ class _SectionContent extends StatelessWidget {
       syncEngine: syncEngine,
       syncFolderMaterializer: syncFolderMaterializer,
       localFolderUploader: localFolderUploader,
+      syncFolderWatcher: syncFolderWatcher,
     ),
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
@@ -492,15 +511,27 @@ final class _FilesSection extends StatelessWidget {
           onSubmitted: (value) => Navigator.pop(context, value),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, nameController.text), child: const Text('Create')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, nameController.text),
+            child: const Text('Create'),
+          ),
         ],
       ),
     );
     if (name == null || name.trim().isEmpty) return;
     final ok = await controller.createFolder(name.trim());
     if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not create the folder.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            controller.errorMessage ?? 'Could not create the folder.',
+          ),
+        ),
+      );
     }
   }
 
@@ -511,7 +542,9 @@ final class _FilesSection extends StatelessWidget {
     if (file == null) return;
     final ok = await controller.uploadFile(file.path);
     if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Upload failed.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(controller.errorMessage ?? 'Upload failed.')),
+      );
     }
   }
 
@@ -522,9 +555,15 @@ final class _FilesSection extends StatelessWidget {
     if (destination == null) return;
     final ok = await controller.downloadFile(entry, destination.path);
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(ok ? 'Saved to ${destination.path}' : (controller.errorMessage ?? 'Download failed.')),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            ok
+                ? 'Saved to ${destination.path}'
+                : (controller.errorMessage ?? 'Download failed.'),
+          ),
+        ),
+      );
     }
   }
 
@@ -535,7 +574,13 @@ final class _FilesSection extends StatelessWidget {
     if (file == null) return;
     final ok = await controller.replaceFileContent(entry, file.path);
     if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not replace the file.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            controller.errorMessage ?? 'Could not replace the file.',
+          ),
+        ),
+      );
     }
   }
 
@@ -554,15 +599,25 @@ final class _FilesSection extends StatelessWidget {
           onSubmitted: (value) => Navigator.pop(context, value),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, nameController.text), child: const Text('Rename')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, nameController.text),
+            child: const Text('Rename'),
+          ),
         ],
       ),
     );
-    if (name == null || name.trim().isEmpty || name.trim() == entry.name) return;
+    if (name == null || name.trim().isEmpty || name.trim() == entry.name) {
+      return;
+    }
     final ok = await controller.renameNode(entry, name.trim());
     if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not rename.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(controller.errorMessage ?? 'Could not rename.')),
+      );
     }
   }
 
@@ -575,15 +630,23 @@ final class _FilesSection extends StatelessWidget {
         title: const Text('Move to trash?'),
         content: Text('"${entry.name}" will be moved to the trash.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
         ],
       ),
     );
     if (confirmed != true) return;
     final ok = await controller.deleteNode(entry);
     if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not delete.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(controller.errorMessage ?? 'Could not delete.')),
+      );
     }
   }
 
@@ -597,90 +660,122 @@ final class _FilesSection extends StatelessWidget {
       );
     }
     return AnimatedBuilder(
-    animation: controller,
-    builder: (context, _) {
-      final Widget body;
-      if (controller.status == FilesStatus.idle) {
-        body = const _FilesMessageState(
-          icon: Icons.cloud_off_outlined,
-          message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
-        );
-      } else if (controller.status == FilesStatus.failed) {
-        body = _FilesMessageState(
-          icon: Icons.error_outline,
-          message: controller.errorMessage ?? 'Files are unavailable.',
-        );
-      } else if (controller.status == FilesStatus.loading && controller.entries.isEmpty) {
-        body = const Center(child: CircularProgressIndicator());
-      } else if (controller.entries.isEmpty) {
-        body = const _FilesMessageState(icon: Icons.folder_open_outlined, message: 'This folder is empty.');
-      } else {
-        body = ListView.separated(
-          itemCount: controller.entries.length,
-          separatorBuilder: (context, _) => const Divider(height: 1),
-          itemBuilder: (context, index) {
-            final entry = controller.entries[index];
-            return ListTile(
-              leading: Icon(entry.isDirectory ? Icons.folder_outlined : Icons.insert_drive_file_outlined),
-              title: Text(entry.name),
-              subtitle: entry.isDirectory ? null : Text(entry.metadata.mimeType ?? 'Encrypted file'),
-              onTap: entry.isDirectory ? () => controller.openFolder(entry) : () => _downloadFile(context, entry),
-              trailing: PopupMenuButton<String>(
-                tooltip: 'More actions',
-                onSelected: (value) => switch (value) {
-                  'replace' => _replaceContent(context, entry),
-                  'rename' => _renameEntry(context, entry),
-                  'delete' => _deleteEntry(context, entry),
-                  _ => null,
-                },
-                itemBuilder: (context) => [
-                  if (!entry.isDirectory) const PopupMenuItem(value: 'replace', child: Text('Replace content…')),
-                  const PopupMenuItem(value: 'rename', child: Text('Rename')),
-                  const PopupMenuItem(value: 'delete', child: Text('Move to trash')),
+      animation: controller,
+      builder: (context, _) {
+        final Widget body;
+        if (controller.status == FilesStatus.idle) {
+          body = const _FilesMessageState(
+            icon: Icons.cloud_off_outlined,
+            message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+          );
+        } else if (controller.status == FilesStatus.failed) {
+          body = _FilesMessageState(
+            icon: Icons.error_outline,
+            message: controller.errorMessage ?? 'Files are unavailable.',
+          );
+        } else if (controller.status == FilesStatus.loading &&
+            controller.entries.isEmpty) {
+          body = const Center(child: CircularProgressIndicator());
+        } else if (controller.entries.isEmpty) {
+          body = const _FilesMessageState(
+            icon: Icons.folder_open_outlined,
+            message: 'This folder is empty.',
+          );
+        } else {
+          body = ListView.separated(
+            itemCount: controller.entries.length,
+            separatorBuilder: (context, _) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final entry = controller.entries[index];
+              return ListTile(
+                leading: Icon(
+                  entry.isDirectory
+                      ? Icons.folder_outlined
+                      : Icons.insert_drive_file_outlined,
+                ),
+                title: Text(entry.name),
+                subtitle: entry.isDirectory
+                    ? null
+                    : Text(entry.metadata.mimeType ?? 'Encrypted file'),
+                onTap: entry.isDirectory
+                    ? () => controller.openFolder(entry)
+                    : () => _downloadFile(context, entry),
+                trailing: PopupMenuButton<String>(
+                  tooltip: 'More actions',
+                  onSelected: (value) => switch (value) {
+                    'replace' => _replaceContent(context, entry),
+                    'rename' => _renameEntry(context, entry),
+                    'delete' => _deleteEntry(context, entry),
+                    _ => null,
+                  },
+                  itemBuilder: (context) => [
+                    if (!entry.isDirectory)
+                      const PopupMenuItem(
+                        value: 'replace',
+                        child: Text('Replace content…'),
+                      ),
+                    const PopupMenuItem(value: 'rename', child: Text('Rename')),
+                    const PopupMenuItem(
+                      value: 'delete',
+                      child: Text('Move to trash'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        }
+        return _PageFrame(
+          title: 'Files',
+          subtitle: controller.breadcrumbNames.isEmpty
+              ? 'Root'
+              : controller.breadcrumbNames.join(' / '),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  if (controller.canGoUp)
+                    IconButton(
+                      onPressed: controller.goToRoot,
+                      icon: const Icon(Icons.home_outlined),
+                      tooltip: 'Root',
+                    ),
+                  const Spacer(),
+                  if (controller.busy)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 12),
+                      child: SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          value: controller.progress,
+                        ),
+                      ),
+                    ),
+                  OutlinedButton.icon(
+                    onPressed: controller.busy
+                        ? null
+                        : () => _createFolder(context),
+                    icon: const Icon(Icons.create_new_folder_outlined),
+                    label: const Text('New folder'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.icon(
+                    onPressed: controller.busy
+                        ? null
+                        : () => _uploadFile(context),
+                    icon: const Icon(Icons.upload_outlined),
+                    label: const Text('Upload'),
+                  ),
                 ],
               ),
-            );
-          },
+              const SizedBox(height: 12),
+              Expanded(child: body),
+            ],
+          ),
         );
-      }
-      return _PageFrame(
-        title: 'Files',
-        subtitle: controller.breadcrumbNames.isEmpty ? 'Root' : controller.breadcrumbNames.join(' / '),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                if (controller.canGoUp)
-                  IconButton(onPressed: controller.goToRoot, icon: const Icon(Icons.home_outlined), tooltip: 'Root'),
-                const Spacer(),
-                if (controller.busy)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 12),
-                    child: SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2, value: controller.progress),
-                    ),
-                  ),
-                OutlinedButton.icon(
-                  onPressed: controller.busy ? null : () => _createFolder(context),
-                  icon: const Icon(Icons.create_new_folder_outlined),
-                  label: const Text('New folder'),
-                ),
-                const SizedBox(width: 8),
-                FilledButton.icon(
-                  onPressed: controller.busy ? null : () => _uploadFile(context),
-                  icon: const Icon(Icons.upload_outlined),
-                  label: const Text('Upload'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Expanded(child: body),
-          ],
-        ),
-      );
-    },
+      },
     );
   }
 }
@@ -714,12 +809,14 @@ class _SyncSection extends StatelessWidget {
     required this.syncEngine,
     required this.syncFolderMaterializer,
     required this.localFolderUploader,
+    required this.syncFolderWatcher,
   });
   final String? syncFolder;
   final Future<void> Function() onSelectSyncFolder;
   final SyncEngine? syncEngine;
   final SyncFolderMaterializer? syncFolderMaterializer;
   final LocalFolderUploader? localFolderUploader;
+  final SyncFolderWatcher syncFolderWatcher;
 
   @override
   Widget build(BuildContext context) {
@@ -736,7 +833,9 @@ class _SyncSection extends StatelessWidget {
               child: ListTile(
                 leading: Icon(Icons.pause_circle_outline),
                 title: Text('Sync paused'),
-                subtitle: Text('Provision this device with a trusted device or Recovery Secret.'),
+                subtitle: Text(
+                  'Provision this device with a trusted device or Recovery Secret.',
+                ),
                 trailing: Chip(label: Text('Locked')),
               ),
             )
@@ -754,7 +853,9 @@ class _SyncSection extends StatelessWidget {
                   child: ListTile(
                     leading: Icon(icon),
                     title: Text(label),
-                    subtitle: engine.status == SyncStatus.error && engine.errorMessage != null
+                    subtitle:
+                        engine.status == SyncStatus.error &&
+                            engine.errorMessage != null
                         ? Text(engine.errorMessage!)
                         : null,
                   ),
@@ -768,7 +869,7 @@ class _SyncSection extends StatelessWidget {
               subtitle: Text(
                 syncFolder == null
                     ? 'Not selected — files stay reachable only through the Files page.'
-                    : '$syncFolder\nFiles added or edited inside an existing folder here are uploaded automatically; new subfolders are not yet picked up.',
+                    : '$syncFolder\nFilesystem changes are picked up automatically. New local folders and their files are uploaded; directory deletes remain conservative.',
               ),
               isThreeLine: syncFolder != null,
               trailing: TextButton(
@@ -783,15 +884,26 @@ class _SyncSection extends StatelessWidget {
               builder: (context, _) {
                 final materializer = syncFolderMaterializer!;
                 final (icon, label) = switch (materializer.status) {
-                  SyncFolderStatus.idle => (Icons.check_circle_outline, 'Folder mirrors the vault'),
-                  SyncFolderStatus.materializing => (Icons.download_outlined, 'Writing files to the folder…'),
-                  SyncFolderStatus.error => (Icons.error_outline, 'Could not update the folder'),
+                  SyncFolderStatus.idle => (
+                    Icons.check_circle_outline,
+                    'Folder mirrors the vault',
+                  ),
+                  SyncFolderStatus.materializing => (
+                    Icons.download_outlined,
+                    'Writing files to the folder…',
+                  ),
+                  SyncFolderStatus.error => (
+                    Icons.error_outline,
+                    'Could not update the folder',
+                  ),
                 };
                 return Card(
                   child: ListTile(
                     leading: Icon(icon),
                     title: Text(label),
-                    subtitle: materializer.status == SyncFolderStatus.error && materializer.errorMessage != null
+                    subtitle:
+                        materializer.status == SyncFolderStatus.error &&
+                            materializer.errorMessage != null
                         ? Text(materializer.errorMessage!)
                         : null,
                   ),
@@ -804,17 +916,62 @@ class _SyncSection extends StatelessWidget {
               builder: (context, _) {
                 final uploader = localFolderUploader!;
                 final (icon, label) = switch (uploader.status) {
-                  LocalUploadStatus.idle => (Icons.check_circle_outline, 'No local changes pending'),
-                  LocalUploadStatus.scanning => (Icons.upload_outlined, 'Uploading local changes…'),
-                  LocalUploadStatus.error => (Icons.error_outline, 'Could not upload local changes'),
+                  LocalUploadStatus.idle => (
+                    Icons.check_circle_outline,
+                    'No local changes pending',
+                  ),
+                  LocalUploadStatus.scanning => (
+                    Icons.upload_outlined,
+                    'Uploading local changes…',
+                  ),
+                  LocalUploadStatus.error => (
+                    Icons.error_outline,
+                    'Could not upload local changes',
+                  ),
                 };
                 return Card(
                   child: ListTile(
                     leading: Icon(icon),
                     title: Text(label),
-                    subtitle: uploader.status == LocalUploadStatus.error && uploader.errorMessage != null
+                    subtitle:
+                        uploader.status == LocalUploadStatus.error &&
+                            uploader.errorMessage != null
                         ? Text(uploader.errorMessage!)
                         : null,
+                  ),
+                );
+              },
+            ),
+          if (syncFolder != null)
+            AnimatedBuilder(
+              animation: syncFolderWatcher,
+              builder: (context, _) {
+                final (icon, label) = switch (syncFolderWatcher.status) {
+                  SyncFolderWatcherStatus.stopped => (
+                    Icons.pause_circle_outline,
+                    'Folder watcher stopped',
+                  ),
+                  SyncFolderWatcherStatus.watching => (
+                    Icons.visibility_outlined,
+                    'Watching local changes',
+                  ),
+                  SyncFolderWatcherStatus.error => (
+                    Icons.error_outline,
+                    'Folder watcher needs attention',
+                  ),
+                };
+                return Card(
+                  child: ListTile(
+                    leading: Icon(icon),
+                    title: Text(label),
+                    subtitle:
+                        syncFolderWatcher.status ==
+                                SyncFolderWatcherStatus.error &&
+                            syncFolderWatcher.errorMessage != null
+                        ? Text(syncFolderWatcher.errorMessage!)
+                        : const Text(
+                            'Changes are debounced before a safe sync pass.',
+                          ),
                   ),
                 );
               },
@@ -844,7 +1001,10 @@ class _SettingsSection extends StatelessWidget {
       children: [
         _ServerConnectionCard(controller: serverConnectionController),
         _DeviceIdentityCard(controller: deviceSetupController),
-        _VaultSetupCard(controller: vaultSetupController, serverConnectionController: serverConnectionController),
+        _VaultSetupCard(
+          controller: vaultSetupController,
+          serverConnectionController: serverConnectionController,
+        ),
       ],
     ),
   );
@@ -975,7 +1135,10 @@ final class _ServerConnectionCard extends StatelessWidget {
     await controller.discover(entered);
   }
 
-  Future<void> _confirmFingerprint(BuildContext context, String fingerprint) async {
+  Future<void> _confirmFingerprint(
+    BuildContext context,
+    String fingerprint,
+  ) async {
     final trust = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -989,7 +1152,12 @@ final class _ServerConnectionCard extends StatelessWidget {
               'on the server, over a channel you trust, before continuing.',
             ),
             const SizedBox(height: 12),
-            SelectableText(fingerprint, style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()])),
+            SelectableText(
+              fingerprint,
+              style: const TextStyle(
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            ),
           ],
         ),
         actions: [
@@ -1081,41 +1249,59 @@ final class _ServerConnectionCard extends StatelessWidget {
         ),
       ];
 
-      if (controller.status == ServerConnectionStatus.failed && controller.errorMessage != null) {
-        cards.add(Card(
-          child: ListTile(
-            leading: const Icon(Icons.error_outline),
-            title: const Text('Connection failed'),
-            subtitle: Text(controller.errorMessage!),
+      if (controller.status == ServerConnectionStatus.failed &&
+          controller.errorMessage != null) {
+        cards.add(
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.error_outline),
+              title: const Text('Connection failed'),
+              subtitle: Text(controller.errorMessage!),
+            ),
           ),
-        ));
+        );
       }
 
-      if (controller.status == ServerConnectionStatus.awaitingTrust && controller.discoveredFingerprint != null) {
+      if (controller.status == ServerConnectionStatus.awaitingTrust &&
+          controller.discoveredFingerprint != null) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (context.mounted) _confirmFingerprint(context, controller.discoveredFingerprint!);
+          if (context.mounted) {
+            _confirmFingerprint(context, controller.discoveredFingerprint!);
+          }
         });
       }
 
       if (controller.status == ServerConnectionStatus.connectedLoggedOut ||
           controller.status == ServerConnectionStatus.authenticated) {
         final session = controller.session;
-        cards.add(Card(
-          child: ListTile(
-            leading: Icon(session != null ? Icons.verified_user_outlined : Icons.person_outline),
-            title: Text(session != null ? 'Signed in as ${session.user.username}' : 'Not signed in'),
-            subtitle: session == null && controller.errorMessage != null ? Text(controller.errorMessage!) : null,
-            trailing: session != null
-                ? TextButton(
-                    onPressed: () => controller.logout(),
-                    child: const Text('Sign out'),
-                  )
-                : FilledButton(
-                    onPressed: () => _promptForLogin(context),
-                    child: const Text('Sign in'),
-                  ),
+        cards.add(
+          Card(
+            child: ListTile(
+              leading: Icon(
+                session != null
+                    ? Icons.verified_user_outlined
+                    : Icons.person_outline,
+              ),
+              title: Text(
+                session != null
+                    ? 'Signed in as ${session.user.username}'
+                    : 'Not signed in',
+              ),
+              subtitle: session == null && controller.errorMessage != null
+                  ? Text(controller.errorMessage!)
+                  : null,
+              trailing: session != null
+                  ? TextButton(
+                      onPressed: () => controller.logout(),
+                      child: const Text('Sign out'),
+                    )
+                  : FilledButton(
+                      onPressed: () => _promptForLogin(context),
+                      child: const Text('Sign in'),
+                    ),
+            ),
           ),
-        ));
+        );
       }
 
       return Column(children: cards);
@@ -1124,7 +1310,10 @@ final class _ServerConnectionCard extends StatelessWidget {
 }
 
 final class _VaultSetupCard extends StatelessWidget {
-  const _VaultSetupCard({required this.controller, required this.serverConnectionController});
+  const _VaultSetupCard({
+    required this.controller,
+    required this.serverConnectionController,
+  });
 
   final VaultSetupController controller;
   final ServerConnectionController serverConnectionController;
@@ -1132,7 +1321,11 @@ final class _VaultSetupCard extends StatelessWidget {
   Future<void> _createVault(BuildContext context) async {
     final userId = serverConnectionController.session?.user.id;
     if (userId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Sign in to the server before creating a vault.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Sign in to the server before creating a vault.'),
+        ),
+      );
       return;
     }
     final confirmed = await showDialog<bool>(
@@ -1144,8 +1337,14 @@ final class _VaultSetupCard extends StatelessWidget {
           'If every trusted device and the Recovery Secret are lost, nobody — including HomeBox — can recover your files.',
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Create vault')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Create vault'),
+          ),
         ],
       ),
     );
@@ -1153,57 +1352,77 @@ final class _VaultSetupCard extends StatelessWidget {
     final secret = await controller.createVault(userId);
     if (secret == null) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not create the vault.')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              controller.errorMessage ?? 'Could not create the vault.',
+            ),
+          ),
+        );
       }
       return;
     }
     if (context.mounted) await _showRecoverySecret(context, secret);
   }
 
-  Future<void> _showRecoverySecret(BuildContext context, String secret) => showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (context) {
-      var confirmedSaved = false;
-      // A single StatefulBuilder wraps the whole dialog so toggling the
-      // checkbox also rebuilds the "Done" button's enabled state — two
-      // separate StatefulBuilders (one per widget) would each keep their
-      // own rebuild scope and never see the other's state change.
-      return StatefulBuilder(
-        builder: (context, setState) => AlertDialog(
-          title: const Text('Save your Recovery Secret'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('This is shown only once. Without it — and without another trusted device — your files can never be recovered.'),
-              const SizedBox(height: 12),
-              SelectableText(secret, style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()])),
-              const SizedBox(height: 12),
-              CheckboxListTile(
-                value: confirmedSaved,
-                contentPadding: EdgeInsets.zero,
-                controlAffinity: ListTileControlAffinity.leading,
-                onChanged: (value) => setState(() => confirmedSaved = value ?? false),
-                title: const Text('I have saved this Recovery Secret somewhere safe.'),
+  Future<void> _showRecoverySecret(BuildContext context, String secret) =>
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) {
+          var confirmedSaved = false;
+          // A single StatefulBuilder wraps the whole dialog so toggling the
+          // checkbox also rebuilds the "Done" button's enabled state — two
+          // separate StatefulBuilders (one per widget) would each keep their
+          // own rebuild scope and never see the other's state change.
+          return StatefulBuilder(
+            builder: (context, setState) => AlertDialog(
+              title: const Text('Save your Recovery Secret'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'This is shown only once. Without it — and without another trusted device — your files can never be recovered.',
+                  ),
+                  const SizedBox(height: 12),
+                  SelectableText(
+                    secret,
+                    style: const TextStyle(
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  CheckboxListTile(
+                    value: confirmedSaved,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    onChanged: (value) =>
+                        setState(() => confirmedSaved = value ?? false),
+                    title: const Text(
+                      'I have saved this Recovery Secret somewhere safe.',
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
-          actions: [
-            TextButton.icon(
-              onPressed: () => Clipboard.setData(ClipboardData(text: secret)),
-              icon: const Icon(Icons.copy_outlined),
-              label: const Text('Copy'),
+              actions: [
+                TextButton.icon(
+                  onPressed: () =>
+                      Clipboard.setData(ClipboardData(text: secret)),
+                  icon: const Icon(Icons.copy_outlined),
+                  label: const Text('Copy'),
+                ),
+                FilledButton(
+                  onPressed: confirmedSaved
+                      ? () => Navigator.pop(context)
+                      : null,
+                  child: const Text('Done'),
+                ),
+              ],
             ),
-            FilledButton(
-              onPressed: confirmedSaved ? () => Navigator.pop(context) : null,
-              child: const Text('Done'),
-            ),
-          ],
-        ),
+          );
+        },
       );
-    },
-  );
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -1211,11 +1430,11 @@ final class _VaultSetupCard extends StatelessWidget {
     builder: (context, _) {
       final subtitle = switch (controller.status) {
         VaultSetupStatus.checking => 'Checking for an existing vault…',
-        VaultSetupStatus.locked =>
-          'No vault on this device yet. Create one here, or unlock this device from an existing trusted device / Recovery Secret.',
+        VaultSetupStatus.locked => 'No vault on this device yet. Create one here, or unlock this device from an existing trusted device / Recovery Secret.',
         VaultSetupStatus.creating => 'Creating vault keys…',
         VaultSetupStatus.ready => 'Vault ready on this device.',
-        VaultSetupStatus.failed => controller.errorMessage ?? 'Vault storage is unavailable.',
+        VaultSetupStatus.failed =>
+          controller.errorMessage ?? 'Vault storage is unavailable.',
       };
       final trailing = switch (controller.status) {
         VaultSetupStatus.checking ||
@@ -1228,7 +1447,10 @@ final class _VaultSetupCard extends StatelessWidget {
           child: const Text('Create vault'),
         ),
         VaultSetupStatus.ready => const Icon(Icons.check_circle_outline),
-        VaultSetupStatus.failed => TextButton(onPressed: controller.initialize, child: const Text('Retry')),
+        VaultSetupStatus.failed => TextButton(
+          onPressed: controller.initialize,
+          child: const Text('Retry'),
+        ),
       };
       return Card(
         child: ListTile(

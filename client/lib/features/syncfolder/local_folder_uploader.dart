@@ -37,19 +37,20 @@ enum LocalUploadStatus { idle, scanning, error }
 /// indistinguishable from one the user removed, and would be deleted
 /// server-side by mistake.
 ///
-/// Known limitations (acceptable for this slice, see README): a brand-new
-/// local subfolder is not picked up — only files placed inside a folder
-/// the app already knows about are uploaded — and a local rename is seen
-/// as a delete plus a new file (uploaded as a new node) rather than
-/// recognized as a rename of the existing one.
+/// A brand-new local subfolder is created remotely, then scanned recursively
+/// so its initial tree is uploaded too. Local directory deletes remain
+/// intentionally conservative: no directory-level materialization record
+/// exists yet, so automatically deleting a remote subtree could mistake an
+/// incomplete pull for user intent. A local rename is still seen as a delete
+/// plus a new node rather than recognized as a rename of the existing one.
 final class LocalFolderUploader extends ChangeNotifier {
   LocalFolderUploader({
     required ServerConnectionController serverConnection,
     required VaultKeyStore vaultKeyStore,
     required SyncEngine syncEngine,
-  })  : _serverConnection = serverConnection,
-        _vaultKeyStore = vaultKeyStore,
-        _syncEngine = syncEngine;
+  }) : _serverConnection = serverConnection,
+       _vaultKeyStore = vaultKeyStore,
+       _syncEngine = syncEngine;
 
   final ServerConnectionController _serverConnection;
   final VaultKeyStore _vaultKeyStore;
@@ -108,15 +109,21 @@ final class LocalFolderUploader extends ChangeNotifier {
     required SecretKey vaultKey,
     required Uint8List vaultId,
   }) async {
-    final dir = Directory(relativePath.isEmpty ? rootPath : '$rootPath/$relativePath');
-    if (!await dir.exists()) return; // the whole folder is gone locally; out of scope for this slice.
+    final dir = Directory(
+      relativePath.isEmpty ? rootPath : '$rootPath/$relativePath',
+    );
+    if (!await dir.exists()) {
+      return; // the whole folder is gone locally; out of scope for this slice.
+    }
 
     final localFiles = <String, File>{};
     final localDirs = <String>{};
     await for (final entry in dir.list()) {
       final name = _basename(entry.path);
       if (entry is File) {
-        if (name.endsWith('.homebox-tmp')) continue; // SyncFolderMaterializer's own in-flight temp file.
+        if (name.endsWith('.homebox-tmp')) {
+          continue; // SyncFolderMaterializer's own in-flight temp file.
+        }
         localFiles[name] = entry;
       } else if (entry is Directory) {
         localDirs.add(name);
@@ -177,14 +184,39 @@ final class LocalFolderUploader extends ChangeNotifier {
       );
     }
 
+    for (final name in localDirs) {
+      if (expectedChildren.containsKey(name)) continue;
+      final createdDirectory = await _createRemoteDirectory(
+        api: api,
+        accessToken: accessToken,
+        vaultKey: vaultKey,
+        vaultId: vaultId,
+        parentId: parentId,
+        name: name,
+      );
+      if (createdDirectory == null) continue;
+      await _scanDirectory(
+        rootPath: rootPath,
+        parentId: createdDirectory.id,
+        relativePath: relativePath.isEmpty ? name : '$relativePath/$name',
+        api: api,
+        accessToken: accessToken,
+        keyScopeId: keyScopeId,
+        vaultKey: vaultKey,
+        vaultId: vaultId,
+      );
+    }
+
     for (final entry in expectedChildren.entries) {
       final (node, _) = entry.value;
       if (!node.isDirectory) continue;
-      if (!localDirs.contains(entry.key)) continue; // new subfolders and disappeared ones: out of scope for this slice.
+      if (!localDirs.contains(entry.key)) continue; // disappeared directories are deliberately not deleted remotely.
       await _scanDirectory(
         rootPath: rootPath,
         parentId: node.id,
-        relativePath: relativePath.isEmpty ? entry.key : '$relativePath/${entry.key}',
+        relativePath: relativePath.isEmpty
+            ? entry.key
+            : '$relativePath/${entry.key}',
         api: api,
         accessToken: accessToken,
         keyScopeId: keyScopeId,
@@ -209,10 +241,13 @@ final class LocalFolderUploader extends ChangeNotifier {
     try {
       final bytes = await localFile.readAsBytes();
       final hash = sha256.convert(bytes).toString();
-      if (currentMetadata.plaintextSha256?.toLowerCase() == hash.toLowerCase()) {
+      if (currentMetadata.plaintextSha256?.toLowerCase() ==
+          hash.toLowerCase()) {
         return; // unchanged - either untouched, or exactly what materialize() itself just wrote.
       }
-      if (bytes.length > 100 * 1024 * 1024) return; // matches FilesController's upload size limit.
+      if (bytes.length > 100 * 1024 * 1024) {
+        return; // matches FilesController's upload size limit.
+      }
 
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(fileName: name, plaintextSha256: hash),
@@ -246,7 +281,13 @@ final class LocalFolderUploader extends ChangeNotifier {
         metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
       );
       _syncEngine.nodeCache.upsert(localNodeFromServerNode(finalNode));
-      _syncEngine.materializedFiles.upsert(MaterializedFile(nodeId: node.id, relativePath: relativePath.isEmpty ? name : '$relativePath/$name', contentVersionId: finalNode.currentVersionId));
+      _syncEngine.materializedFiles.upsert(
+        MaterializedFile(
+          nodeId: node.id,
+          relativePath: relativePath.isEmpty ? name : '$relativePath/$name',
+          contentVersionId: finalNode.currentVersionId,
+        ),
+      );
     } catch (_) {
       // Broad on purpose: this class's own checks and the shared crypto
       // helpers can throw StateError/ArgumentError, which do not extend
@@ -268,7 +309,9 @@ final class LocalFolderUploader extends ChangeNotifier {
   }) async {
     try {
       final bytes = await localFile.readAsBytes();
-      if (bytes.length > 100 * 1024 * 1024) return; // matches FilesController's upload size limit.
+      if (bytes.length > 100 * 1024 * 1024) {
+        return; // matches FilesController's upload size limit.
+      }
       final hash = sha256.convert(bytes).toString();
 
       final nodeId = generateUuidV4();
@@ -308,15 +351,67 @@ final class LocalFolderUploader extends ChangeNotifier {
       // Record this device's own upload as already-materialized so the
       // next materialize() pass doesn't immediately re-download the bytes
       // it just read from disk.
-      _syncEngine.materializedFiles.upsert(MaterializedFile(nodeId: nodeId, relativePath: relativePath.isEmpty ? name : '$relativePath/$name', contentVersionId: uploadedNode.currentVersionId));
+      _syncEngine.materializedFiles.upsert(
+        MaterializedFile(
+          nodeId: nodeId,
+          relativePath: relativePath.isEmpty ? name : '$relativePath/$name',
+          contentVersionId: uploadedNode.currentVersionId,
+        ),
+      );
     } catch (_) {
       // Broad on purpose — see _uploadIfChanged.
     }
   }
 
-  Future<void> _deleteRemoteNode(transport.HomeBoxApiClient api, String accessToken, LocalNode node) async {
+  Future<LocalNode?> _createRemoteDirectory({
+    required transport.HomeBoxApiClient api,
+    required String accessToken,
+    required SecretKey vaultKey,
+    required Uint8List vaultId,
+    required String? parentId,
+    required String name,
+  }) async {
     try {
-      await api.deleteNode(accessToken, node.id, operationId: generateUuidV4(), expectedRevision: node.revision);
+      final nodeId = generateUuidV4();
+      final metadataEnvelope = await _metadataCipher.encrypt(
+        metadata: SensitiveNodeMetadata(fileName: name),
+        metadataKey: vaultKey,
+        keyVersion: homeBoxPersonalVaultKeyVersion,
+        nodeType: MetadataNodeType.directory,
+        scopeId: vaultId,
+        nodeId: uuidStringToBytes(nodeId),
+      );
+      final created = await api.createNode(
+        accessToken,
+        id: nodeId,
+        operationId: generateUuidV4(),
+        parentId: parentId,
+        nodeType: 'DIRECTORY',
+        metadataCiphertext: metadataEnvelope.encode(),
+        metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+      );
+      final local = localNodeFromServerNode(created);
+      _syncEngine.nodeCache.upsert(local);
+      return local;
+    } catch (_) {
+      // See _uploadIfChanged: leave this directory for the next scan instead
+      // of aborting the entire tree because a single create failed.
+      return null;
+    }
+  }
+
+  Future<void> _deleteRemoteNode(
+    transport.HomeBoxApiClient api,
+    String accessToken,
+    LocalNode node,
+  ) async {
+    try {
+      await api.deleteNode(
+        accessToken,
+        node.id,
+        operationId: generateUuidV4(),
+        expectedRevision: node.revision,
+      );
       // Refetch rather than assume the exact post-delete revision — a
       // soft-deleted node is still retrievable by design (that is what
       // Trash/restore relies on), matching how SyncEngine reconciles its
@@ -331,12 +426,18 @@ final class LocalFolderUploader extends ChangeNotifier {
     }
   }
 
-  Future<SensitiveNodeMetadata> _decryptMetadata(LocalNode node, SecretKey vaultKey, Uint8List vaultId) {
+  Future<SensitiveNodeMetadata> _decryptMetadata(
+    LocalNode node,
+    SecretKey vaultKey,
+    Uint8List vaultId,
+  ) {
     final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
     return _metadataCipher.decrypt(
       envelope: envelope,
       metadataKey: vaultKey,
-      nodeType: node.isDirectory ? MetadataNodeType.directory : MetadataNodeType.file,
+      nodeType: node.isDirectory
+          ? MetadataNodeType.directory
+          : MetadataNodeType.file,
       scopeId: vaultId,
       nodeId: uuidStringToBytes(node.id),
     );
