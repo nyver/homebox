@@ -6,9 +6,11 @@ import 'package:flutter/services.dart';
 
 import 'core/e2ee/device_identity.dart';
 import 'core/e2ee/vault_key_store.dart';
+import 'core/storage/local_database.dart';
 import 'features/device/device_setup_controller.dart';
 import 'features/files/files_controller.dart';
 import 'features/server/server_connection_controller.dart';
+import 'features/sync/sync_engine.dart';
 import 'features/vault/vault_setup_controller.dart';
 
 void main() => runApp(const HomeBoxApp());
@@ -58,7 +60,11 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final ServerConnectionController _serverConnectionController;
   late final VaultKeyStore _vaultKeyStore;
   late final VaultSetupController _vaultSetupController;
-  late final FilesController _filesController;
+  SyncEngine? _syncEngine;
+  FilesController? _filesController;
+  String? _syncEngineFingerprint;
+  bool _rebuildingSyncEngine = false;
+  bool _pendingRebuildFingerprint = false;
   AppSection _section = AppSection.files;
   String? _syncFolder;
   bool _selectingFolder = false;
@@ -72,29 +78,102 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         widget.serverConnectionController ?? ServerConnectionController(deviceIdentityStore: _deviceIdentityStore);
     _vaultKeyStore = widget.vaultKeyStore ?? VaultKeyStore();
     _vaultSetupController = VaultSetupController(_vaultKeyStore);
-    _filesController = FilesController(serverConnection: _serverConnectionController, vaultKeyStore: _vaultKeyStore);
     unawaited(_deviceSetupController.initialize());
-    unawaited(_serverConnectionController.initialize());
+    unawaited(_initializeServerConnection());
     unawaited(_vaultSetupController.initialize());
     // Whenever the connection or the vault reaches a state where files
     // might actually be listable, refresh — cheap no-ops otherwise (see
     // FilesController._requireContext).
-    _serverConnectionController.addListener(_maybeRefreshFiles);
+    _serverConnectionController.addListener(_onServerConnectionChanged);
     _vaultSetupController.addListener(_maybeRefreshFiles);
   }
 
+  Future<void> _initializeServerConnection() async {
+    await _serverConnectionController.initialize();
+    await _rebuildSyncEngineForCurrentServer();
+  }
+
+  void _onServerConnectionChanged() {
+    unawaited(_rebuildSyncEngineForCurrentServer());
+    _maybeRefreshFiles();
+  }
+
+  /// [SyncEngine] owns a local database scoped by the pinned server's
+  /// fingerprint (see [LocalDatabase.open]), so a new one — and a matching
+  /// [FilesController] — must be built whenever that fingerprint changes
+  /// (first connection, or connecting to a different server after
+  /// [ServerConnectionController.forgetServer]). Idempotent: a no-op call
+  /// when nothing has changed. Re-entrant calls (e.g. a rapid
+  /// forget-then-reconnect before the first rebuild finishes) are not
+  /// dropped: each waits for the in-flight rebuild, then re-checks the
+  /// fingerprint and rebuilds again if it has since moved on.
+  Future<void> _rebuildSyncEngineForCurrentServer() async {
+    if (_rebuildingSyncEngine) {
+      _pendingRebuildFingerprint = true;
+      return;
+    }
+    final fingerprint = _serverConnectionController.server?.fingerprint;
+    if (fingerprint == _syncEngineFingerprint) return;
+    _rebuildingSyncEngine = true;
+    try {
+      final oldFiles = _filesController;
+      final oldEngine = _syncEngine;
+      if (mounted) {
+        setState(() {
+          _filesController = null;
+          _syncEngine = null;
+        });
+      } else {
+        _filesController = null;
+        _syncEngine = null;
+      }
+      oldFiles?.dispose();
+      oldEngine?.dispose(); // also closes its LocalDatabase.
+      _syncEngineFingerprint = fingerprint;
+      if (fingerprint != null) {
+        final localDatabase = await LocalDatabase.open(fingerprint);
+        final engine = SyncEngine(serverConnection: _serverConnectionController, localDatabase: localDatabase);
+        final files = FilesController(
+          serverConnection: _serverConnectionController,
+          vaultKeyStore: _vaultKeyStore,
+          syncEngine: engine,
+        );
+        if (!mounted) {
+          files.dispose();
+          engine.dispose();
+          return;
+        }
+        setState(() {
+          _syncEngine = engine;
+          _filesController = files;
+        });
+        engine.start();
+        _maybeRefreshFiles();
+      }
+    } finally {
+      _rebuildingSyncEngine = false;
+    }
+    if (_pendingRebuildFingerprint) {
+      _pendingRebuildFingerprint = false;
+      await _rebuildSyncEngineForCurrentServer();
+    }
+  }
+
   void _maybeRefreshFiles() {
-    if (_serverConnectionController.status == ServerConnectionStatus.authenticated &&
+    final files = _filesController;
+    if (files != null &&
+        _serverConnectionController.status == ServerConnectionStatus.authenticated &&
         _vaultSetupController.status == VaultSetupStatus.ready) {
-      unawaited(_filesController.refresh());
+      unawaited(files.refresh());
     }
   }
 
   @override
   void dispose() {
-    _serverConnectionController.removeListener(_maybeRefreshFiles);
+    _serverConnectionController.removeListener(_onServerConnectionChanged);
     _vaultSetupController.removeListener(_maybeRefreshFiles);
-    _filesController.dispose();
+    _filesController?.dispose();
+    _syncEngine?.dispose();
     _vaultSetupController.dispose();
     _deviceSetupController.dispose();
     _serverConnectionController.dispose();
@@ -134,6 +213,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       serverConnectionController: _serverConnectionController,
       vaultSetupController: _vaultSetupController,
       filesController: _filesController,
+      syncEngine: _syncEngine,
     );
     if (!wideLayout) {
       return Scaffold(
@@ -259,6 +339,7 @@ class _SectionContent extends StatelessWidget {
     required this.serverConnectionController,
     required this.vaultSetupController,
     required this.filesController,
+    required this.syncEngine,
   });
 
   final AppSection section;
@@ -268,7 +349,8 @@ class _SectionContent extends StatelessWidget {
   final DeviceSetupController deviceSetupController;
   final ServerConnectionController serverConnectionController;
   final VaultSetupController vaultSetupController;
-  final FilesController filesController;
+  final FilesController? filesController;
+  final SyncEngine? syncEngine;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -276,6 +358,7 @@ class _SectionContent extends StatelessWidget {
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,
       onSelectSyncFolder: onSelectSyncFolder,
+      syncEngine: syncEngine,
     ),
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
@@ -288,9 +371,11 @@ class _SectionContent extends StatelessWidget {
 final class _FilesSection extends StatelessWidget {
   const _FilesSection({required this.controller});
 
-  final FilesController controller;
+  final FilesController? controller;
 
   Future<void> _createFolder(BuildContext context) async {
+    final controller = this.controller;
+    if (controller == null) return;
     final nameController = TextEditingController();
     final name = await showDialog<String>(
       context: context,
@@ -316,6 +401,8 @@ final class _FilesSection extends StatelessWidget {
   }
 
   Future<void> _uploadFile(BuildContext context) async {
+    final controller = this.controller;
+    if (controller == null) return;
     final file = await openFile();
     if (file == null) return;
     final ok = await controller.uploadFile(file.path);
@@ -325,6 +412,8 @@ final class _FilesSection extends StatelessWidget {
   }
 
   Future<void> _downloadFile(BuildContext context, FileEntry entry) async {
+    final controller = this.controller;
+    if (controller == null) return;
     final destination = await getSaveLocation(suggestedName: entry.name);
     if (destination == null) return;
     final ok = await controller.downloadFile(entry, destination.path);
@@ -335,8 +424,64 @@ final class _FilesSection extends StatelessWidget {
     }
   }
 
+  Future<void> _renameEntry(BuildContext context, FileEntry entry) async {
+    final controller = this.controller;
+    if (controller == null) return;
+    final nameController = TextEditingController(text: entry.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename'),
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, nameController.text), child: const Text('Rename')),
+        ],
+      ),
+    );
+    if (name == null || name.trim().isEmpty || name.trim() == entry.name) return;
+    final ok = await controller.renameNode(entry, name.trim());
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not rename.')));
+    }
+  }
+
+  Future<void> _deleteEntry(BuildContext context, FileEntry entry) async {
+    final controller = this.controller;
+    if (controller == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Move to trash?'),
+        content: Text('"${entry.name}" will be moved to the trash.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final ok = await controller.deleteNode(entry);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(controller.errorMessage ?? 'Could not delete.')));
+    }
+  }
+
   @override
-  Widget build(BuildContext context) => AnimatedBuilder(
+  Widget build(BuildContext context) {
+    final controller = this.controller;
+    if (controller == null) {
+      return const _FilesMessageState(
+        icon: Icons.cloud_off_outlined,
+        message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+      );
+    }
+    return AnimatedBuilder(
     animation: controller,
     builder: (context, _) {
       final Widget body;
@@ -365,6 +510,18 @@ final class _FilesSection extends StatelessWidget {
               title: Text(entry.name),
               subtitle: entry.isDirectory ? null : Text(entry.metadata.mimeType ?? 'Encrypted file'),
               onTap: entry.isDirectory ? () => controller.openFolder(entry) : () => _downloadFile(context, entry),
+              trailing: PopupMenuButton<String>(
+                tooltip: 'More actions',
+                onSelected: (value) => switch (value) {
+                  'rename' => _renameEntry(context, entry),
+                  'delete' => _deleteEntry(context, entry),
+                  _ => null,
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'rename', child: Text('Rename')),
+                  PopupMenuItem(value: 'delete', child: Text('Move to trash')),
+                ],
+              ),
             );
           },
         );
@@ -407,7 +564,8 @@ final class _FilesSection extends StatelessWidget {
         ),
       );
     },
-  );
+    );
+  }
 }
 
 final class _FilesMessageState extends StatelessWidget {
@@ -436,49 +594,67 @@ class _SyncSection extends StatelessWidget {
   const _SyncSection({
     required this.syncFolder,
     required this.onSelectSyncFolder,
+    required this.syncEngine,
   });
   final String? syncFolder;
   final Future<void> Function() onSelectSyncFolder;
+  final SyncEngine? syncEngine;
 
   @override
-  Widget build(BuildContext context) => _PageFrame(
-    title: 'Sync',
-    subtitle: 'Sync is paused while the E2EE vault is locked.',
-    child: ListView(
-      children: [
-        Card(
-          child: ListTile(
-            leading: const Icon(Icons.pause_circle_outline),
-            title: const Text('Sync paused'),
-            subtitle: const Text(
-              'Provision this device with a trusted device or Recovery Secret.',
+  Widget build(BuildContext context) {
+    final engine = syncEngine;
+    return _PageFrame(
+      title: 'Sync',
+      subtitle: engine == null
+          ? 'Sync is paused while the E2EE vault is locked.'
+          : 'The local cache and outbox sync with the server automatically.',
+      child: ListView(
+        children: [
+          if (engine == null)
+            const Card(
+              child: ListTile(
+                leading: Icon(Icons.pause_circle_outline),
+                title: Text('Sync paused'),
+                subtitle: Text('Provision this device with a trusted device or Recovery Secret.'),
+                trailing: Chip(label: Text('Locked')),
+              ),
+            )
+          else
+            AnimatedBuilder(
+              animation: engine,
+              builder: (context, _) {
+                final (icon, label) = switch (engine.status) {
+                  SyncStatus.idle => (Icons.check_circle_outline, 'Up to date'),
+                  SyncStatus.syncing => (Icons.sync, 'Syncing…'),
+                  SyncStatus.offline => (Icons.cloud_off_outlined, 'Offline'),
+                  SyncStatus.error => (Icons.error_outline, 'Sync error'),
+                };
+                return Card(
+                  child: ListTile(
+                    leading: Icon(icon),
+                    title: Text(label),
+                    subtitle: engine.status == SyncStatus.error && engine.errorMessage != null
+                        ? Text(engine.errorMessage!)
+                        : null,
+                  ),
+                );
+              },
             ),
-            trailing: const Chip(label: Text('Locked')),
-          ),
-        ),
-        Card(
-          child: ListTile(
-            leading: const Icon(Icons.folder_outlined),
-            title: const Text('Local sync folder'),
-            subtitle: Text(syncFolder ?? 'Not selected'),
-            trailing: TextButton(
-              onPressed: onSelectSyncFolder,
-              child: Text(syncFolder == null ? 'Choose' : 'Change'),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.folder_outlined),
+              title: const Text('Local sync folder'),
+              subtitle: Text(syncFolder ?? 'Not selected'),
+              trailing: TextButton(
+                onPressed: onSelectSyncFolder,
+                child: Text(syncFolder == null ? 'Choose' : 'Change'),
+              ),
             ),
           ),
-        ),
-        const Card(
-          child: ListTile(
-            leading: Icon(Icons.history),
-            title: Text('No pending operations'),
-            subtitle: Text(
-              'The durable sync outbox will appear here after vault unlock.',
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
+        ],
+      ),
+    );
+  }
 }
 
 class _SettingsSection extends StatelessWidget {

@@ -6,10 +6,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
 import 'package:homebox_client/core/e2ee/vault_key_store.dart';
 import 'package:homebox_client/core/e2ee/opaque_id.dart';
+import 'package:homebox_client/core/storage/local_database.dart';
 import 'package:homebox_client/core/transport/pinned_server_store.dart';
 import 'package:homebox_client/features/files/files_controller.dart';
 import 'package:homebox_client/features/server/server_connection_controller.dart';
 import 'package:homebox_client/features/server/session_store.dart';
+import 'package:homebox_client/features/sync/sync_engine.dart';
 
 import '../support/memory_device_private_key_storage.dart';
 import '../support/memory_pinned_server_storage.dart';
@@ -68,8 +70,65 @@ final class _FakeServer {
       _writeJson(request, 201, node);
     } else if (method == 'GET' && path == '/api/v1/nodes/children') {
       final parentId = request.uri.queryParameters['parentId'];
-      final children = _nodes.values.where((n) => n['parentId'] == parentId).toList();
+      final children = _nodes.values.where((n) => n['parentId'] == parentId && n['deletedAt'] == null).toList();
       _writeJson(request, 200, children);
+    } else if (method == 'GET' && path == '/api/v1/sync/changes') {
+      _writeJson(request, 200, {'changes': <dynamic>[], 'nextAfter': 0, 'hasMore': false});
+    } else if (method == 'PATCH' && path.startsWith('/api/v1/nodes/')) {
+      final id = path.substring('/api/v1/nodes/'.length);
+      final node = _nodes[id];
+      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      if (node == null) {
+        _writeJson(request, 404, {
+          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+        });
+        return;
+      }
+      if (node['revision'] != body['expectedRevision']) {
+        _writeJson(request, 409, {
+          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+        });
+        return;
+      }
+      if (body['metadataCiphertext'] != null) {
+        node['metadataCiphertext'] = body['metadataCiphertext'];
+        node['metadataKeyVersion'] = body['metadataKeyVersion'];
+      }
+      if (body['moveParent'] == true) {
+        node['parentId'] = body['parentId'];
+      }
+      node['revision'] = (node['revision'] as int) + 1;
+      _writeJson(request, 200, node);
+    } else if (method == 'DELETE' && path.startsWith('/api/v1/nodes/')) {
+      final id = path.substring('/api/v1/nodes/'.length);
+      final node = _nodes[id];
+      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      if (node == null) {
+        _writeJson(request, 404, {
+          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+        });
+        return;
+      }
+      if (node['revision'] != body['expectedRevision']) {
+        _writeJson(request, 409, {
+          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+        });
+        return;
+      }
+      node['deletedAt'] = '2026-01-01T00:00:00Z';
+      node['revision'] = (node['revision'] as int) + 1;
+      request.response.statusCode = 204;
+      await request.response.close();
+    } else if (method == 'GET' && path.startsWith('/api/v1/nodes/')) {
+      final id = path.substring('/api/v1/nodes/'.length);
+      final node = _nodes[id];
+      if (node == null) {
+        _writeJson(request, 404, {
+          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+        });
+      } else {
+        _writeJson(request, 200, node);
+      }
     } else if (method == 'POST' && path == '/api/v1/uploads') {
       final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
       final uploadId = generateUuidV4();
@@ -146,6 +205,23 @@ Future<Uint8List> _collectBytes(HttpRequest request) async {
   return builder.takeBytes();
 }
 
+/// Waits for a background [SyncEngine.runOnce] (started by e.g.
+/// [FilesController.createFolder] via `unawaited`) to actually finish its
+/// real HTTP round trips. `pumpEventQueue` only flushes microtasks/timers a
+/// fixed number of times, which is not reliably enough for several
+/// sequential real localhost socket round trips (push, then its follow-up
+/// GET, then the sync pull); polling wall-clock time via `Future.delayed`
+/// lets the event loop actually service that I/O.
+Future<void> _awaitBackgroundSync(SyncEngine engine) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (engine.status == SyncStatus.syncing) {
+    if (DateTime.now().isAfter(deadline)) {
+      throw StateError('SyncEngine did not settle within the test timeout.');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
 Future<ServerConnectionController> _connectedAndSignedIn(HttpServer httpServer) async {
   final controller = ServerConnectionController(
     deviceIdentityStore: DeviceIdentityStore(MemoryDevicePrivateKeyStorage()),
@@ -169,9 +245,12 @@ void main() {
       sessionStore: SessionStore(MemorySessionStorage()),
     );
     addTearDown(serverConnection.dispose);
+    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    addTearDown(syncEngine.dispose);
     final controller = FilesController(
       serverConnection: serverConnection,
       vaultKeyStore: VaultKeyStore(MemoryVaultKeyStorage()),
+      syncEngine: syncEngine,
     );
     addTearDown(controller.dispose);
 
@@ -191,7 +270,9 @@ void main() {
     final recoverySecret = await vaultKeyStore.createVault(userId: _FakeServer.userId);
     recoverySecret.destroy();
 
-    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore);
+    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
     addTearDown(controller.dispose);
 
     expect(await controller.createFolder('Documents'), isTrue);
@@ -224,6 +305,38 @@ void main() {
     expect(downloadedBytes, originalBytes);
   });
 
+  test('renameNode and deleteNode apply locally right away and reach the server through the outbox', () async {
+    final fakeServer = _FakeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(userId: _FakeServer.userId);
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    addTearDown(controller.dispose);
+
+    expect(await controller.createFolder('Docs'), isTrue);
+    await _awaitBackgroundSync(syncEngine); // let the background push (fired by createFolder) reach the fake server.
+    await controller.refresh(); // pick up the confirmed revision, not the pre-push optimistic one.
+    final folder = controller.entries.single;
+    expect(fakeServer._nodes[folder.node.id], isNotNull, reason: 'the create should have reached the fake server');
+    expect(folder.node.revision, 1, reason: 'the local cache should reflect the server-confirmed revision by now');
+
+    expect(await controller.renameNode(folder, 'Renamed'), isTrue);
+    expect(controller.entries.single.name, 'Renamed', reason: 'the local cache reflects the rename immediately, offline or not');
+    await _awaitBackgroundSync(syncEngine);
+    expect(fakeServer._nodes[folder.node.id]!['revision'], 2, reason: 'the rename should have reached the fake server');
+
+    expect(await controller.deleteNode(controller.entries.single), isTrue);
+    expect(controller.entries, isEmpty, reason: 'a soft-deleted node disappears from its parent listing immediately');
+    await _awaitBackgroundSync(syncEngine);
+    expect(fakeServer._nodes[folder.node.id]!['deletedAt'], isNotNull, reason: 'the delete should have reached the fake server');
+  });
+
   test('downloadFile refuses to save content whose plaintext hash does not match the encrypted metadata', () async {
     final fakeServer = _FakeServer();
     final httpServer = await fakeServer.start();
@@ -233,7 +346,9 @@ void main() {
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
     final recoverySecret = await vaultKeyStore.createVault(userId: _FakeServer.userId);
     recoverySecret.destroy();
-    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore);
+    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
     addTearDown(controller.dispose);
 
     final tempDir = await Directory.systemTemp.createTemp('homebox_files_test_');
