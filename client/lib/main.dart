@@ -11,16 +11,25 @@ import 'features/device/device_setup_controller.dart';
 import 'features/files/files_controller.dart';
 import 'features/server/server_connection_controller.dart';
 import 'features/sync/sync_engine.dart';
+import 'features/syncfolder/sync_folder_materializer.dart';
+import 'features/syncfolder/sync_folder_store.dart';
 import 'features/vault/vault_setup_controller.dart';
 
 void main() => runApp(const HomeBoxApp());
 
 class HomeBoxApp extends StatelessWidget {
-  const HomeBoxApp({super.key, this.deviceIdentityStore, this.serverConnectionController, this.vaultKeyStore});
+  const HomeBoxApp({
+    super.key,
+    this.deviceIdentityStore,
+    this.serverConnectionController,
+    this.vaultKeyStore,
+    this.syncFolderStore,
+  });
 
   final DeviceIdentityStore? deviceIdentityStore;
   final ServerConnectionController? serverConnectionController;
   final VaultKeyStore? vaultKeyStore;
+  final SyncFolderStore? syncFolderStore;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -33,6 +42,7 @@ class HomeBoxApp extends StatelessWidget {
       deviceIdentityStore: deviceIdentityStore,
       serverConnectionController: serverConnectionController,
       vaultKeyStore: vaultKeyStore,
+      syncFolderStore: syncFolderStore,
     ),
   );
 }
@@ -40,7 +50,13 @@ class HomeBoxApp extends StatelessWidget {
 enum AppSection { files, sync, settings }
 
 class HomeBoxDesktopPage extends StatefulWidget {
-  const HomeBoxDesktopPage({super.key, this.deviceIdentityStore, this.serverConnectionController, this.vaultKeyStore});
+  const HomeBoxDesktopPage({
+    super.key,
+    this.deviceIdentityStore,
+    this.serverConnectionController,
+    this.vaultKeyStore,
+    this.syncFolderStore,
+  });
 
   final DeviceIdentityStore? deviceIdentityStore;
 
@@ -49,6 +65,7 @@ class HomeBoxDesktopPage extends StatefulWidget {
   // — matching the same reason deviceIdentityStore above is overridable.
   final ServerConnectionController? serverConnectionController;
   final VaultKeyStore? vaultKeyStore;
+  final SyncFolderStore? syncFolderStore;
 
   @override
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
@@ -60,8 +77,10 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final ServerConnectionController _serverConnectionController;
   late final VaultKeyStore _vaultKeyStore;
   late final VaultSetupController _vaultSetupController;
+  late final SyncFolderStore _syncFolderStore;
   SyncEngine? _syncEngine;
   FilesController? _filesController;
+  SyncFolderMaterializer? _syncFolderMaterializer;
   String? _syncEngineFingerprint;
   bool _rebuildingSyncEngine = false;
   bool _pendingRebuildFingerprint = false;
@@ -78,9 +97,11 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         widget.serverConnectionController ?? ServerConnectionController(deviceIdentityStore: _deviceIdentityStore);
     _vaultKeyStore = widget.vaultKeyStore ?? VaultKeyStore();
     _vaultSetupController = VaultSetupController(_vaultKeyStore);
+    _syncFolderStore = widget.syncFolderStore ?? SyncFolderStore();
     unawaited(_deviceSetupController.initialize());
     unawaited(_initializeServerConnection());
     unawaited(_vaultSetupController.initialize());
+    unawaited(_loadSyncFolder());
     // Whenever the connection or the vault reaches a state where files
     // might actually be listable, refresh — cheap no-ops otherwise (see
     // FilesController._requireContext).
@@ -91,6 +112,13 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   Future<void> _initializeServerConnection() async {
     await _serverConnectionController.initialize();
     await _rebuildSyncEngineForCurrentServer();
+  }
+
+  Future<void> _loadSyncFolder() async {
+    final saved = await _syncFolderStore.load();
+    if (!mounted || saved == null) return;
+    setState(() => _syncFolder = saved);
+    _maybeMaterializeSyncFolder();
   }
 
   void _onServerConnectionChanged() {
@@ -118,16 +146,20 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     try {
       final oldFiles = _filesController;
       final oldEngine = _syncEngine;
+      final oldMaterializer = _syncFolderMaterializer;
       if (mounted) {
         setState(() {
           _filesController = null;
           _syncEngine = null;
+          _syncFolderMaterializer = null;
         });
       } else {
         _filesController = null;
         _syncEngine = null;
+        _syncFolderMaterializer = null;
       }
       oldFiles?.dispose();
+      oldMaterializer?.dispose();
       oldEngine?.dispose(); // also closes its LocalDatabase.
       _syncEngineFingerprint = fingerprint;
       if (fingerprint != null) {
@@ -138,17 +170,26 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
           vaultKeyStore: _vaultKeyStore,
           syncEngine: engine,
         );
+        final materializer = SyncFolderMaterializer(
+          serverConnection: _serverConnectionController,
+          vaultKeyStore: _vaultKeyStore,
+          syncEngine: engine,
+        );
         if (!mounted) {
           files.dispose();
+          materializer.dispose();
           engine.dispose();
           return;
         }
         setState(() {
           _syncEngine = engine;
           _filesController = files;
+          _syncFolderMaterializer = materializer;
         });
+        engine.addListener(_onSyncEngineSettled);
         engine.start();
         _maybeRefreshFiles();
+        _maybeMaterializeSyncFolder();
       }
     } finally {
       _rebuildingSyncEngine = false;
@@ -168,11 +209,27 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     }
   }
 
+  /// Re-mirrors the sync folder once a background sync pass settles, so
+  /// changes made from another device show up on disk without the user
+  /// having to reselect the folder.
+  void _onSyncEngineSettled() {
+    if (_syncEngine?.status == SyncStatus.idle) _maybeMaterializeSyncFolder();
+  }
+
+  void _maybeMaterializeSyncFolder() {
+    final folder = _syncFolder;
+    final materializer = _syncFolderMaterializer;
+    if (folder != null && materializer != null) {
+      unawaited(materializer.materialize(folder));
+    }
+  }
+
   @override
   void dispose() {
     _serverConnectionController.removeListener(_onServerConnectionChanged);
     _vaultSetupController.removeListener(_maybeRefreshFiles);
     _filesController?.dispose();
+    _syncFolderMaterializer?.dispose();
     _syncEngine?.dispose();
     _vaultSetupController.dispose();
     _deviceSetupController.dispose();
@@ -188,6 +245,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       );
       if (!mounted || folder == null) return;
       setState(() => _syncFolder = folder);
+      await _syncFolderStore.save(folder);
+      _maybeMaterializeSyncFolder();
     } on Exception {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -214,6 +273,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       vaultSetupController: _vaultSetupController,
       filesController: _filesController,
       syncEngine: _syncEngine,
+      syncFolderMaterializer: _syncFolderMaterializer,
     );
     if (!wideLayout) {
       return Scaffold(
@@ -340,6 +400,7 @@ class _SectionContent extends StatelessWidget {
     required this.vaultSetupController,
     required this.filesController,
     required this.syncEngine,
+    required this.syncFolderMaterializer,
   });
 
   final AppSection section;
@@ -351,6 +412,7 @@ class _SectionContent extends StatelessWidget {
   final VaultSetupController vaultSetupController;
   final FilesController? filesController;
   final SyncEngine? syncEngine;
+  final SyncFolderMaterializer? syncFolderMaterializer;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -359,6 +421,7 @@ class _SectionContent extends StatelessWidget {
       syncFolder: syncFolder,
       onSelectSyncFolder: onSelectSyncFolder,
       syncEngine: syncEngine,
+      syncFolderMaterializer: syncFolderMaterializer,
     ),
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
@@ -595,10 +658,12 @@ class _SyncSection extends StatelessWidget {
     required this.syncFolder,
     required this.onSelectSyncFolder,
     required this.syncEngine,
+    required this.syncFolderMaterializer,
   });
   final String? syncFolder;
   final Future<void> Function() onSelectSyncFolder;
   final SyncEngine? syncEngine;
+  final SyncFolderMaterializer? syncFolderMaterializer;
 
   @override
   Widget build(BuildContext context) {
@@ -644,13 +709,39 @@ class _SyncSection extends StatelessWidget {
             child: ListTile(
               leading: const Icon(Icons.folder_outlined),
               title: const Text('Local sync folder'),
-              subtitle: Text(syncFolder ?? 'Not selected'),
+              subtitle: Text(
+                syncFolder == null
+                    ? 'Not selected — files stay reachable only through the Files page.'
+                    : '$syncFolder\nMirrors the vault to disk; files added here are not yet uploaded automatically.',
+              ),
+              isThreeLine: syncFolder != null,
               trailing: TextButton(
                 onPressed: onSelectSyncFolder,
                 child: Text(syncFolder == null ? 'Choose' : 'Change'),
               ),
             ),
           ),
+          if (syncFolder != null && syncFolderMaterializer != null)
+            AnimatedBuilder(
+              animation: syncFolderMaterializer!,
+              builder: (context, _) {
+                final materializer = syncFolderMaterializer!;
+                final (icon, label) = switch (materializer.status) {
+                  SyncFolderStatus.idle => (Icons.check_circle_outline, 'Folder mirrors the vault'),
+                  SyncFolderStatus.materializing => (Icons.download_outlined, 'Writing files to the folder…'),
+                  SyncFolderStatus.error => (Icons.error_outline, 'Could not update the folder'),
+                };
+                return Card(
+                  child: ListTile(
+                    leading: Icon(icon),
+                    title: Text(label),
+                    subtitle: materializer.status == SyncFolderStatus.error && materializer.errorMessage != null
+                        ? Text(materializer.errorMessage!)
+                        : null,
+                  ),
+                );
+              },
+            ),
         ],
       ),
     );

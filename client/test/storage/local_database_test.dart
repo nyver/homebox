@@ -12,9 +12,9 @@ void main() {
     addTearDown(second.dispose);
 
     final versions = second.db.select('SELECT version FROM schema_migrations ORDER BY version');
-    expect(versions.map((r) => r['version']), [1]);
-    // Re-opening must not error re-applying migration 1, and the nodes
-    // table from it must still exist and be usable.
+    expect(versions.map((r) => r['version']), [1, 2]);
+    // Re-opening must not error re-applying earlier migrations, and the
+    // nodes table from migration 1 must still exist and be usable.
     second.db.execute(
       "INSERT INTO nodes (id, node_type, metadata_ciphertext, metadata_key_version, revision, created_at, updated_at) "
       "VALUES ('n', 'FILE', X'00', 1, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",

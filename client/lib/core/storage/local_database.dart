@@ -114,4 +114,11 @@ final List<_Migration> _migrations = [
       last_successful_sync_at TEXT
     );
   '''),
+  _Migration(2, '''
+    CREATE TABLE IF NOT EXISTS materialized_files (
+      node_id TEXT PRIMARY KEY,
+      relative_path TEXT NOT NULL,
+      content_version_id TEXT
+    );
+  '''),
 ];

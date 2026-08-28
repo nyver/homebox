@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import '../transport/fixture_server.dart';
 
@@ -14,6 +15,10 @@ final class FakeNodeServer {
 
   final Map<String, Map<String, dynamic>> _nodes = {};
   final List<Map<String, dynamic>> _changes = [];
+  final Map<String, Map<String, dynamic>> _uploadSessions = {};
+  final Map<String, List<Uint8List>> _uploadChunks = {};
+  final Map<String, Map<String, dynamic>> _fileVersions = {}; // by nodeId
+  final Map<String, Uint8List> _blobs = {}; // by nodeId
   int _revision = 0;
 
   /// When set, every node mutation fails with this HTTP status/code instead
@@ -140,6 +145,70 @@ final class FakeNodeServer {
       await request.response.close();
       return;
     }
+    if (method == 'POST' && path == '/api/v1/uploads') {
+      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final uploadId = '${_nodes.length}-${_uploadSessions.length}-upload';
+      _uploadSessions[uploadId] = body;
+      _uploadChunks[uploadId] = List.filled(body['chunkCount'] as int, Uint8List(0));
+      _writeJson(request, 201, {'id': uploadId, 'chunkCount': body['chunkCount'], 'receivedChunks': <int>[]});
+      return;
+    }
+    if (method == 'PUT' && path.contains('/chunks/')) {
+      final segments = request.uri.pathSegments;
+      final uploadId = segments[segments.length - 3];
+      final chunkNo = int.parse(segments.last);
+      _uploadChunks[uploadId]![chunkNo] = await _collectBytes(request);
+      request.response.statusCode = 204;
+      await request.response.close();
+      return;
+    }
+    if (method == 'POST' && path.endsWith('/complete')) {
+      final uploadId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final session = _uploadSessions[uploadId]!;
+      final nodeId = session['targetNodeId'] as String;
+      final fileVersionId = session['fileVersionId'] as String;
+      final blobBuilder = BytesBuilder(copy: false);
+      for (final chunk in _uploadChunks[uploadId]!) {
+        blobBuilder.add(chunk);
+      }
+      _blobs[nodeId] = blobBuilder.takeBytes();
+      _fileVersions[nodeId] = {
+        'id': fileVersionId,
+        'blobId': session['blobId'],
+        'e2eeHeader': session['e2eeHeader'],
+        'wrappedFileKey': session['wrappedFileKey'],
+        'keyScopeId': 'scope',
+        'keyVersion': 1,
+        'revision': _recordChange(nodeId, 'UPDATE'),
+        'chunkCount': session['chunkCount'],
+      };
+      final node = _nodes[nodeId]!;
+      node['currentVersionId'] = fileVersionId;
+      node['revision'] = _fileVersions[nodeId]!['revision'];
+      _writeJson(request, 200, {'blobId': session['blobId'], 'fileVersionId': fileVersionId, 'revision': node['revision']});
+      return;
+    }
+    if (method == 'GET' && path.endsWith('/versions')) {
+      final nodeId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final version = _fileVersions[nodeId];
+      _writeJson(request, 200, version == null ? <dynamic>[] : [version]);
+      return;
+    }
+    if (method == 'GET' && path.endsWith('/content')) {
+      final nodeId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final blob = _blobs[nodeId];
+      if (blob == null) {
+        request.response.statusCode = 404;
+        await request.response.close();
+      } else {
+        request.response
+          ..statusCode = 200
+          ..headers.contentType = ContentType.binary
+          ..add(blob);
+        await request.response.close();
+      }
+      return;
+    }
     if (method == 'POST' && path.endsWith('/restore')) {
       final id = path.substring('/api/v1/nodes/'.length, path.length - '/restore'.length);
       final node = _nodes[id];
@@ -172,6 +241,13 @@ final class FakeNodeServer {
     );
     _nodes[id] = node;
     return node;
+  }
+
+  /// Flips a byte in [nodeId]'s stored ciphertext blob, simulating
+  /// corruption or tampering — used to prove a caller skips re-downloading
+  /// content it already has rather than to test the download path itself.
+  void corruptBlob(String nodeId) {
+    _blobs[nodeId]![0] ^= 0xff;
   }
 
   Map<String, dynamic> _newNode({
@@ -209,4 +285,12 @@ final class FakeNodeServer {
       ..write(jsonEncode(body));
     request.response.close();
   }
+}
+
+Future<Uint8List> _collectBytes(HttpRequest request) async {
+  final builder = BytesBuilder(copy: false);
+  await for (final chunk in request) {
+    builder.add(chunk);
+  }
+  return builder.takeBytes();
 }

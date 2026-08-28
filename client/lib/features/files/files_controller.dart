@@ -5,7 +5,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:cryptography/cryptography.dart';
@@ -21,6 +20,7 @@ import '../../core/storage/pending_operations_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../server/server_connection_controller.dart';
 import '../sync/sync_engine.dart';
+import 'file_transfer.dart';
 
 enum FilesStatus { idle, loading, ready, failed }
 
@@ -442,47 +442,15 @@ final class FilesController extends ChangeNotifier {
     if (ctx == null) return false;
     _setBusy(true);
     try {
-      final versions = await ctx.api.listFileVersions(ctx.accessToken, entry.node.id);
-      if (versions.isEmpty) {
-        throw StateError('This file has no uploaded content yet.');
-      }
-      final version = versions.first; // newest first, per the server's ordering.
-      final versionIdBytes = uuidStringToBytes(version.id);
-
-      final fileKey = await _keyEnvelopeCipher.unwrapKey(
-        wrappingKey: ctx.vaultKey,
-        envelope: KeyEnvelope.decode(version.wrappedFileKey),
-        scopeId: ctx.vaultId,
-        subjectId: versionIdBytes,
+      final plaintextBytes = await downloadAndDecryptFile(
+        api: ctx.api,
+        accessToken: ctx.accessToken,
+        vaultKey: ctx.vaultKey,
+        vaultId: ctx.vaultId,
+        nodeId: entry.node.id,
+        expectedPlaintextSha256: entry.metadata.plaintextSha256,
+        onProgress: _setProgress,
       );
-      final header = E2eeFileHeader.decode(version.e2eeHeader);
-
-      final blob = await ctx.api.downloadFileContent(ctx.accessToken, entry.node.id);
-      final frames = splitChunkFrames(blob, chunkCount: version.chunkCount);
-
-      final output = BytesBuilder(copy: false);
-      for (var i = 0; i < frames.length; i++) {
-        final plaintext = await _fileCipher.decryptChunk(
-          ciphertextFrame: frames[i],
-          fileKey: fileKey,
-          header: header,
-          fileVersionId: versionIdBytes,
-          chunkNumber: i,
-          totalChunks: frames.length,
-        );
-        output.add(plaintext);
-        _setProgress((i + 1) / frames.length);
-      }
-      final plaintextBytes = output.takeBytes();
-
-      final expectedHash = entry.metadata.plaintextSha256;
-      if (expectedHash != null) {
-        final actualHash = sha256.convert(plaintextBytes).toString();
-        if (actualHash.toLowerCase() != expectedHash.toLowerCase()) {
-          throw StateError('Downloaded content failed integrity verification; the file was not saved.');
-        }
-      }
-
       await File(destinationPath).writeAsBytes(plaintextBytes, flush: true);
       return true;
     } catch (e) {

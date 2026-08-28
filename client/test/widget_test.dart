@@ -5,11 +5,13 @@ import 'package:homebox_client/core/e2ee/vault_key_store.dart';
 import 'package:homebox_client/core/transport/pinned_server_store.dart';
 import 'package:homebox_client/features/server/server_connection_controller.dart';
 import 'package:homebox_client/features/server/session_store.dart';
+import 'package:homebox_client/features/syncfolder/sync_folder_store.dart';
 import 'package:homebox_client/main.dart';
 
 import 'support/memory_device_private_key_storage.dart';
 import 'support/memory_pinned_server_storage.dart';
 import 'support/memory_session_storage.dart';
+import 'support/memory_sync_folder_storage.dart';
 import 'support/memory_vault_key_storage.dart';
 
 void main() {
@@ -80,5 +82,6 @@ HomeBoxApp _testApp() {
       sessionStore: SessionStore(MemorySessionStorage()),
     ),
     vaultKeyStore: VaultKeyStore(MemoryVaultKeyStorage()),
+    syncFolderStore: SyncFolderStore(MemorySyncFolderStorage()),
   );
 }

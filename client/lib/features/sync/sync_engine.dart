@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../core/storage/local_database.dart';
+import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/storage/pending_operations_store.dart';
 import '../../core/storage/sync_state_store.dart';
@@ -42,12 +43,14 @@ final class SyncEngine extends ChangeNotifier {
         _localDatabase = localDatabase,
         nodeCache = NodeCache(localDatabase.db),
         pendingOperations = PendingOperationsStore(localDatabase.db),
+        materializedFiles = MaterializedFilesStore(localDatabase.db),
         _syncState = SyncStateStore(localDatabase.db);
 
   final ServerConnectionController _serverConnection;
   final LocalDatabase _localDatabase;
   final NodeCache nodeCache;
   final PendingOperationsStore pendingOperations;
+  final MaterializedFilesStore materializedFiles;
   final SyncStateStore _syncState;
 
   Timer? _timer;
