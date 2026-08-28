@@ -21,6 +21,7 @@ storage:
   ciphertext_only: true
 
 limits:
+  # `homebox create-user` can create up to this number of separate family accounts.
   max_users: 5
   max_plaintext_file_size_bytes: 104857600
   upload_chunk_plaintext_size_bytes: 4194304

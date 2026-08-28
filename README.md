@@ -12,7 +12,8 @@ This repository currently provides the security-first Go server foundation and a
 - Persistent ECDSA P-256 server transport identity and a SHA-256 fingerprint (P-256, not Ed25519 — Dart's bundled TLS client rejects Ed25519 certificates; see ADR-008).
 - **Secure Transport is closed (ADR-008/009):** the server terminates TLS 1.3 using a self-signed certificate derived from its identity key. There is no plaintext HTTP mode in any configuration. Clients trust the connection by pinning the identity fingerprint, not a certificate authority.
 - Argon2id password hashing, a first-admin bootstrap command, and a full authenticated session lifecycle: login, refresh-token rotation, logout, and device registration/revocation (`/api/v1/auth/*`, `/api/v1/devices*`). Login is timing-safe against username enumeration and rate-limited per username with exponential backoff.
-- Encrypted key-envelope delivery between a user's own trusted devices (`/api/v1/devices/{id}/key-envelope`) so a newly provisioned device can fetch the vault key an existing device wrapped for it. Cross-account sharing (Family Vault, §28) is a later milestone.
+- Encrypted key-envelope delivery between a user's own trusted devices (`/api/v1/devices/{id}/key-envelope`) so a newly provisioned device can fetch the vault key an existing device wrapped for it. Cross-account sharing (Family Vault, §28) is being delivered in vertical slices.
+- Family Vault server onboarding groundwork: a local operator can create a separate family account, and an authenticated invitee who knows that account's opaque ID can retrieve its active device public keys to prepare recipient-specific E2EE envelopes. Folder ACLs, envelope delivery, and client UX remain the next sharing slice.
 - Opaque node CRUD (create/rename/move/soft-delete/restore/Trash) with optimistic concurrency and idempotent mutation (`/api/v1/nodes*`, `/api/v1/trash`), and a paged, per-account sync revision feed (`/api/v1/sync/changes`).
 - Ciphertext-only resumable upload wired end to end: create/chunk/complete/abort over HTTP (`/api/v1/uploads*`) and streamed unmodified back on download (`/api/v1/files/{id}/content`), with opaque IDs, per-chunk SHA-256 storage checks, idempotent completion, and atomic blob commit.
 - A unified error-mapping layer (`internal/httpapi`'s `writeServiceError`) that only ever returns a raw error message to the client when a domain service explicitly marked it safe to show (`internal/apierror.Validation`) — every other failure logs server-side and returns a generic `INTERNAL_ERROR`, so a database/driver error can never leak through the API.
@@ -28,6 +29,7 @@ Copy [config.example.yaml](config.example.yaml) to `config.yaml` and choose a du
 go build -o bin/homebox.exe ./cmd/homebox
 ./bin/homebox.exe fingerprint --config config.yaml
 "a-long-unique-password" | ./bin/homebox.exe bootstrap-admin --config config.yaml --username admin --password-stdin
+"another-long-password" | ./bin/homebox.exe create-user --config config.yaml --username family-member --password-stdin
 ./bin/homebox.exe server --config config.yaml
 ```
 
@@ -38,6 +40,7 @@ Every endpoint, including health and metrics, is served over TLS — there is no
 - `GET /metrics`
 - `POST /api/v1/auth/{login,refresh,logout}`
 - `GET /api/v1/users/me`
+- `GET /api/v1/users/{id}/share-devices`
 - `GET /api/v1/devices`, `DELETE /api/v1/devices/{id}`
 - `POST` / `GET /api/v1/devices/{id}/key-envelope`
 - `POST /api/v1/nodes`, `GET /api/v1/nodes/{id}`, `GET /api/v1/nodes/children?parentId=`, `PATCH`/`DELETE /api/v1/nodes/{id}`, `POST /api/v1/nodes/{id}/restore`, `GET /api/v1/trash`

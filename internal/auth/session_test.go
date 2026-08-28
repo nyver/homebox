@@ -54,6 +54,48 @@ func TestLoginIssuesSessionAndRegistersDevice(t *testing.T) {
 	}
 }
 
+func TestCreateUserRequiresBootstrapAdmin(t *testing.T) {
+	s := newTestService(t)
+	if _, err := s.CreateUser(context.Background(), "member", "correct horse battery staple"); err == nil {
+		t.Fatal("family user was created before bootstrap admin")
+	}
+	mustBootstrap(t, s, "admin", "correct horse battery staple")
+	user, err := s.CreateUser(context.Background(), "member", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Role != "USER" || user.Username != "member" {
+		t.Fatalf("unexpected family user: %#v", user)
+	}
+}
+
+func TestListShareableDevicesOnlyReturnsActiveRecipientKeys(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	mustBootstrap(t, s, "admin", "correct horse battery staple")
+	member, err := s.CreateUser(ctx, "member", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeID, revokedID := uuid.NewString(), uuid.NewString()
+	if _, err := s.Login(ctx, "member", "correct horse battery staple", testDevice(activeID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Login(ctx, "member", "correct horse battery staple", testDevice(revokedID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeDevice(ctx, member.ID, revokedID); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := s.ListShareableDevices(ctx, member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0].ID != activeID || len(devices[0].PublicKey) == 0 {
+		t.Fatalf("shareable devices=%#v", devices)
+	}
+}
+
 func TestLoginRejectsWrongPassword(t *testing.T) {
 	s := newTestService(t)
 	mustBootstrap(t, s, "admin", "correct horse battery staple")

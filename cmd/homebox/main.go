@@ -31,7 +31,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: homebox <server|fingerprint|bootstrap-admin|backup|restore|maintenance> [options]")
+		fatal("usage: homebox <server|fingerprint|bootstrap-admin|create-user|backup|restore|maintenance> [options]")
 	}
 	switch os.Args[1] {
 	case "server":
@@ -40,6 +40,8 @@ func main() {
 		fingerprint(os.Args[2:])
 	case "bootstrap-admin":
 		bootstrapAdmin(os.Args[2:])
+	case "create-user":
+		createUser(os.Args[2:])
 	case "backup":
 		createBackup(os.Args[2:])
 	case "restore":
@@ -240,11 +242,10 @@ func bootstrapAdmin(args []string) {
 	if err != nil {
 		fatal("load config: %v", err)
 	}
-	password, err := io.ReadAll(io.LimitReader(os.Stdin, 1025))
+	passwordText, err := readPassword(os.Stdin)
 	if err != nil {
 		fatal("read password: %v", err)
 	}
-	passwordText := strings.TrimSuffix(strings.TrimSuffix(string(password), "\n"), "\r")
 	db, err := database.Open(c.Storage.Path)
 	if err != nil {
 		fatal("open database: %v", err)
@@ -255,6 +256,45 @@ func bootstrapAdmin(args []string) {
 		fatal("bootstrap admin: %v", err)
 	}
 	fmt.Printf("Bootstrap admin %q created (id: %s).\n", user.Username, user.ID)
+}
+
+func createUser(args []string) {
+	fs := flag.NewFlagSet("create-user", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to YAML configuration")
+	username := fs.String("username", "", "family account username")
+	passwordStdin := fs.Bool("password-stdin", false, "read the password from standard input")
+	if err := fs.Parse(args); err != nil {
+		fatal("parse arguments: %v", err)
+	}
+	if *username == "" || !*passwordStdin {
+		fatal("create-user requires --username and --password-stdin")
+	}
+	c, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config: %v", err)
+	}
+	password, err := readPassword(os.Stdin)
+	if err != nil {
+		fatal("read password: %v", err)
+	}
+	db, err := database.Open(c.Storage.Path)
+	if err != nil {
+		fatal("open database: %v", err)
+	}
+	defer db.Close()
+	user, err := auth.New(db, c.Limits.MaxUsers, c.AccessTokenTTL()).CreateUser(context.Background(), *username, password)
+	if err != nil {
+		fatal("create user: %v", err)
+	}
+	fmt.Printf("Family user %q created (id: %s). Share this opaque ID only with trusted family members.\n", user.Username, user.ID)
+}
+
+func readPassword(input io.Reader) (string, error) {
+	password, err := io.ReadAll(io.LimitReader(input, 1025))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(string(password), "\n"), "\r"), nil
 }
 
 func fatal(format string, args ...any) {

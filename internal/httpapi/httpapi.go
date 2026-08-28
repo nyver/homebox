@@ -45,6 +45,7 @@ func New(authService *auth.Service, provisioningService *provisioning.Service, n
 	mux.HandleFunc("POST /api/v1/auth/refresh", api.refresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", api.logout)
 	mux.Handle("GET /api/v1/users/me", api.authenticated(api.getMe))
+	mux.Handle("GET /api/v1/users/{id}/share-devices", api.authenticated(api.listShareDevices))
 	mux.Handle("GET /api/v1/devices", api.authenticated(api.listDevices))
 	mux.Handle("DELETE /api/v1/devices/{id}", api.authenticated(api.revokeDevice))
 	mux.Handle("POST /api/v1/devices/{id}/key-envelope", api.authenticated(api.uploadKeyEnvelope))
@@ -200,6 +201,33 @@ func (a *API) getMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"id": user.ID, "username": user.Username, "role": user.Role})
 }
 
+// listShareDevices exposes recipient public keys only after the caller has
+// obtained that person's opaque user ID through a deliberate family invite.
+// It contains no private key material or plaintext vault metadata.
+func (a *API) listShareDevices(w http.ResponseWriter, r *http.Request) {
+	userID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	devices, err := a.auth.ListShareableDevices(r.Context(), userID)
+	if err != nil {
+		log.Printf("list share devices: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list recipient devices")
+		return
+	}
+	if len(devices) == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no active recipient device found")
+		return
+	}
+	out := make([]shareDeviceResponse, 0, len(devices))
+	for _, device := range devices {
+		out = append(out, shareDeviceResponse{
+			ID: device.ID, Platform: device.Platform, PublicKey: base64.StdEncoding.EncodeToString(device.PublicKey), KeyVersion: device.KeyVersion,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // --- devices ---
 
 type deviceResponse struct {
@@ -211,6 +239,13 @@ type deviceResponse struct {
 	CreatedAt  string  `json:"createdAt"`
 	LastSeenAt string  `json:"lastSeenAt"`
 	RevokedAt  *string `json:"revokedAt,omitempty"`
+}
+
+type shareDeviceResponse struct {
+	ID         string `json:"id"`
+	Platform   string `json:"platform"`
+	PublicKey  string `json:"publicKey"`
+	KeyVersion int    `json:"keyVersion"`
 }
 
 func toDeviceResponse(d auth.Device) deviceResponse {

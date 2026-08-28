@@ -94,6 +94,13 @@ func (s *Service) CreateUser(ctx context.Context, username, password string) (Us
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM users").Scan(&count); err != nil {
 		return User{}, err
 	}
+	var admins int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM users WHERE role='ADMIN' AND status='ACTIVE'").Scan(&admins); err != nil {
+		return User{}, err
+	}
+	if admins == 0 {
+		return User{}, errors.New("create an active bootstrap admin before creating family user accounts")
+	}
 	if count >= s.maxUsers {
 		return User{}, fmt.Errorf("user limit of %d reached", s.maxUsers)
 	}

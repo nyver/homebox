@@ -70,6 +70,16 @@ type Device struct {
 	RevokedAt  *time.Time
 }
 
+// ShareableDevice contains the minimum public information an owner needs to
+// construct a recipient-device-specific E2EE envelope. It intentionally has
+// no user-facing device name or activity timestamps.
+type ShareableDevice struct {
+	ID         string
+	Platform   string
+	PublicKey  []byte
+	KeyVersion int
+}
+
 type Session struct {
 	User                  User
 	Device                Device
@@ -292,6 +302,28 @@ func (s *Service) ListDevices(ctx context.Context, userID string) ([]Device, err
 	for rows.Next() {
 		d, err := scanDevice(rows)
 		if err != nil {
+			return nil, err
+		}
+		devices = append(devices, d)
+	}
+	return devices, rows.Err()
+}
+
+// ListShareableDevices returns only active recipient device public keys. The
+// caller is expected to know the opaque user ID through a deliberate family
+// invite; device names and revoked keys are deliberately excluded.
+func (s *Service) ListShareableDevices(ctx context.Context, userID string) ([]ShareableDevice, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT d.id,d.platform,d.e2ee_public_key,d.e2ee_key_version
+		FROM devices d JOIN users u ON u.id=d.user_id
+		WHERE d.user_id=? AND d.revoked_at IS NULL AND u.status='ACTIVE' ORDER BY d.created_at`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var devices []ShareableDevice
+	for rows.Next() {
+		var d ShareableDevice
+		if err := rows.Scan(&d.ID, &d.Platform, &d.PublicKey, &d.KeyVersion); err != nil {
 			return nil, err
 		}
 		devices = append(devices, d)
