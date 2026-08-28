@@ -16,6 +16,8 @@ server:
 
 storage:
   path: "./data"
+  # Keep backup directories outside this path. `homebox backup` refuses a
+  # destination below storage.path to prevent recursive/self-including backups.
   ciphertext_only: true
 
 limits:

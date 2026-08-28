@@ -9,11 +9,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/homebox/homebox/internal/auth"
+	"github.com/homebox/homebox/internal/backup"
 	"github.com/homebox/homebox/internal/config"
 	"github.com/homebox/homebox/internal/database"
 	"github.com/homebox/homebox/internal/httpapi"
@@ -28,7 +30,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: homebox <server|fingerprint|bootstrap-admin> [options]")
+		fatal("usage: homebox <server|fingerprint|bootstrap-admin|backup|restore> [options]")
 	}
 	switch os.Args[1] {
 	case "server":
@@ -37,9 +39,64 @@ func main() {
 		fingerprint(os.Args[2:])
 	case "bootstrap-admin":
 		bootstrapAdmin(os.Args[2:])
+	case "backup":
+		createBackup(os.Args[2:])
+	case "restore":
+		restoreBackup(os.Args[2:])
 	default:
 		fatal("unknown command %q", os.Args[1])
 	}
+}
+
+func createBackup(args []string) {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to YAML configuration")
+	if err := fs.Parse(args); err != nil {
+		fatal("parse arguments: %v", err)
+	}
+	if fs.NArg() != 1 {
+		fatal("usage: homebox backup [--config config.yaml] <new-backup-directory>")
+	}
+	c, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config: %v", err)
+	}
+	for _, required := range []string{
+		filepath.Join(c.Storage.Path, "database", "homebox.db"),
+		filepath.Join(c.Storage.Path, "keys", "server_identity.key"),
+	} {
+		if _, err := os.Stat(required); err != nil {
+			fatal("inspect storage: %v", err)
+		}
+	}
+	db, err := database.Open(c.Storage.Path)
+	if err != nil {
+		fatal("open database: %v", err)
+	}
+	defer db.Close()
+	if err := backup.Create(context.Background(), db, c.Storage.Path, *configPath, fs.Arg(0)); err != nil {
+		fatal("create backup: %v", err)
+	}
+	fmt.Printf("Ciphertext-only backup created at %s. Keep Recovery Secrets off the server.\n", fs.Arg(0))
+}
+
+func restoreBackup(args []string) {
+	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to YAML configuration for the new storage location")
+	if err := fs.Parse(args); err != nil {
+		fatal("parse arguments: %v", err)
+	}
+	if fs.NArg() != 1 {
+		fatal("usage: homebox restore [--config config.yaml] <backup-directory>")
+	}
+	c, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config: %v", err)
+	}
+	if err := backup.Restore(context.Background(), fs.Arg(0), c.Storage.Path); err != nil {
+		fatal("restore backup: %v", err)
+	}
+	fmt.Printf("Backup restored to %s. Start the server and verify its pinned fingerprint before reconnecting clients.\n", c.Storage.Path)
 }
 
 func serve(args []string) {

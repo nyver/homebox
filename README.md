@@ -17,6 +17,7 @@ This repository currently provides the security-first Go server foundation and a
 - Ciphertext-only resumable upload wired end to end: create/chunk/complete/abort over HTTP (`/api/v1/uploads*`) and streamed unmodified back on download (`/api/v1/files/{id}/content`), with opaque IDs, per-chunk SHA-256 storage checks, idempotent completion, and atomic blob commit.
 - A unified error-mapping layer (`internal/httpapi`'s `writeServiceError`) that only ever returns a raw error message to the client when a domain service explicitly marked it safe to show (`internal/apierror.Validation`) — every other failure logs server-side and returns a generic `INTERNAL_ERROR`, so a database/driver error can never leak through the API.
 - Health and metrics endpoints.
+- Atomic ciphertext-only server backup and safe restore commands. A backup contains a consistent SQLite snapshot, immutable ciphertext blobs, the transport identity key, the supplied server config, and a SHA-256 manifest. It never contains a Recovery Secret or client private E2EE key.
 
 ## Run the server foundation
 
@@ -44,6 +45,25 @@ Every endpoint, including health and metrics, is served over TLS — there is no
 - `GET /api/v1/files/{id}/content`
 
 The fingerprint must be verified out of band before a client trusts the server identity (ADR-009); a client must refuse to connect if the presented certificate resolves to a different fingerprint than the one it pinned. The certificate is self-signed but uses ECDSA P-256, which is broadly supported (Go, the Flutter client's bundled BoringSSL, OpenSSL, and Windows' own Schannel stack all complete the handshake), so ordinary tools like `curl.exe -k` work for manual poking as long as certificate verification is disabled — there is no CA behind this certificate on purpose.
+
+## Back up and restore the server
+
+Run backups against a live server or after it has stopped. The SQLite snapshot is created with SQLite's `VACUUM INTO` mechanism, so the database image is consistent with WAL mode. Store backup directories outside `storage.path`; HomeBox refuses a nested destination to avoid recursive backups.
+
+```powershell
+./bin/homebox.exe backup --config config.yaml D:\backups\homebox-2026-08-28
+```
+
+The destination must be new. The command intentionally excludes incomplete upload temp data, but includes all committed immutable ciphertext blobs, the server transport identity, the exact supplied configuration file, and a manifest containing SHA-256 checksums.
+
+To restore, prepare a configuration whose `storage.path` is a new, absent directory. The command validates the manifest, every copied file, the server identity, SQLite integrity, and every database-referenced ciphertext blob before atomically placing the restored storage there. It never overwrites existing server data.
+
+```powershell
+./bin/homebox.exe restore --config recovery-config.yaml D:\backups\homebox-2026-08-28
+./bin/homebox.exe server --config recovery-config.yaml
+```
+
+Verify the server's pinned fingerprint before reconnecting a client. A server backup alone cannot decrypt or recover files: retain at least one trusted client or the user's Recovery Secret separately and offline.
 
 ## Server storage
 
@@ -107,4 +127,6 @@ Windows builds require Visual Studio 2022 with the **Desktop development with C+
 
 ## Security status
 
-Secure Transport is closed (ADR-008/009/020): TLS 1.3 with self-signed, fingerprint-pinned server identity, and an authenticated login/device/key-envelope API built on top of it. A full opaque-node + ciphertext-upload/download round trip now works end to end from the real Flutter UI down to the Go server and back — create a folder, upload a file, download it, and get the exact original bytes back — proven by both `internal/httpapi/nodes_uploads_test.go` (server side) and `client/test/files/files_controller_test.dart` (client side, including the vault bootstrap this required). Folder metadata mutations now go through a local SQLite cache and durable outbox (`client/lib/features/sync/sync_engine.dart`), so they apply offline and sync opportunistically once connectivity returns, and an optional local folder mirrors the vault's decrypted contents to disk and uploads local changes back (`client/lib/features/syncfolder/*.dart`) on the same periodic cadence. The full product is still not production-ready: cross-account sharing (Family Vault), a real-time filesystem watcher and tray integration, the Android client, camera upload, server backup/restore, and maintenance/GC remain roadmap milestones. The server intentionally contains no file decryption implementation to preserve that boundary, and this document's own roadmap sections track exactly what is and isn't built yet.
+Ciphertext-only server backup/restore now validates the SQLite snapshot, transport identity, and every database-referenced blob before placing a restore into a new storage directory.
+
+Secure Transport is closed (ADR-008/009/020): TLS 1.3 with self-signed, fingerprint-pinned server identity, and an authenticated login/device/key-envelope API built on top of it. A full opaque-node + ciphertext-upload/download round trip now works end to end from the real Flutter UI down to the Go server and back — create a folder, upload a file, download it, and get the exact original bytes back — proven by both `internal/httpapi/nodes_uploads_test.go` (server side) and `client/test/files/files_controller_test.dart` (client side, including the vault bootstrap this required). Folder metadata mutations now go through a local SQLite cache and durable outbox (`client/lib/features/sync/sync_engine.dart`), so they apply offline and sync opportunistically once connectivity returns, and an optional local folder mirrors the vault's decrypted contents to disk and uploads local changes back (`client/lib/features/syncfolder/*.dart`) on the same periodic cadence. The full product is still not production-ready: cross-account sharing (Family Vault), a real-time filesystem watcher and tray integration, the Android client, camera upload, and maintenance/GC remain roadmap milestones. The server intentionally contains no file decryption implementation to preserve that boundary, and this document's own roadmap sections track exactly what is and isn't built yet.
