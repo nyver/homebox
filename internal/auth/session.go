@@ -67,6 +67,7 @@ type Device struct {
 	KeyVersion int
 	CreatedAt  time.Time
 	LastSeenAt time.Time
+	LastSyncAt *time.Time
 	RevokedAt  *time.Time
 }
 
@@ -263,6 +264,24 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (userID,
 	return userID, deviceID, nil
 }
 
+// RecordSync marks a device only after it has successfully read the account's
+// sync feed. This deliberately differs from LastSeenAt, which means merely
+// that the device logged in or refreshed its session.
+func (s *Service) RecordSync(ctx context.Context, userID, deviceID string) error {
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	result, err := s.db.ExecContext(ctx, `UPDATE devices SET last_sync_at = ?
+		WHERE id = ? AND user_id = ? AND revoked_at IS NULL`, now, deviceID, userID)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // RevokeDevice immediately stops a device's tokens and any future
 // key-envelope delivery. It does not and cannot retract data already
 // decrypted by that device before revocation (see ADR-012/§10.11).
@@ -292,7 +311,7 @@ func (s *Service) RevokeDevice(ctx context.Context, userID, deviceID string) err
 }
 
 func (s *Service) ListDevices(ctx context.Context, userID string) ([]Device, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,user_id,name,platform,e2ee_public_key,e2ee_key_version,created_at,last_seen_at,revoked_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id,user_id,name,platform,e2ee_public_key,e2ee_key_version,created_at,last_seen_at,last_sync_at,revoked_at
 		FROM devices WHERE user_id = ? ORDER BY created_at`, userID)
 	if err != nil {
 		return nil, err
@@ -335,7 +354,7 @@ func (s *Service) ListShareableDevices(ctx context.Context, userID string) ([]Sh
 // must separately check the returned Device.RevokedAt if a revoked device
 // should be rejected.
 func (s *Service) GetDevice(ctx context.Context, userID, deviceID string) (Device, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,user_id,name,platform,e2ee_public_key,e2ee_key_version,created_at,last_seen_at,revoked_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,user_id,name,platform,e2ee_public_key,e2ee_key_version,created_at,last_seen_at,last_sync_at,revoked_at
 		FROM devices WHERE id = ? AND user_id = ?`, deviceID, userID)
 	d, err := scanDevice(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -360,8 +379,8 @@ type scanner interface {
 func scanDevice(row scanner) (Device, error) {
 	var d Device
 	var createdAt, lastSeenAt string
-	var revokedAt sql.NullString
-	if err := row.Scan(&d.ID, &d.UserID, &d.Name, &d.Platform, &d.PublicKey, &d.KeyVersion, &createdAt, &lastSeenAt, &revokedAt); err != nil {
+	var lastSyncAt, revokedAt sql.NullString
+	if err := row.Scan(&d.ID, &d.UserID, &d.Name, &d.Platform, &d.PublicKey, &d.KeyVersion, &createdAt, &lastSeenAt, &lastSyncAt, &revokedAt); err != nil {
 		return Device{}, err
 	}
 	var err error
@@ -370,6 +389,13 @@ func scanDevice(row scanner) (Device, error) {
 	}
 	if d.LastSeenAt, err = time.Parse(time.RFC3339Nano, lastSeenAt); err != nil {
 		return Device{}, err
+	}
+	if lastSyncAt.Valid {
+		t, err := time.Parse(time.RFC3339Nano, lastSyncAt.String)
+		if err != nil {
+			return Device{}, err
+		}
+		d.LastSyncAt = &t
 	}
 	if revokedAt.Valid {
 		t, err := time.Parse(time.RFC3339Nano, revokedAt.String)
@@ -382,7 +408,7 @@ func scanDevice(row scanner) (Device, error) {
 }
 
 func (s *Service) loadDevice(ctx context.Context, tx *sql.Tx, deviceID, userID string) (Device, error) {
-	row := tx.QueryRowContext(ctx, `SELECT id,user_id,name,platform,e2ee_public_key,e2ee_key_version,created_at,last_seen_at,revoked_at
+	row := tx.QueryRowContext(ctx, `SELECT id,user_id,name,platform,e2ee_public_key,e2ee_key_version,created_at,last_seen_at,last_sync_at,revoked_at
 		FROM devices WHERE id = ? AND user_id = ?`, deviceID, userID)
 	d, err := scanDevice(row)
 	if errors.Is(err, sql.ErrNoRows) {

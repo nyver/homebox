@@ -37,6 +37,26 @@ final class DeviceProvisioningController extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   bool get busy => _status == DeviceProvisioningStatus.loading;
 
+  /// Lists active devices that have completed at least one authenticated sync
+  /// feed read. A non-null lastSyncAt therefore represents actual server
+  /// synchronization rather than a login or a device-registration event.
+  Future<List<transport.HomeBoxDevice>> approvedDevices() async {
+    final context = _requireSession();
+    if (context == null) return const [];
+    _errorMessage = null;
+    _setStatus(DeviceProvisioningStatus.loading);
+    try {
+      final devices = await context.api.listDevices(context.accessToken);
+      _setStatus(DeviceProvisioningStatus.idle);
+      return devices
+          .where((device) => !device.isRevoked && device.lastSyncAt != null)
+          .toList(growable: false);
+    } catch (e) {
+      _fail(e);
+      return const [];
+    }
+  }
+
   /// Lists active devices that can receive an envelope. The current device
   /// is excluded because a device must never provision a key to itself.
   Future<List<transport.HomeBoxDevice>> availableRecipientDevices() async {

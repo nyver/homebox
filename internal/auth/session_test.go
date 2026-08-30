@@ -54,6 +54,38 @@ func TestLoginIssuesSessionAndRegistersDevice(t *testing.T) {
 	}
 }
 
+func TestRecordSyncSetsLastSyncWithoutChangingLoginActivity(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	user := mustBootstrap(t, s, "admin", "correct horse battery staple")
+	deviceID := uuid.NewString()
+	if _, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(deviceID)); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.GetDevice(ctx, user.ID, deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.LastSyncAt != nil {
+		t.Fatalf("last sync before a sync request = %v", before.LastSyncAt)
+	}
+	want := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return want }
+	if err := s.RecordSync(ctx, user.ID, deviceID); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.GetDevice(ctx, user.ID, deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LastSyncAt == nil || !after.LastSyncAt.Equal(want) {
+		t.Fatalf("last sync = %v, want %v", after.LastSyncAt, want)
+	}
+	if !after.LastSeenAt.Equal(before.LastSeenAt) {
+		t.Fatalf("recording a sync changed last seen: before=%v after=%v", before.LastSeenAt, after.LastSeenAt)
+	}
+}
+
 func TestCreateUserRequiresBootstrapAdmin(t *testing.T) {
 	s := newTestService(t)
 	if _, err := s.CreateUser(context.Background(), "member", "correct horse battery staple"); err == nil {

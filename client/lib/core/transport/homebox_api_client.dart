@@ -50,6 +50,7 @@ final class HomeBoxDevice {
     required this.keyVersion,
     required this.createdAt,
     required this.lastSeenAt,
+    this.lastSyncAt,
     this.revokedAt,
   });
 
@@ -60,6 +61,7 @@ final class HomeBoxDevice {
   final int keyVersion;
   final DateTime createdAt;
   final DateTime lastSeenAt;
+  final DateTime? lastSyncAt;
   final DateTime? revokedAt;
 
   bool get isRevoked => revokedAt != null;
@@ -935,6 +937,9 @@ final class HomeBoxApiClient {
     keyVersion: json['keyVersion'] as int,
     createdAt: DateTime.parse(json['createdAt'] as String),
     lastSeenAt: DateTime.parse(json['lastSeenAt'] as String),
+    lastSyncAt: json['lastSyncAt'] != null
+        ? DateTime.parse(json['lastSyncAt'] as String)
+        : null,
     revokedAt: json['revokedAt'] != null
         ? DateTime.parse(json['revokedAt'] as String)
         : null,

@@ -279,6 +279,33 @@ func TestFullLoginDeviceKeyEnvelopeAndRevokeFlow(t *testing.T) {
 	}
 }
 
+func TestSyncFeedRecordsDeviceLastSync(t *testing.T) {
+	s := startTestServer(t)
+	deviceID := "33333333-3333-3333-3333-333333333333"
+	session := loginDevice(t, s, "admin", deviceID)
+	token := session["accessToken"].(string)
+
+	resp, _ := s.get(t, "/api/v1/sync/changes", token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("sync changes status=%d", resp.StatusCode)
+	}
+	resp, raw := s.doRaw(t, http.MethodGet, "/api/v1/devices", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list devices status=%d", resp.StatusCode)
+	}
+	devices := decodeArray(t, raw)
+	if len(devices) != 1 {
+		t.Fatalf("devices=%v", devices)
+	}
+	lastSync, ok := devices[0]["lastSyncAt"].(string)
+	if !ok || lastSync == "" {
+		t.Fatalf("lastSyncAt missing from device response: %v", devices[0])
+	}
+	if _, err := time.Parse(time.RFC3339Nano, lastSync); err != nil {
+		t.Fatalf("lastSyncAt=%q: %v", lastSync, err)
+	}
+}
+
 func TestLoginRejectsWrongPasswordOverHTTP(t *testing.T) {
 	s := startTestServer(t)
 	resp, body := s.do(t, http.MethodPost, "/api/v1/auth/login", map[string]any{

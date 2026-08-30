@@ -244,6 +244,7 @@ type deviceResponse struct {
 	KeyVersion int     `json:"keyVersion"`
 	CreatedAt  string  `json:"createdAt"`
 	LastSeenAt string  `json:"lastSeenAt"`
+	LastSyncAt *string `json:"lastSyncAt,omitempty"`
 	RevokedAt  *string `json:"revokedAt,omitempty"`
 }
 
@@ -260,6 +261,10 @@ func toDeviceResponse(d auth.Device) deviceResponse {
 		PublicKey:  base64.StdEncoding.EncodeToString(d.PublicKey),
 		CreatedAt:  d.CreatedAt.Format(time.RFC3339Nano),
 		LastSeenAt: d.LastSeenAt.Format(time.RFC3339Nano),
+	}
+	if d.LastSyncAt != nil {
+		lastSyncAt := d.LastSyncAt.Format(time.RFC3339Nano)
+		resp.LastSyncAt = &lastSyncAt
 	}
 	if d.RevokedAt != nil {
 		revoked := d.RevokedAt.Format(time.RFC3339Nano)

@@ -263,6 +263,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
 
   Future<void> _onVaultProvisioned() async {
     await _vaultSetupController.initialize();
+    await _syncEngine?.runOnce();
     _maybeRefreshFiles();
   }
 
@@ -1216,6 +1217,10 @@ class _SettingsSection extends StatelessWidget {
           vaultSetupController: vaultSetupController,
           onVaultProvisioned: onVaultProvisioned,
         ),
+        _ApprovedDevicesCard(
+          controller: deviceProvisioningController,
+          serverConnectionController: serverConnectionController,
+        ),
         _VaultSetupCard(
           controller: vaultSetupController,
           serverConnectionController: serverConnectionController,
@@ -1409,6 +1414,130 @@ final class _DeviceProvisioningCard extends StatelessWidget {
 }
 
 String _deviceCode(String deviceId) => deviceId.substring(0, 8).toUpperCase();
+
+final class _ApprovedDevicesCard extends StatefulWidget {
+  const _ApprovedDevicesCard({
+    required this.controller,
+    required this.serverConnectionController,
+  });
+
+  final DeviceProvisioningController controller;
+  final ServerConnectionController serverConnectionController;
+
+  @override
+  State<_ApprovedDevicesCard> createState() => _ApprovedDevicesCardState();
+}
+
+final class _ApprovedDevicesCardState extends State<_ApprovedDevicesCard> {
+  List<transport.HomeBoxDevice> _devices = const [];
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.serverConnectionController.addListener(_onConnectionChanged);
+    _onConnectionChanged();
+  }
+
+  @override
+  void dispose() {
+    widget.serverConnectionController.removeListener(_onConnectionChanged);
+    super.dispose();
+  }
+
+  void _onConnectionChanged() {
+    if (widget.serverConnectionController.status ==
+        ServerConnectionStatus.authenticated) {
+      unawaited(_load());
+    }
+  }
+
+  Future<void> _load() async {
+    if (_loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    final devices = await widget.controller.approvedDevices();
+    if (!mounted) return;
+    setState(() {
+      _devices = devices;
+      _error = widget.controller.errorMessage;
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final signedIn =
+        widget.serverConnectionController.status ==
+        ServerConnectionStatus.authenticated;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.devices_other_outlined),
+              title: const Text('Approved devices'),
+              subtitle: const Text(
+                'Devices that have successfully contacted the server sync feed.',
+              ),
+              trailing: IconButton(
+                tooltip: 'Refresh approved devices',
+                onPressed: !signedIn || _loading ? null : _load,
+                icon: _loading
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh_outlined),
+              ),
+            ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Text(
+                  _error!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              )
+            else if (signedIn && !_loading && _devices.isEmpty)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('No approved device has synchronized yet.'),
+                ),
+              )
+            else
+              for (final device in _devices)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                    device.platform == 'ANDROID'
+                        ? Icons.phone_android_outlined
+                        : Icons.desktop_windows_outlined,
+                  ),
+                  title: Text('${device.name} (${_deviceCode(device.id)})'),
+                  subtitle: Text(
+                    'Last synchronization: ${_formatLocalDateTime(device.lastSyncAt!)}',
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _formatLocalDateTime(DateTime value) {
+  final local = value.toLocal();
+  String two(int number) => number.toString().padLeft(2, '0');
+  return '${two(local.day)}.${two(local.month)}.${local.year} '
+      '${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
+}
 
 final class _AutostartCard extends StatefulWidget {
   const _AutostartCard();

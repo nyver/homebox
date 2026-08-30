@@ -15,6 +15,7 @@ var migrations = []migration{
 	{2, "access_tokens", migration0002AccessTokens},
 	{3, "maintenance_gc_candidates", migration0003MaintenanceGCCandidates},
 	{4, "share_device_envelopes", migration0004ShareDeviceEnvelopes},
+	{5, "device_last_sync", migration0005DeviceLastSync},
 }
 
 const migration0001InitialSchema = `
@@ -135,4 +136,13 @@ CREATE INDEX IF NOT EXISTS idx_active_share_per_recipient
   ON shares(node_id,target_user_id,revoked_at);
 CREATE INDEX IF NOT EXISTS idx_share_device_envelopes_recipient
   ON share_device_envelopes(target_device_id,share_id) WHERE revoked_at IS NULL;
+`
+
+// migration0005DeviceLastSync keeps a truthful device-activity timestamp for
+// the Settings trusted-device list. Unlike last_seen_at (which is refreshed
+// at login), this changes only after a device successfully reads the sync
+// feed.
+const migration0005DeviceLastSync = `
+ALTER TABLE devices ADD COLUMN last_sync_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_devices_user_last_sync ON devices(user_id,last_sync_at);
 `

@@ -166,6 +166,8 @@ Use the same HomeBox server and account on both devices. On the new device, sign
 
 The eight-character device code shown on both devices is an out-of-band check to help select the intended device from the account's registered-device list.
 
+Settings also lists approved devices that have successfully contacted the server sync feed, including each device's local date and time of its latest sync. This is tracked separately from login activity: a device that merely signs in is not shown as synchronized.
+
 ### Windows drag-and-drop uploads
 
 The Windows Files view accepts files dropped from Explorer. Each drop captures the currently open HomeBox folder, then encrypts and uploads the selected files sequentially through the normal resumable upload flow. A bad or oversized item does not cancel the remaining files, and navigating while the transfer runs does not change their destination. Dropping directories is not supported.

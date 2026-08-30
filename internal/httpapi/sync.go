@@ -38,6 +38,10 @@ func (a *API) syncChanges(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	if err := a.auth.RecordSync(r.Context(), requestUserID(r), requestDeviceID(r)); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	resp := syncChangesResponse{NextAfter: page.NextAfter, HasMore: page.HasMore, Changes: make([]syncChangeResponse, 0, len(page.Changes))}
 	for _, c := range page.Changes {
 		entry := syncChangeResponse{Revision: c.Revision, NodeID: c.NodeID, Operation: c.Operation, CreatedAt: c.CreatedAt.Format(time.RFC3339Nano)}
