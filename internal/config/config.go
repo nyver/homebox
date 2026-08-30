@@ -12,11 +12,11 @@ import (
 )
 
 const (
-	defaultMaxPlaintextSize   int64 = 100 * 1024 * 1024
+	defaultMaxPlaintextSize   int64 = 500 * 1024 * 1024
 	defaultChunkPlaintextSize int64 = 4 * 1024 * 1024
 	// Each encrypted chunk has a small AEAD framing overhead. This cap leaves headroom
 	// while still bounding server-side ciphertext storage independently of plaintext.
-	defaultMaxCiphertextSize int64 = defaultMaxPlaintextSize + 1400
+	defaultMaxCiphertextSize int64 = defaultMaxPlaintextSize + ((defaultMaxPlaintextSize / defaultChunkPlaintextSize) * 16)
 )
 
 type Config struct {

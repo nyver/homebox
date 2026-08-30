@@ -6,7 +6,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart' show sha256;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 
@@ -325,12 +324,13 @@ final class FilesController extends ChangeNotifier {
     if (ctx == null) return false;
     _setBusy(true);
     try {
-      final bytes = await File(localPath).readAsBytes();
-      if (bytes.length > 100 * 1024 * 1024) {
-        throw const FormatException('HomeBox files are limited to 100 MB.');
+      final file = File(localPath);
+      final plaintextLength = await file.length();
+      if (plaintextLength > homeBoxMaxPlaintextFileSize) {
+        throw const FormatException('HomeBox files are limited to 500 MiB.');
       }
       final fileName = _basename(localPath);
-      final plaintextHash = sha256.convert(bytes).toString();
+      final plaintextHash = await plaintextFileSha256(file);
 
       final nodeId = generateUuidV4();
       final nodeIdBytes = uuidStringToBytes(nodeId);
@@ -356,7 +356,7 @@ final class FilesController extends ChangeNotifier {
       );
       _upsertFromServer(createdNode);
 
-      final updatedNode = await uploadFileVersion(
+      final updatedNode = await uploadFilePathVersion(
         api: ctx.api,
         accessToken: ctx.accessToken,
         vaultKey: ctx.vaultKey,
@@ -364,7 +364,9 @@ final class FilesController extends ChangeNotifier {
         keyScopeId: ctx.userId,
         targetNodeId: nodeId,
         expectedRevision: createdNode.revision,
-        bytes: bytes,
+        file: file,
+        plaintextLength: plaintextLength,
+        expectedPlaintextSha256: plaintextHash,
         metadataCiphertext: metadataCiphertext,
         onProgress: _setProgress,
       );
@@ -408,11 +410,12 @@ final class FilesController extends ChangeNotifier {
     if (ctx == null) return false;
     _setBusy(true);
     try {
-      final bytes = await File(localPath).readAsBytes();
-      if (bytes.length > 100 * 1024 * 1024) {
-        throw const FormatException('HomeBox files are limited to 100 MB.');
+      final file = File(localPath);
+      final plaintextLength = await file.length();
+      if (plaintextLength > homeBoxMaxPlaintextFileSize) {
+        throw const FormatException('HomeBox files are limited to 500 MiB.');
       }
-      final plaintextHash = sha256.convert(bytes).toString();
+      final plaintextHash = await plaintextFileSha256(file);
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(fileName: entry.name, plaintextSha256: plaintextHash),
         metadataKey: ctx.vaultKey,
@@ -423,7 +426,7 @@ final class FilesController extends ChangeNotifier {
       );
       final metadataCiphertext = metadataEnvelope.encode();
 
-      final uploadedNode = await uploadFileVersion(
+      final uploadedNode = await uploadFilePathVersion(
         api: ctx.api,
         accessToken: ctx.accessToken,
         vaultKey: ctx.vaultKey,
@@ -431,7 +434,9 @@ final class FilesController extends ChangeNotifier {
         keyScopeId: ctx.userId,
         targetNodeId: entry.node.id,
         expectedRevision: entry.node.revision,
-        bytes: bytes,
+        file: file,
+        plaintextLength: plaintextLength,
+        expectedPlaintextSha256: plaintextHash,
         metadataCiphertext: metadataCiphertext,
         onProgress: _setProgress,
       );

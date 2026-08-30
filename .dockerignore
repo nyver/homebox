@@ -1,0 +1,13 @@
+.git
+.gitignore
+.agents
+.claude
+.codex
+.history
+bin
+client
+data
+openspec
+config.yaml
+*.doc
+*.docx

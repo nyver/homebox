@@ -3,7 +3,7 @@
 HomeBox is a self-hosted, zero-knowledge file-storage service for a small family.
 Its security boundary is deliberate: clients encrypt file content and sensitive metadata before upload; the server stores only opaque identifiers, encrypted metadata/key envelopes, and ciphertext blobs. It never receives a File DEK, vault key, folder key, user master key, or recovery secret.
 
-This repository currently provides the security-first Go server foundation, a Windows 11 Flutter desktop client, and an Android client foundation. The client authenticates against the server over pinned TLS, creates its own E2EE vault, and can browse, upload, and download real encrypted files against the live server API from its UI. Folder create/rename/move/delete go through a local SQLite cache and durable outbox, so they apply instantly and work offline, syncing to the server opportunistically in the background. An optional local sync folder mirrors the vault's decrypted contents to disk automatically; its native filesystem watcher debounces local edits and new nested folders into an immediate safe pull-then-push sync pass. Sync can be paused and resumed from the desktop UI without cancelling an in-flight write. Closing the Windows window moves HomeBox to the notification area, where its icon can restore the UI or exit explicitly. Settings offers opt-in per-user Windows autostart.
+This repository currently provides the security-first Go server foundation, a Windows 11 Flutter desktop client, and an Android client. The client authenticates against the server over pinned TLS, creates its own E2EE vault, and can browse, upload, and download real encrypted files against the live server API from its UI. Folder create/rename/move/delete go through a local SQLite cache and durable outbox, so they apply instantly and work offline, syncing to the server opportunistically in the background. An optional local sync folder mirrors the vault's decrypted contents to disk automatically; its native filesystem watcher debounces local edits and new nested folders into an immediate safe pull-then-push sync pass. Sync can be paused and resumed from the desktop UI without cancelling an in-flight write. Closing the Windows window moves HomeBox to the notification area, where its icon can restore the UI or exit explicitly. Settings offers opt-in per-user Windows autostart.
 
 ## Current capabilities
 
@@ -16,6 +16,7 @@ This repository currently provides the security-first Go server foundation, a Wi
 - Family Vault server support: a local operator can create a separate family account, an authenticated invitee who knows that account's opaque ID can retrieve its active device public keys, and an owner can grant a folder READ access with a distinct client-encrypted envelope for every recipient device. Recipients can browse/download the shared root and descendants; revoke immediately removes server access. Shared writes, key rotation, and Flutter UX remain the next sharing slice.
 - Opaque node CRUD (create/rename/move/soft-delete/restore/Trash) with optimistic concurrency and idempotent mutation (`/api/v1/nodes*`, `/api/v1/trash`), and a paged, per-account sync revision feed (`/api/v1/sync/changes`).
 - Ciphertext-only resumable upload wired end to end: create/chunk/complete/abort over HTTP (`/api/v1/uploads*`) and streamed unmodified back on download (`/api/v1/files/{id}/content`), with opaque IDs, per-chunk SHA-256 storage checks, idempotent completion, and atomic blob commit.
+- A 500 MiB plaintext file limit. The Flutter upload path hashes, encrypts, and transfers one 4 MiB frame at a time, keeping memory bounded and rejecting a file changed during upload.
 - A unified error-mapping layer (`internal/httpapi`'s `writeServiceError`) that only ever returns a raw error message to the client when a domain service explicitly marked it safe to show (`internal/apierror.Validation`) — every other failure logs server-side and returns a generic `INTERNAL_ERROR`, so a database/driver error can never leak through the API.
 - Health and metrics endpoints.
 - Atomic ciphertext-only server backup and safe restore commands. A backup contains a consistent SQLite snapshot, immutable ciphertext blobs, the transport identity key, the supplied server config, and a SHA-256 manifest. It never contains a Recovery Secret or client private E2EE key.
@@ -50,6 +51,23 @@ Every endpoint, including health and metrics, is served over TLS — there is no
 - `GET /api/v1/files/{id}/content`
 
 The fingerprint must be verified out of band before a client trusts the server identity (ADR-009); a client must refuse to connect if the presented certificate resolves to a different fingerprint than the one it pinned. The certificate is self-signed but uses ECDSA P-256, which is broadly supported (Go, the Flutter client's bundled BoringSSL, OpenSSL, and Windows' own Schannel stack all complete the handshake), so ordinary tools like `curl.exe -k` work for manual poking as long as certificate verification is disabled — there is no CA behind this certificate on purpose.
+
+## Deploy the server to a VPS with Docker Compose
+
+The repository includes a multi-stage [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml). Compose starts the server as an unprivileged user, gives it a dedicated persistent volume for the SQLite database, server transport identity, and ciphertext only, and mounts its non-secret configuration read-only from [docker/homebox.yaml](docker/homebox.yaml). It exposes the server's own pinned TLS endpoint directly; do not place a plaintext reverse proxy in front of it.
+
+On the VPS, install Docker Engine with the Compose plugin, allow TCP 8787 through the VPS firewall, then run:
+
+```sh
+docker compose build
+docker compose up -d
+docker compose exec homebox /homebox fingerprint --config /etc/homebox/homebox.yaml
+read -r -s HOMEBOX_ADMIN_PASSWORD
+printf '%s' "$HOMEBOX_ADMIN_PASSWORD" | docker compose exec -T homebox /homebox bootstrap-admin --config /etc/homebox/homebox.yaml --username admin --password-stdin
+unset HOMEBOX_ADMIN_PASSWORD
+```
+
+Verify the printed fingerprint out of band before connecting a client. The named `homebox-data` volume is the only persistent server state; back it up using HomeBox's `backup` command, not a plaintext export. To bind only to a private VPN address instead of every VPS interface, set `HOMEBOX_BIND_ADDRESS` before `docker compose up -d`. Edit `docker/homebox.yaml` only for server policy changes; it retains mandatory E2EE and a 500 MiB plaintext / 524,290,000-byte ciphertext cap.
 
 ## Back up and restore the server
 
@@ -133,15 +151,17 @@ Trusted-device provisioning uses ephemeral X25519 and HKDF-SHA256 to derive a on
 
 ```powershell
 cd client
+flutter pub get
 flutter analyze
 flutter test
 flutter build windows --debug
+flutter build apk --release
 ```
 
-Windows builds require Visual Studio 2022 with the **Desktop development with C++** workload and the Windows 10/11 SDK.
+Windows builds require Visual Studio 2022 with the **Desktop development with C++** workload and the Windows 10/11 SDK. The Android release APK is written to `client/build/app/outputs/flutter-apk/app-release.apk`. It is signed with the template debug key until a production signing configuration is supplied in `client/android/app/build.gradle.kts`; do not distribute that debug-signed APK.
 
 ## Security status
 
 Ciphertext-only server backup/restore now validates the SQLite snapshot, transport identity, and every database-referenced blob before placing a restore into a new storage directory. Manual maintenance safely cleans expired server state and uses a two-pass grace period for ciphertext garbage collection.
 
-Secure Transport is closed (ADR-008/009/020): TLS 1.3 with self-signed, fingerprint-pinned server identity, and an authenticated login/device/key-envelope API built on top of it. A full opaque-node + ciphertext-upload/download round trip now works end to end from the real Flutter UI down to the Go server and back — create a folder, upload a file, download it, and get the exact original bytes back — proven by both `internal/httpapi/nodes_uploads_test.go` (server side) and `client/test/files/files_controller_test.dart` (client side, including the vault bootstrap this required). Folder metadata mutations now go through a local SQLite cache and durable outbox (`client/lib/features/sync/sync_engine.dart`), so they apply offline and sync opportunistically once connectivity returns. An optional local folder mirrors the vault's decrypted contents to disk; its recursive native watcher promptly coalesces local changes into safe sync passes, which the desktop UI can pause and resume safely. The Windows runner keeps the app in the notification area after window close, with explicit Show and Exit tray actions. The full product is still not production-ready: cross-account sharing integration, autostart, and the Android client/camera upload remain roadmap milestones. Retention policies for old versions and Trash are also intentionally deferred. The server intentionally contains no file decryption implementation to preserve that boundary, and this document's own roadmap sections track exactly what is and isn't built yet.
+Secure Transport is closed (ADR-008/009/020): TLS 1.3 with self-signed, fingerprint-pinned server identity, and an authenticated login/device/key-envelope API built on top of it. A full opaque-node + ciphertext-upload/download round trip now works end to end from the real Flutter UI down to the Go server and back — create a folder, upload a file, download it, and get the exact original bytes back — proven by both `internal/httpapi/nodes_uploads_test.go` (server side) and `client/test/files/files_controller_test.dart` (client side, including the vault bootstrap this required). Folder metadata mutations now go through a local SQLite cache and durable outbox (`client/lib/features/sync/sync_engine.dart`), so they apply offline and sync opportunistically once connectivity returns. An optional local folder mirrors the vault's decrypted contents to disk; its recursive native watcher promptly coalesces local changes into safe sync passes, which the desktop UI can pause and resume safely. The Windows runner keeps the app in the notification area after window close, with explicit Show and Exit tray actions, while Android supports system camera capture into the same encrypted upload path. The full product is still not production-ready: Family Vault Flutter integration and shared-write/key-rotation UX remain milestones. Retention policies for old versions and Trash are also intentionally deferred. The server intentionally contains no file decryption implementation to preserve that boundary, and this document's own roadmap sections track exactly what is and isn't built yet.

@@ -1,0 +1,40 @@
+# Docker Compose server configuration. This file contains no secrets; the
+# persistent volume stores the server transport identity and ciphertext only.
+server:
+  host: "0.0.0.0"
+  port: 8787
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+storage:
+  path: "/var/lib/homebox"
+  ciphertext_only: true
+
+limits:
+  max_users: 5
+  max_plaintext_file_size_bytes: 524288000
+  upload_chunk_plaintext_size_bytes: 4194304
+  max_ciphertext_file_size_bytes: 524290000
+
+security:
+  application_encryption:
+    enabled: true
+    required_for_http: true
+    protocol: "tls1.3-ecdsa-p256-cert-pinning"
+    session_max_age: "15m"
+  e2ee:
+    required: true
+    server_decryption_enabled: false
+    protocol_version: 1
+
+uploads:
+  abandoned_after_hours: 24
+
+sync:
+  page_size: 500
+  max_page_size: 2000
+
+maintenance:
+  orphan_blob_grace_hours: 168

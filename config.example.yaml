@@ -25,9 +25,11 @@ limits:
   # Family Vault grants remain client-encrypted device envelopes; this server
   # setting never enables decryption or server-side key recovery.
   max_users: 5
-  max_plaintext_file_size_bytes: 104857600
+  # 500 MiB plaintext. The ciphertext cap includes the 16-byte AEAD tag on
+  # each 4 MiB chunk (125 tags at the configured maximum file size).
+  max_plaintext_file_size_bytes: 524288000
   upload_chunk_plaintext_size_bytes: 4194304
-  max_ciphertext_file_size_bytes: 104859000
+  max_ciphertext_file_size_bytes: 524290000
 
 security:
   application_encryption:

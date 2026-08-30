@@ -3,7 +3,6 @@
 // ignore_for_file: prefer_initializing_formals
 import 'dart:io';
 
-import 'package:crypto/crypto.dart' show sha256;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 
@@ -239,16 +238,13 @@ final class LocalFolderUploader extends ChangeNotifier {
     required File localFile,
   }) async {
     try {
-      final bytes = await localFile.readAsBytes();
-      final hash = sha256.convert(bytes).toString();
+      final plaintextLength = await localFile.length();
+      if (plaintextLength > homeBoxMaxPlaintextFileSize) return;
+      final hash = await plaintextFileSha256(localFile);
       if (currentMetadata.plaintextSha256?.toLowerCase() ==
           hash.toLowerCase()) {
         return; // unchanged - either untouched, or exactly what materialize() itself just wrote.
       }
-      if (bytes.length > 100 * 1024 * 1024) {
-        return; // matches FilesController's upload size limit.
-      }
-
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(fileName: name, plaintextSha256: hash),
         metadataKey: vaultKey,
@@ -259,7 +255,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       );
       final metadataCiphertext = metadataEnvelope.encode();
 
-      final uploadedNode = await uploadFileVersion(
+      final uploadedNode = await uploadFilePathVersion(
         api: api,
         accessToken: accessToken,
         vaultKey: vaultKey,
@@ -267,7 +263,9 @@ final class LocalFolderUploader extends ChangeNotifier {
         keyScopeId: keyScopeId,
         targetNodeId: node.id,
         expectedRevision: node.revision,
-        bytes: bytes,
+        file: localFile,
+        plaintextLength: plaintextLength,
+        expectedPlaintextSha256: hash,
         metadataCiphertext: metadataCiphertext,
       );
       // Two separate mutations, same reasoning as FilesController.replaceFileContent:
@@ -308,11 +306,9 @@ final class LocalFolderUploader extends ChangeNotifier {
     required File localFile,
   }) async {
     try {
-      final bytes = await localFile.readAsBytes();
-      if (bytes.length > 100 * 1024 * 1024) {
-        return; // matches FilesController's upload size limit.
-      }
-      final hash = sha256.convert(bytes).toString();
+      final plaintextLength = await localFile.length();
+      if (plaintextLength > homeBoxMaxPlaintextFileSize) return;
+      final hash = await plaintextFileSha256(localFile);
 
       final nodeId = generateUuidV4();
       final metadataEnvelope = await _metadataCipher.encrypt(
@@ -336,7 +332,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       );
       _syncEngine.nodeCache.upsert(localNodeFromServerNode(createdNode));
 
-      final uploadedNode = await uploadFileVersion(
+      final uploadedNode = await uploadFilePathVersion(
         api: api,
         accessToken: accessToken,
         vaultKey: vaultKey,
@@ -344,7 +340,9 @@ final class LocalFolderUploader extends ChangeNotifier {
         keyScopeId: keyScopeId,
         targetNodeId: nodeId,
         expectedRevision: createdNode.revision,
-        bytes: bytes,
+        file: localFile,
+        plaintextLength: plaintextLength,
+        expectedPlaintextSha256: hash,
         metadataCiphertext: metadataCiphertext,
       );
       _syncEngine.nodeCache.upsert(localNodeFromServerNode(uploadedNode));
