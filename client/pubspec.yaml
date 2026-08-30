@@ -41,6 +41,7 @@ dependencies:
   crypto: ^3.0.7
   sqlite3: ^3.5.2
   path_provider: ^2.1.6
+  image_picker: ^1.2.3
 
 dev_dependencies:
   flutter_test:

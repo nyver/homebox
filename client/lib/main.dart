@@ -1,11 +1,13 @@
 import 'dart:async';
 
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'core/e2ee/device_identity.dart';
 import 'core/e2ee/vault_key_store.dart';
+import 'core/platform/camera_photo_picker.dart';
 import 'core/platform/windows_autostart.dart';
 import 'core/storage/local_database.dart';
 import 'features/device/device_setup_controller.dart';
@@ -27,12 +29,14 @@ class HomeBoxApp extends StatelessWidget {
     this.serverConnectionController,
     this.vaultKeyStore,
     this.syncFolderStore,
+    this.cameraPhotoPicker,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
   final ServerConnectionController? serverConnectionController;
   final VaultKeyStore? vaultKeyStore;
   final SyncFolderStore? syncFolderStore;
+  final CameraPhotoPicker? cameraPhotoPicker;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -46,6 +50,7 @@ class HomeBoxApp extends StatelessWidget {
       serverConnectionController: serverConnectionController,
       vaultKeyStore: vaultKeyStore,
       syncFolderStore: syncFolderStore,
+      cameraPhotoPicker: cameraPhotoPicker,
     ),
   );
 }
@@ -59,6 +64,7 @@ class HomeBoxDesktopPage extends StatefulWidget {
     this.serverConnectionController,
     this.vaultKeyStore,
     this.syncFolderStore,
+    this.cameraPhotoPicker,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
@@ -69,6 +75,7 @@ class HomeBoxDesktopPage extends StatefulWidget {
   final ServerConnectionController? serverConnectionController;
   final VaultKeyStore? vaultKeyStore;
   final SyncFolderStore? syncFolderStore;
+  final CameraPhotoPicker? cameraPhotoPicker;
 
   @override
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
@@ -82,6 +89,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final VaultSetupController _vaultSetupController;
   late final SyncFolderStore _syncFolderStore;
   late final SyncFolderWatcher _syncFolderWatcher;
+  late final CameraPhotoPicker _cameraPhotoPicker;
   SyncEngine? _syncEngine;
   FilesController? _filesController;
   SyncFolderMaterializer? _syncFolderMaterializer;
@@ -94,6 +102,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   AppSection _section = AppSection.files;
   String? _syncFolder;
   bool _selectingFolder = false;
+  String? _recoveredCameraPhotoPath;
 
   @override
   void initState() {
@@ -108,10 +117,14 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _vaultSetupController = VaultSetupController(_vaultKeyStore);
     _syncFolderStore = widget.syncFolderStore ?? SyncFolderStore();
     _syncFolderWatcher = SyncFolderWatcher(onChange: _runSyncFolderPass);
+    _cameraPhotoPicker = widget.cameraPhotoPicker ?? ImagePickerCameraPhotoPicker();
     unawaited(_deviceSetupController.initialize());
     unawaited(_initializeServerConnection());
     unawaited(_vaultSetupController.initialize());
     unawaited(_loadSyncFolder());
+    if (supportsCameraCapture(defaultTargetPlatform)) {
+      unawaited(_recoverLostCameraPhoto());
+    }
     // Whenever the connection or the vault reaches a state where files
     // might actually be listable, refresh — cheap no-ops otherwise (see
     // FilesController._requireContext).
@@ -214,6 +227,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         engine.addListener(_onSyncEngineSettled);
         engine.start();
         _maybeRefreshFiles();
+        unawaited(_uploadRecoveredCameraPhotoIfReady());
         unawaited(_runSyncFolderPass());
       }
     } finally {
@@ -232,7 +246,67 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
             ServerConnectionStatus.authenticated &&
         _vaultSetupController.status == VaultSetupStatus.ready) {
       unawaited(files.refresh());
+      unawaited(_uploadRecoveredCameraPhotoIfReady());
     }
+  }
+
+  Future<void> _recoverLostCameraPhoto() async {
+    try {
+      final path = await _cameraPhotoPicker.recoverLostPhoto();
+      if (path == null || !mounted) return;
+      _recoveredCameraPhotoPath = path;
+      unawaited(_uploadRecoveredCameraPhotoIfReady());
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('HomeBox could not recover the captured photo.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _capturePhoto() async {
+    try {
+      final path = await _cameraPhotoPicker.capturePhoto();
+      if (path == null) return;
+      await _uploadCameraPhoto(path, recovered: false);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('HomeBox could not open the camera.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _uploadRecoveredCameraPhotoIfReady() async {
+    final path = _recoveredCameraPhotoPath;
+    if (path == null ||
+        _serverConnectionController.status != ServerConnectionStatus.authenticated ||
+        _vaultSetupController.status != VaultSetupStatus.ready ||
+        _filesController == null) {
+      return;
+    }
+    _recoveredCameraPhotoPath = null;
+    await _uploadCameraPhoto(path, recovered: true);
+  }
+
+  Future<void> _uploadCameraPhoto(String path, {required bool recovered}) async {
+    final files = _filesController;
+    if (files == null) return;
+    final uploaded = await files.uploadFile(path);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          uploaded
+              ? (recovered
+                    ? 'Recovered camera photo encrypted and uploaded.'
+                    : 'Camera photo encrypted and uploaded.')
+              : (files.errorMessage ?? 'Could not upload the camera photo.'),
+        ),
+      ),
+    );
   }
 
   /// Re-mirrors the sync folder once a background sync pass settles, so
@@ -348,6 +422,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       localFolderUploader: _localFolderUploader,
       syncFolderWatcher: _syncFolderWatcher,
       onToggleSyncPause: _toggleSyncPause,
+      onCapturePhoto: supportsCameraCapture(defaultTargetPlatform)
+          ? _capturePhoto
+          : null,
     );
     if (!wideLayout) {
       return Scaffold(
@@ -481,6 +558,7 @@ class _SectionContent extends StatelessWidget {
     required this.localFolderUploader,
     required this.syncFolderWatcher,
     required this.onToggleSyncPause,
+    required this.onCapturePhoto,
   });
 
   final AppSection section;
@@ -496,10 +574,14 @@ class _SectionContent extends StatelessWidget {
   final LocalFolderUploader? localFolderUploader;
   final SyncFolderWatcher syncFolderWatcher;
   final VoidCallback onToggleSyncPause;
+  final Future<void> Function()? onCapturePhoto;
 
   @override
   Widget build(BuildContext context) => switch (section) {
-    AppSection.files => _FilesSection(controller: filesController),
+    AppSection.files => _FilesSection(
+      controller: filesController,
+      onCapturePhoto: onCapturePhoto,
+    ),
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,
       onSelectSyncFolder: onSelectSyncFolder,
@@ -518,9 +600,10 @@ class _SectionContent extends StatelessWidget {
 }
 
 final class _FilesSection extends StatelessWidget {
-  const _FilesSection({required this.controller});
+  const _FilesSection({required this.controller, required this.onCapturePhoto});
 
   final FilesController? controller;
+  final Future<void> Function()? onCapturePhoto;
 
   Future<void> _createFolder(BuildContext context) async {
     final controller = this.controller;
@@ -759,7 +842,11 @@ final class _FilesSection extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
+              Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 8,
                 children: [
                   if (controller.canGoUp)
                     IconButton(
@@ -767,16 +854,12 @@ final class _FilesSection extends StatelessWidget {
                       icon: const Icon(Icons.home_outlined),
                       tooltip: 'Root',
                     ),
-                  const Spacer(),
                   if (controller.busy)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 12),
-                      child: SizedBox.square(
-                        dimension: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          value: controller.progress,
-                        ),
+                    SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        value: controller.progress,
                       ),
                     ),
                   OutlinedButton.icon(
@@ -786,7 +869,12 @@ final class _FilesSection extends StatelessWidget {
                     icon: const Icon(Icons.create_new_folder_outlined),
                     label: const Text('New folder'),
                   ),
-                  const SizedBox(width: 8),
+                  if (onCapturePhoto != null)
+                    FilledButton.tonalIcon(
+                      onPressed: controller.busy ? null : onCapturePhoto,
+                      icon: const Icon(Icons.photo_camera_outlined),
+                      label: const Text('Camera'),
+                    ),
                   FilledButton.icon(
                     onPressed: controller.busy
                         ? null
