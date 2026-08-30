@@ -36,10 +36,14 @@ void main() {
     await tester.pumpWidget(_testApp());
     await tester.pumpAndSettle();
 
+    // The header duplicates the sync status next to "Vault locked" from any
+    // section, not just the Sync page itself.
+    expect(find.text('Sync paused'), findsOneWidget);
+
     await tester.tap(find.text('Sync'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Sync paused'), findsOneWidget);
+    expect(find.text('Sync paused'), findsNWidgets(2));
     expect(
       find.text(
         'Provision this device with a trusted device or Recovery Secret.',

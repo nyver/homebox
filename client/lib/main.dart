@@ -534,6 +534,56 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     }
   }
 
+  /// The header's transfer/sync/vault status group, shared by the narrow
+  /// AppBar and the wide desktop header. Kept reactive to [_filesController]
+  /// here (rather than inside [_TransferProgressIndicator] alone) so the
+  /// transfer indicator can be entirely absent from the list — and thus not
+  /// reserve any [spacing] — while idle, instead of rendering as an
+  /// invisible zero-size child.
+  Widget _headerStatusIndicators({required bool dense, required double spacing}) {
+    final filesController = _filesController;
+    if (filesController == null) {
+      return _buildHeaderStatusIndicators(
+        dense: dense,
+        spacing: spacing,
+        showTransfer: false,
+      );
+    }
+    return AnimatedBuilder(
+      animation: filesController,
+      builder: (context, _) => _buildHeaderStatusIndicators(
+        dense: dense,
+        spacing: spacing,
+        showTransfer: filesController.busy,
+      ),
+    );
+  }
+
+  Widget _buildHeaderStatusIndicators({
+    required bool dense,
+    required double spacing,
+    required bool showTransfer,
+  }) {
+    final children = [
+      if (showTransfer)
+        _TransferProgressIndicator(
+          filesController: _filesController,
+          dense: dense,
+        ),
+      _SyncStatusChip(syncEngine: _syncEngine, dense: dense),
+      _VaultStateChip(controller: _vaultSetupController),
+    ];
+    return dense
+        ? Row(mainAxisSize: MainAxisSize.min, spacing: spacing, children: children)
+        : Wrap(
+            alignment: WrapAlignment.end,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: spacing,
+            runSpacing: 8,
+            children: children,
+          );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_biometricGateReady) {
@@ -573,7 +623,19 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
       return Scaffold(
         appBar: AppBar(
           title: const Text('HomeBox'),
-          actions: [_VaultStateChip(controller: _vaultSetupController)],
+          actions: [
+            // Scrolls instead of overflowing: three status indicators can
+            // together be wider than a narrow phone's AppBar leaves room
+            // for once a long sync-error tooltip or the full vault chip is
+            // in the mix.
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: _headerStatusIndicators(dense: true, spacing: 8),
+              ),
+            ),
+          ],
         ),
         body: content,
         bottomNavigationBar: NavigationBar(
@@ -643,8 +705,13 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
                           'HomeBox',
                           style: Theme.of(context).textTheme.headlineSmall,
                         ),
-                        const Spacer(),
-                        _VaultStateChip(controller: _vaultSetupController),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: _headerStatusIndicators(
+                            dense: false,
+                            spacing: 12,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -738,6 +805,105 @@ class _VaultStateChip extends StatelessWidget {
   );
 }
 
+/// A [Chip] mirroring [label] when [dense] is false (used in the roomy
+/// desktop header), or a bare tooltipped icon when true (used in the
+/// narrow/Android AppBar, where three side-by-side chips would overflow).
+Widget _headerStatusIndicator({
+  required IconData icon,
+  required String label,
+  String? tooltip,
+  required bool dense,
+}) {
+  if (dense) {
+    return Tooltip(message: tooltip ?? label, child: Icon(icon, size: 20));
+  }
+  return Tooltip(
+    message: tooltip ?? label,
+    child: Chip(avatar: Icon(icon, size: 18), label: Text(label)),
+  );
+}
+
+/// Duplicates the Sync page's status (spec: offline/up to date/syncing/…)
+/// in the header, so it is visible from any section without switching tabs.
+class _SyncStatusChip extends StatelessWidget {
+  const _SyncStatusChip({required this.syncEngine, this.dense = false});
+
+  final SyncEngine? syncEngine;
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final engine = syncEngine;
+    if (engine == null) {
+      // Matches the label the Sync page itself shows for this same
+      // condition (no engine yet — vault locked/not provisioned).
+      return _headerStatusIndicator(
+        icon: Icons.pause_circle_outline,
+        label: 'Sync paused',
+        dense: dense,
+      );
+    }
+    return AnimatedBuilder(
+      animation: engine,
+      builder: (context, _) {
+        final (icon, label) = _syncStatusPresentation(engine.status);
+        final tooltip =
+            engine.status == SyncStatus.error && engine.errorMessage != null
+            ? engine.errorMessage!
+            : null;
+        return _headerStatusIndicator(
+          icon: icon,
+          label: label,
+          tooltip: tooltip,
+          dense: dense,
+        );
+      },
+    );
+  }
+}
+
+/// The header counterpart of the Files page's upload/download percentage —
+/// visible from any section, not just while Files is open. Renders nothing
+/// while no transfer is in progress.
+class _TransferProgressIndicator extends StatelessWidget {
+  const _TransferProgressIndicator({
+    required this.filesController,
+    this.dense = false,
+  });
+
+  final FilesController? filesController;
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = filesController;
+    if (controller == null) return const SizedBox.shrink();
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        if (!controller.busy) return const SizedBox.shrink();
+        final percent = _transferProgressPercent(controller);
+        final label = _transferProgressLabel(
+          controller.transferDirection,
+          percent,
+        );
+        final spinner = SizedBox.square(
+          dimension: dense ? 20 : 18,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            value: controller.progress,
+          ),
+        );
+        if (dense) return Tooltip(message: label, child: spinner);
+        return Tooltip(
+          message: label,
+          child: Chip(avatar: spinner, label: Text(label)),
+        );
+      },
+    );
+  }
+}
+
 class _SectionContent extends StatelessWidget {
   const _SectionContent({
     required this.section,
@@ -802,6 +968,31 @@ class _SectionContent extends StatelessWidget {
     ),
   };
 }
+
+/// The icon/label a [SyncStatus] should render as — shared by the Sync
+/// page's own status card and the header's duplicate [_SyncStatusChip], so
+/// the two can never drift into showing different text for the same state.
+(IconData icon, String label) _syncStatusPresentation(SyncStatus status) =>
+    switch (status) {
+      SyncStatus.idle => (Icons.check_circle_outline, 'Up to date'),
+      SyncStatus.syncing => (Icons.sync, 'Syncing…'),
+      SyncStatus.paused => (Icons.pause_circle_outline, 'Sync paused'),
+      SyncStatus.offline => (Icons.cloud_off_outlined, 'Offline'),
+      SyncStatus.error => (Icons.error_outline, 'Sync error'),
+    };
+
+/// The rounded 0-100 percent for [FilesController.progress] — shared so the
+/// Files page's own transfer row and the header's [_TransferProgressIndicator]
+/// can never drift into different rounding/clamping.
+int _transferProgressPercent(FilesController controller) =>
+    ((controller.progress ?? 0) * 100).round().clamp(0, 100);
+
+String _transferProgressLabel(FileTransferDirection? direction, int percent) =>
+    switch (direction) {
+      FileTransferDirection.upload => 'Upload progress $percent percent',
+      FileTransferDirection.download => 'Download progress $percent percent',
+      null => 'Transfer progress $percent percent',
+    };
 
 /// "mimeType • size • Uploaded date time" for a file's [ListTile] subtitle.
 /// [FileEntry.metadata.plaintextSize] is null for files uploaded before that
@@ -1179,16 +1370,11 @@ final class _FilesSectionState extends State<_FilesSection> {
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) {
-        final transferProgressPercent = ((controller.progress ?? 0) * 100)
-            .round()
-            .clamp(0, 100);
-        final transferProgressLabel = switch (controller.transferDirection) {
-          FileTransferDirection.upload =>
-            'Upload progress $transferProgressPercent percent',
-          FileTransferDirection.download =>
-            'Download progress $transferProgressPercent percent',
-          null => 'Transfer progress $transferProgressPercent percent',
-        };
+        final transferProgressPercent = _transferProgressPercent(controller);
+        final transferProgressLabel = _transferProgressLabel(
+          controller.transferDirection,
+          transferProgressPercent,
+        );
         final Widget body;
         if (controller.status == FilesStatus.idle) {
           body = const _FilesMessageState(
@@ -1417,16 +1603,7 @@ class _SyncSection extends StatelessWidget {
             AnimatedBuilder(
               animation: engine,
               builder: (context, _) {
-                final (icon, label) = switch (engine.status) {
-                  SyncStatus.idle => (Icons.check_circle_outline, 'Up to date'),
-                  SyncStatus.syncing => (Icons.sync, 'Syncing…'),
-                  SyncStatus.paused => (
-                    Icons.pause_circle_outline,
-                    'Sync paused',
-                  ),
-                  SyncStatus.offline => (Icons.cloud_off_outlined, 'Offline'),
-                  SyncStatus.error => (Icons.error_outline, 'Sync error'),
-                };
+                final (icon, label) = _syncStatusPresentation(engine.status);
                 return Card(
                   child: ListTile(
                     leading: Icon(icon),
