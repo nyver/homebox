@@ -6,7 +6,7 @@ import 'support/memory_device_private_key_storage.dart';
 
 void main() {
   test(
-    'preparing a Windows device produces a stable public fingerprint',
+    'preparing a device produces a stable public fingerprint',
     () async {
       final storage = MemoryDevicePrivateKeyStorage();
       final controller = DeviceSetupController(DeviceIdentityStore(storage));

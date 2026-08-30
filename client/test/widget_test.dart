@@ -15,7 +15,7 @@ import 'support/memory_sync_folder_storage.dart';
 import 'support/memory_vault_key_storage.dart';
 
 void main() {
-  testWidgets('Windows client starts locked and does not expose files', (
+  testWidgets('client starts locked and does not expose files', (
     tester,
   ) async {
     await tester.pumpWidget(_testApp());
@@ -44,7 +44,7 @@ void main() {
     );
   });
 
-  testWidgets('Settings prepares a Windows device without unlocking vault', (
+  testWidgets('Settings prepares a device without unlocking vault', (
     tester,
   ) async {
     await tester.pumpWidget(_testApp());
@@ -52,12 +52,12 @@ void main() {
 
     await tester.tap(find.text('Settings'));
     await tester.pumpAndSettle();
-    expect(find.text('This Windows device'), findsOneWidget);
+    expect(find.text('This device'), findsOneWidget);
     expect(find.text('Prepare device'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('prepare-device')));
     await tester.pumpAndSettle();
-    expect(find.text('Prepare this Windows device?'), findsOneWidget);
+    expect(find.text('Prepare this device?'), findsOneWidget);
     await tester.tap(find.text('Create identity'));
     await tester.pumpAndSettle();
 

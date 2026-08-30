@@ -1120,9 +1120,9 @@ final class _DeviceIdentityCard extends StatelessWidget {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Prepare this Windows device?'),
+        title: const Text('Prepare this device?'),
         content: const Text(
-          'HomeBox will create an X25519 private key protected by Windows secure storage. '
+          'HomeBox will create an X25519 private key protected by secure storage on this device. '
           'This does not unlock the vault until a trusted device or Recovery Secret approves it.',
         ),
         actions: [
@@ -1154,7 +1154,7 @@ final class _DeviceIdentityCard extends StatelessWidget {
     builder: (context, _) {
       final fingerprint = controller.publicKeyFingerprint;
       final subtitle = switch (controller.status) {
-        DeviceSetupStatus.checking => 'Checking Windows secure storage…',
+        DeviceSetupStatus.checking => 'Checking secure storage…',
         DeviceSetupStatus.missing =>
           'No device identity. Create one before requesting provisioning.',
         DeviceSetupStatus.creating =>
@@ -1162,7 +1162,7 @@ final class _DeviceIdentityCard extends StatelessWidget {
         DeviceSetupStatus.ready =>
           'Identity ready · Not provisioned\nFingerprint: $fingerprint',
         DeviceSetupStatus.failed =>
-          'Windows secure storage is unavailable or contains invalid data.',
+          'Secure storage is unavailable or contains invalid data.',
       };
       final trailing = switch (controller.status) {
         DeviceSetupStatus.checking ||
@@ -1190,7 +1190,7 @@ final class _DeviceIdentityCard extends StatelessWidget {
       return Card(
         child: ListTile(
           leading: const Icon(Icons.devices_other_outlined),
-          title: const Text('This Windows device'),
+          title: const Text('This device'),
           subtitle: Text(subtitle),
           trailing: trailing,
           isThreeLine: controller.status == DeviceSetupStatus.ready,

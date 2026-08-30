@@ -7,6 +7,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../../core/e2ee/device_identity.dart';
+import '../../core/platform/client_platform.dart';
 import '../../core/transport/homebox_api_client.dart';
 import '../../core/transport/pinned_http_client.dart';
 import '../../core/transport/pinned_server_store.dart';
@@ -158,7 +159,7 @@ final class ServerConnectionController extends ChangeNotifier {
         device: DeviceRegistration(
           id: await _sessionStore.loadOrCreateDeviceId(),
           name: _localDeviceName(),
-          platform: 'WINDOWS',
+          platform: homeBoxDevicePlatform,
           publicKey: Uint8List.fromList(identity.publicKey.bytes),
           keyVersion: 1,
         ),
@@ -213,9 +214,9 @@ final class ServerConnectionController extends ChangeNotifier {
   String _localDeviceName() {
     try {
       final hostname = Platform.localHostname;
-      return hostname.isEmpty ? 'Windows Device' : hostname;
+      return hostname.isEmpty ? 'HomeBox device' : hostname;
     } on Exception {
-      return 'Windows Device';
+      return 'HomeBox device';
     }
   }
 
