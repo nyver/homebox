@@ -34,6 +34,17 @@ Future<ServerConnectionController> _connectedAndSignedIn(
   return controller;
 }
 
+Future<void> _waitForSyncStatus(
+  SyncEngine engine,
+  SyncStatus status,
+) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (engine.status != status && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  expect(engine.status, status);
+}
+
 PendingOperation _createOp(
   String nodeId, {
   String? parentId,
@@ -55,6 +66,31 @@ PendingOperation _createOp(
 );
 
 void main() {
+  test('starts a sync pass immediately when session restoration completes', () async {
+    final fakeServer = FakeNodeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = ServerConnectionController(
+      deviceIdentityStore: DeviceIdentityStore(MemoryDevicePrivateKeyStorage()),
+      serverStore: PinnedServerStore(MemoryPinnedServerStorage()),
+      sessionStore: SessionStore(MemorySessionStorage()),
+    );
+    addTearDown(serverConnection.dispose);
+    await serverConnection.discover('127.0.0.1:${httpServer.port}');
+    await serverConnection.confirmTrust();
+
+    final engine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(engine.dispose);
+    engine.start(interval: const Duration(hours: 1));
+    expect(engine.status, SyncStatus.offline);
+
+    await serverConnection.login('admin', 'correct horse battery staple');
+    await _waitForSyncStatus(engine, SyncStatus.idle);
+  });
+
   test(
     'pushing a pending CREATE succeeds and the node lands in the local cache',
     () async {

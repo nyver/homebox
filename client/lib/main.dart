@@ -9,7 +9,9 @@ import 'package:path_provider/path_provider.dart';
 
 import 'core/e2ee/device_identity.dart';
 import 'core/e2ee/vault_key_store.dart';
+import 'core/localization/app_locale_controller.dart';
 import 'core/platform/android_file_saver.dart';
+import 'core/platform/android_sync_folder.dart';
 import 'core/platform/biometric_authenticator.dart';
 import 'core/platform/camera_photo_picker.dart';
 import 'core/platform/windows_autostart.dart';
@@ -30,7 +32,7 @@ import 'core/transport/homebox_api_client.dart' as transport;
 
 void main() => runApp(const HomeBoxApp());
 
-class HomeBoxApp extends StatelessWidget {
+class HomeBoxApp extends StatefulWidget {
   const HomeBoxApp({
     super.key,
     this.deviceIdentityStore,
@@ -40,6 +42,8 @@ class HomeBoxApp extends StatelessWidget {
     this.cameraPhotoPicker,
     this.biometricAuthenticator,
     this.androidFileSaver,
+    this.androidSyncFolder,
+    this.localeController,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
@@ -49,27 +53,63 @@ class HomeBoxApp extends StatelessWidget {
   final CameraPhotoPicker? cameraPhotoPicker;
   final BiometricAuthenticator? biometricAuthenticator;
   final AndroidFileSaver? androidFileSaver;
+  final AndroidSyncFolder? androidSyncFolder;
+  final AppLocaleController? localeController;
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'HomeBox',
-    theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff176b87)),
-      useMaterial3: true,
-    ),
-    home: HomeBoxDesktopPage(
-      deviceIdentityStore: deviceIdentityStore,
-      serverConnectionController: serverConnectionController,
-      vaultKeyStore: vaultKeyStore,
-      syncFolderStore: syncFolderStore,
-      cameraPhotoPicker: cameraPhotoPicker,
-      biometricAuthenticator: biometricAuthenticator,
-      androidFileSaver: androidFileSaver,
+  State<HomeBoxApp> createState() => _HomeBoxAppState();
+}
+
+class _HomeBoxAppState extends State<HomeBoxApp> {
+  late final AppLocaleController _localeController;
+  late final bool _ownsLocaleController;
+
+  @override
+  void initState() {
+    super.initState();
+    _ownsLocaleController = widget.localeController == null;
+    _localeController = widget.localeController ?? AppLocaleController();
+    if (_ownsLocaleController) unawaited(_localeController.initialize());
+  }
+
+  @override
+  void dispose() {
+    if (_ownsLocaleController) _localeController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: _localeController,
+    builder: (context, _) => MaterialApp(
+      title: 'HomeBox',
+      locale: Locale(_localeController.language.languageCode),
+      supportedLocales: const [Locale('en'), Locale('ru')],
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff176b87)),
+        useMaterial3: true,
+      ),
+      home: HomeBoxDesktopPage(
+        deviceIdentityStore: widget.deviceIdentityStore,
+        serverConnectionController: widget.serverConnectionController,
+        vaultKeyStore: widget.vaultKeyStore,
+        syncFolderStore: widget.syncFolderStore,
+        cameraPhotoPicker: widget.cameraPhotoPicker,
+        biometricAuthenticator: widget.biometricAuthenticator,
+        androidFileSaver: widget.androidFileSaver,
+        androidSyncFolder: widget.androidSyncFolder,
+        localeController: _localeController,
+      ),
     ),
   );
 }
-
 enum AppSection { files, sync, settings }
+
+String _localized(
+  BuildContext context, {
+  required String en,
+  required String ru,
+}) => Localizations.localeOf(context).languageCode == 'ru' ? ru : en;
 
 class HomeBoxDesktopPage extends StatefulWidget {
   const HomeBoxDesktopPage({
@@ -81,6 +121,8 @@ class HomeBoxDesktopPage extends StatefulWidget {
     this.cameraPhotoPicker,
     this.biometricAuthenticator,
     this.androidFileSaver,
+    this.androidSyncFolder,
+    this.localeController,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
@@ -94,6 +136,8 @@ class HomeBoxDesktopPage extends StatefulWidget {
   final CameraPhotoPicker? cameraPhotoPicker;
   final BiometricAuthenticator? biometricAuthenticator;
   final AndroidFileSaver? androidFileSaver;
+  final AndroidSyncFolder? androidSyncFolder;
+  final AppLocaleController? localeController;
 
   @override
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
@@ -110,6 +154,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final SyncFolderWatcher _syncFolderWatcher;
   late final CameraPhotoPicker _cameraPhotoPicker;
   late final AndroidFileSaver _androidFileSaver;
+  late final AndroidSyncFolder _androidSyncFolder;
+  late final AppLocaleController _localeController;
+  late final bool _ownsLocaleController;
   BiometricAuthenticator? _biometricAuthenticator;
   SyncEngine? _syncEngine;
   FilesController? _filesController;
@@ -151,6 +198,11 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         widget.cameraPhotoPicker ?? ImagePickerCameraPhotoPicker();
     _androidFileSaver =
         widget.androidFileSaver ?? MethodChannelAndroidFileSaver();
+    _androidSyncFolder =
+        widget.androidSyncFolder ?? MethodChannelAndroidSyncFolder();
+    _ownsLocaleController = widget.localeController == null;
+    _localeController = widget.localeController ?? AppLocaleController();
+    if (_ownsLocaleController) unawaited(_localeController.initialize());
     if (supportsBiometricAppLock(defaultTargetPlatform)) {
       _biometricAuthenticator =
           widget.biometricAuthenticator ?? LocalAuthBiometricAuthenticator();
@@ -178,16 +230,13 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   }
 
   Future<void> _loadSyncFolder() async {
-    // Android's scoped storage means a picked folder can never actually be
-    // written into without the broad "All files access" permission this
-    // app deliberately does not request (see the Sync page's explanation),
-    // so a value persisted from before that restriction was enforced here
-    // must not be acted on — it would just fail on every pass.
-    if (defaultTargetPlatform == TargetPlatform.android) return;
     final saved = await _syncFolderStore.load();
     if (!mounted || saved == null) return;
     setState(() => _syncFolder = saved);
-    if (_syncEngine?.isPaused != true) _syncFolderWatcher.start(saved);
+    if (defaultTargetPlatform != TargetPlatform.android &&
+        _syncEngine?.isPaused != true) {
+      _syncFolderWatcher.start(saved);
+    }
     unawaited(_runSyncFolderPass());
   }
 
@@ -252,6 +301,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
           serverConnection: _serverConnectionController,
           vaultKeyStore: _vaultKeyStore,
           syncEngine: engine,
+          androidSyncFolder: _androidSyncFolder,
         );
         final uploader = LocalFolderUploader(
           serverConnection: _serverConnectionController,
@@ -401,7 +451,11 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _syncFolderPassRunning = true;
     try {
       await materializer.materialize(folder);
-      await uploader.scan(folder);
+      // SAF has no reliable recursive filesystem event stream, so Android
+      // mirrors server changes to the selected folder but does not watch it.
+      if (defaultTargetPlatform != TargetPlatform.android) {
+        await uploader.scan(folder);
+      }
     } finally {
       _syncFolderPassRunning = false;
     }
@@ -433,7 +487,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     if (engine.isPaused) {
       engine.resume();
       final folder = _syncFolder;
-      if (folder != null) _syncFolderWatcher.start(folder);
+      if (folder != null && defaultTargetPlatform != TargetPlatform.android) {
+        _syncFolderWatcher.start(folder);
+      }
       unawaited(_runSyncFolderPass());
     } else {
       _syncFolderWatcher.stop();
@@ -502,19 +558,23 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _deviceProvisioningController.dispose();
     _deviceSetupController.dispose();
     _serverConnectionController.dispose();
+    if (_ownsLocaleController) _localeController.dispose();
     super.dispose();
   }
 
   Future<void> _selectSyncFolder() async {
     setState(() => _selectingFolder = true);
     try {
-      final folder = await getDirectoryPath(
-        confirmButtonText: 'Use as HomeBox folder',
-      );
+      final folder = defaultTargetPlatform == TargetPlatform.android
+          ? await _androidSyncFolder.selectFolder()
+          : await getDirectoryPath(confirmButtonText: 'Use as HomeBox folder');
       if (!mounted || folder == null) return;
       setState(() => _syncFolder = folder);
       await _syncFolderStore.save(folder);
-      if (_syncEngine?.isPaused != true) _syncFolderWatcher.start(folder);
+      if (defaultTargetPlatform != TargetPlatform.android &&
+          _syncEngine?.isPaused != true) {
+        _syncFolderWatcher.start(folder);
+      }
       unawaited(_runSyncFolderPass());
     } on Exception {
       if (mounted) {
@@ -613,6 +673,10 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       androidFileSaver: supportsAndroidSaveDialog(defaultTargetPlatform)
           ? _androidFileSaver
           : null,
+      androidSyncFolder: defaultTargetPlatform == TargetPlatform.android
+          ? _androidSyncFolder
+          : null,
+      localeController: _localeController,
       onPullToRefresh: defaultTargetPlatform == TargetPlatform.android
           ? _refreshFromServer
           : null,
@@ -640,21 +704,21 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
           selectedIndex: _section.index,
           onDestinationSelected: (index) =>
               setState(() => _section = AppSection.values[index]),
-          destinations: const [
+          destinations: [
             NavigationDestination(
               icon: Icon(Icons.folder_outlined),
               selectedIcon: Icon(Icons.folder),
-              label: 'Files',
+              label: _localized(context, en: 'Files', ru: 'Файлы'),
             ),
             NavigationDestination(
               icon: Icon(Icons.sync_outlined),
               selectedIcon: Icon(Icons.sync),
-              label: 'Sync',
+              label: _localized(context, en: 'Sync', ru: 'Синхронизация'),
             ),
             NavigationDestination(
               icon: Icon(Icons.settings_outlined),
               selectedIcon: Icon(Icons.settings),
-              label: 'Settings',
+              label: _localized(context, en: 'Settings', ru: 'Настройки'),
             ),
           ],
         ),
@@ -673,21 +737,25 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
                 padding: EdgeInsets.symmetric(vertical: 20),
                 child: Icon(Icons.inventory_2_outlined, size: 32),
               ),
-              destinations: const [
+              destinations: [
                 NavigationRailDestination(
                   icon: Icon(Icons.folder_outlined),
                   selectedIcon: Icon(Icons.folder),
-                  label: Text('Files'),
+                  label: Text(_localized(context, en: 'Files', ru: 'Файлы')),
                 ),
                 NavigationRailDestination(
                   icon: Icon(Icons.sync_outlined),
                   selectedIcon: Icon(Icons.sync),
-                  label: Text('Sync'),
+                  label: Text(
+                    _localized(context, en: 'Sync', ru: 'Синхронизация'),
+                  ),
                 ),
                 NavigationRailDestination(
                   icon: Icon(Icons.settings_outlined),
                   selectedIcon: Icon(Icons.settings),
-                  label: Text('Settings'),
+                  label: Text(
+                    _localized(context, en: 'Settings', ru: 'Настройки'),
+                  ),
                 ),
               ],
             ),
@@ -810,14 +878,21 @@ Widget _headerStatusIndicator({
   required IconData icon,
   required String label,
   String? tooltip,
+  Color? color,
   required bool dense,
 }) {
   if (dense) {
-    return Tooltip(message: tooltip ?? label, child: Icon(icon, size: 20));
+    return Tooltip(
+      message: tooltip ?? label,
+      child: Icon(icon, size: 20, color: color),
+    );
   }
   return Tooltip(
     message: tooltip ?? label,
-    child: Chip(avatar: Icon(icon, size: 18), label: Text(label)),
+    child: Chip(
+      avatar: Icon(icon, size: 18, color: color),
+      label: Text(label),
+    ),
   );
 }
 
@@ -845,6 +920,11 @@ class _SyncStatusChip extends StatelessWidget {
       animation: engine,
       builder: (context, _) {
         final (icon, label) = _syncStatusPresentation(engine.status);
+        final color = switch (engine.status) {
+          SyncStatus.idle => Colors.green,
+          SyncStatus.error => Colors.red,
+          _ => null,
+        };
         final tooltip =
             engine.status == SyncStatus.error && engine.errorMessage != null
             ? engine.errorMessage!
@@ -853,6 +933,7 @@ class _SyncStatusChip extends StatelessWidget {
           icon: icon,
           label: label,
           tooltip: tooltip,
+          color: color,
           dense: dense,
         );
       },
@@ -930,6 +1011,8 @@ class _SectionContent extends StatelessWidget {
     required this.onToggleSyncPause,
     required this.onCapturePhoto,
     required this.androidFileSaver,
+    required this.androidSyncFolder,
+    required this.localeController,
     required this.onPullToRefresh,
   });
 
@@ -950,6 +1033,8 @@ class _SectionContent extends StatelessWidget {
   final VoidCallback onToggleSyncPause;
   final Future<void> Function()? onCapturePhoto;
   final AndroidFileSaver? androidFileSaver;
+  final AndroidSyncFolder? androidSyncFolder;
+  final AppLocaleController localeController;
   final Future<void> Function()? onPullToRefresh;
 
   @override
@@ -958,6 +1043,8 @@ class _SectionContent extends StatelessWidget {
       controller: filesController,
       onCapturePhoto: onCapturePhoto,
       androidFileSaver: androidFileSaver,
+      syncFolder: syncFolder,
+      androidSyncFolder: androidSyncFolder,
       onPullToRefresh: onPullToRefresh,
     ),
     AppSection.sync => _SyncSection(
@@ -975,6 +1062,7 @@ class _SectionContent extends StatelessWidget {
       serverConnectionController: serverConnectionController,
       vaultSetupController: vaultSetupController,
       onVaultProvisioned: onVaultProvisioned,
+      localeController: localeController,
     ),
   };
 }
@@ -1004,19 +1092,25 @@ String _transferProgressLabel(FileTransferDirection? direction, int percent) =>
       null => 'Transfer progress $percent percent',
     };
 
-/// "mimeType • size • Updated date time" for a file's [ListTile] subtitle.
+/// "size • Updated relative time" for a file's [ListTile] subtitle.
 /// [FileEntry.metadata.plaintextSize] is null for files uploaded before that
 /// field existed, so the size segment is simply omitted for those. Uses
 /// [LocalNode.updatedAt] rather than [LocalNode.createdAt] so replacing a
 /// file's content (spec: "Replace content…") is reflected here — the server
 /// bumps `updated_at` on every node mutation, including a completed upload.
 String _fileEntrySubtitle(FileEntry entry) {
-  final parts = <String>[entry.metadata.mimeType ?? 'Encrypted file'];
+  final parts = <String>[];
   final size = entry.metadata.plaintextSize;
   if (size != null) parts.add(_formatFileSize(size));
-  parts.add('Updated ${_formatDateTime(entry.node.updatedAt)}');
+  parts.add('Updated ${_formatRelativeTime(entry.node.updatedAt)}');
   return parts.join(' • ');
 }
+
+String _fileSortLabel(FileListSort sort) => switch (sort) {
+  FileListSort.name => 'Name',
+  FileListSort.extension => 'Extension',
+  FileListSort.updatedAt => 'Date updated',
+};
 
 String _formatFileSize(int bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -1030,11 +1124,62 @@ String _formatFileSize(int bytes) {
   return '${size.toStringAsFixed(precision)} ${units[unitIndex]}';
 }
 
-String _formatDateTime(DateTime utc) {
-  final local = utc.toLocal();
-  String two(int value) => value.toString().padLeft(2, '0');
-  return '${local.year}-${two(local.month)}-${two(local.day)} '
-      '${two(local.hour)}:${two(local.minute)}';
+String _formatRelativeTime(DateTime utc) {
+  final elapsed = DateTime.now().toUtc().difference(utc.toUtc());
+  final seconds = elapsed.isNegative ? 0 : elapsed.inSeconds;
+  if (seconds < 60) return _relativeTimeUnit(seconds, 'second');
+  final minutes = seconds ~/ 60;
+  if (minutes < 60) return _relativeTimeUnit(minutes, 'minute');
+  final hours = minutes ~/ 60;
+  if (hours < 24) return _relativeTimeUnit(hours, 'hour');
+  final days = hours ~/ 24;
+  if (days < 30) return _relativeTimeUnit(days, 'day');
+  final months = days ~/ 30;
+  if (months < 12) return _relativeTimeUnit(months, 'month');
+  return _relativeTimeUnit(days ~/ 365, 'year');
+}
+
+String _relativeTimeUnit(int value, String unit) =>
+    '$value $unit${value == 1 ? '' : 's'} ago';
+
+/// Shows a decrypted, downscaled image thumbnail when it is inexpensive to
+/// fetch. All other files, including unsupported image encodings, retain the
+/// regular file icon.
+class _FileListLeading extends StatelessWidget {
+  const _FileListLeading({required this.entry, required this.controller});
+
+  final FileEntry entry;
+  final FilesController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!controller.canShowImagePreview(entry)) {
+      return const Icon(Icons.insert_drive_file_outlined);
+    }
+    return SizedBox.square(
+      dimension: 44,
+      child: FutureBuilder(
+        future: controller.imagePreview(entry),
+        builder: (context, snapshot) {
+          final bytes = snapshot.data;
+          if (bytes == null) {
+            return const Icon(Icons.insert_drive_file_outlined);
+          }
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: Image.memory(
+              bytes,
+              fit: BoxFit.cover,
+              cacheWidth: 96,
+              cacheHeight: 96,
+              errorBuilder: (context, error, stackTrace) =>
+                  const Icon(Icons.insert_drive_file_outlined),
+            ),
+          );
+        },
+      ),
+    );
+  }
 }
 
 enum _OverwriteChoice { overwrite, skip, cancel }
@@ -1074,12 +1219,16 @@ final class _FilesSection extends StatefulWidget {
     required this.controller,
     required this.onCapturePhoto,
     required this.androidFileSaver,
+    required this.syncFolder,
+    required this.androidSyncFolder,
     required this.onPullToRefresh,
   });
 
   final FilesController? controller;
   final Future<void> Function()? onCapturePhoto;
   final AndroidFileSaver? androidFileSaver;
+  final String? syncFolder;
+  final AndroidSyncFolder? androidSyncFolder;
   final Future<void> Function()? onPullToRefresh;
 
   @override
@@ -1231,6 +1380,33 @@ final class _FilesSectionState extends State<_FilesSection> {
         ),
       );
     }
+  }
+
+  Future<void> _openOrDownloadFile(
+    BuildContext context,
+    FileEntry entry,
+  ) async {
+    final syncFolder = widget.syncFolder;
+    final androidSyncFolder = widget.androidSyncFolder;
+    final controller = widget.controller;
+    final relativePath = controller?.materializedRelativePath(entry.node.id);
+    if (syncFolder != null &&
+        androidSyncFolder != null &&
+        relativePath != null) {
+      try {
+        final opened = await androidSyncFolder.openFile(
+          treeUri: syncFolder,
+          relativePath: relativePath,
+          mimeType: entry.metadata.mimeType,
+        );
+        if (opened) return;
+      } on PlatformException {
+        // If an external app cannot open the mirrored document, fall back to
+        // Save as, which is still available from this same tap.
+      }
+    }
+    if (!context.mounted) return;
+    await _downloadFile(context, entry);
   }
 
   /// Android's `file_selector` has no save-dialog implementation, so this
@@ -1435,27 +1611,31 @@ final class _FilesSectionState extends State<_FilesSection> {
             itemBuilder: (context, index) {
               final entry = controller.entries[index];
               return ListTile(
-                leading: Icon(
-                  entry.isDirectory
-                      ? Icons.folder_outlined
-                      : Icons.insert_drive_file_outlined,
-                ),
+                leading: entry.isDirectory
+                    ? const Icon(Icons.folder_outlined)
+                    : _FileListLeading(entry: entry, controller: controller),
                 title: Text(entry.name),
                 subtitle: entry.isDirectory
                     ? null
                     : Text(_fileEntrySubtitle(entry)),
                 onTap: entry.isDirectory
                     ? () => controller.openFolder(entry)
-                    : () => _downloadFile(context, entry),
+                    : () => _openOrDownloadFile(context, entry),
                 trailing: PopupMenuButton<String>(
                   tooltip: 'More actions',
                   onSelected: (value) => switch (value) {
+                    'save_as' => _downloadFile(context, entry),
                     'replace' => _replaceContent(context, entry),
                     'rename' => _renameEntry(context, entry),
                     'delete' => _deleteEntry(context, entry),
                     _ => null,
                   },
                   itemBuilder: (context) => [
+                    if (!entry.isDirectory)
+                      const PopupMenuItem(
+                        value: 'save_as',
+                        child: Text('Save as…'),
+                      ),
                     if (!entry.isDirectory)
                       const PopupMenuItem(
                         value: 'replace',
@@ -1473,9 +1653,9 @@ final class _FilesSectionState extends State<_FilesSection> {
           );
         }
         return _PageFrame(
-          title: 'Files',
+          title: _localized(context, en: 'Files', ru: 'Файлы'),
           subtitle: controller.breadcrumbNames.isEmpty
-              ? 'Root'
+              ? _localized(context, en: 'Root', ru: 'Корень')
               : controller.breadcrumbNames.join(' / '),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1486,11 +1666,35 @@ final class _FilesSectionState extends State<_FilesSection> {
                 spacing: 8,
                 runSpacing: 8,
                 children: [
+                  PopupMenuButton<FileListSort>(
+                    tooltip: 'Sort files',
+                    icon: const Icon(Icons.sort),
+                    onSelected: controller.setSort,
+                    itemBuilder: (context) => FileListSort.values
+                        .map(
+                          (sort) => CheckedPopupMenuItem<FileListSort>(
+                            value: sort,
+                            checked: sort == controller.sort,
+                            child: Text(_fileSortLabel(sort)),
+                          ),
+                        )
+                        .toList(growable: false),
+                  ),
                   if (controller.canGoUp)
-                    IconButton(
-                      onPressed: controller.goToRoot,
-                      icon: const Icon(Icons.home_outlined),
-                      tooltip: 'Root',
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          onPressed: controller.goUp,
+                          icon: const Icon(Icons.arrow_upward),
+                          tooltip: 'Up one level',
+                        ),
+                        IconButton(
+                          onPressed: controller.goToRoot,
+                          icon: const Icon(Icons.home_outlined),
+                          tooltip: 'Root',
+                        ),
+                      ],
                     ),
                   if (controller.busy)
                     SizedBox.square(
@@ -1623,10 +1827,18 @@ class _SyncSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final engine = syncEngine;
     return _PageFrame(
-      title: 'Sync',
+      title: _localized(context, en: 'Sync', ru: 'Синхронизация'),
       subtitle: engine == null
-          ? 'Sync is paused while the E2EE vault is locked.'
-          : 'The local cache and outbox sync with the server automatically.',
+          ? _localized(
+              context,
+              en: 'Sync is paused while the E2EE vault is locked.',
+              ru: 'Синхронизация приостановлена, пока E2EE-хранилище заблокировано.',
+            )
+          : _localized(
+              context,
+              en: 'The local cache and outbox sync with the server automatically.',
+              ru: 'Локальный кэш и очередь автоматически синхронизируются с сервером.',
+            ),
       child: ListView(
         children: [
           if (engine == null)
@@ -1672,18 +1884,20 @@ class _SyncSection extends StatelessWidget {
               },
             ),
           if (defaultTargetPlatform == TargetPlatform.android)
-            const Card(
+            Card(
               child: ListTile(
-                leading: Icon(Icons.folder_off_outlined),
-                title: Text('Local sync folder'),
+                leading: const Icon(Icons.folder_outlined),
+                title: const Text('Local sync folder'),
                 subtitle: Text(
-                  'Not available on Android: writing into a folder you pick '
-                  'requires the OS\'s broad "All files access" permission, '
-                  'which HomeBox deliberately does not request. Use the '
-                  'Files page to browse and download individual files '
-                  'instead.',
+                  syncFolder == null
+                      ? 'Choose a folder to mirror server files on this device.'
+                      : 'Server changes download here automatically. Tap a mirrored file in Files to open it.',
                 ),
-                isThreeLine: true,
+                isThreeLine: syncFolder != null,
+                trailing: TextButton(
+                  onPressed: onSelectSyncFolder,
+                  child: Text(syncFolder == null ? 'Choose' : 'Change'),
+                ),
               ),
             )
           else
@@ -1735,7 +1949,9 @@ class _SyncSection extends StatelessWidget {
                 );
               },
             ),
-          if (syncFolder != null && localFolderUploader != null)
+          if (syncFolder != null &&
+              localFolderUploader != null &&
+              defaultTargetPlatform != TargetPlatform.android)
             AnimatedBuilder(
               animation: localFolderUploader!,
               builder: (context, _) {
@@ -1767,7 +1983,8 @@ class _SyncSection extends StatelessWidget {
                 );
               },
             ),
-          if (syncFolder != null)
+          if (syncFolder != null &&
+              defaultTargetPlatform != TargetPlatform.android)
             AnimatedBuilder(
               animation: syncFolderWatcher,
               builder: (context, _) {
@@ -1814,6 +2031,7 @@ class _SettingsSection extends StatelessWidget {
     required this.serverConnectionController,
     required this.vaultSetupController,
     required this.onVaultProvisioned,
+    required this.localeController,
   });
 
   final DeviceSetupController deviceSetupController;
@@ -1821,13 +2039,19 @@ class _SettingsSection extends StatelessWidget {
   final ServerConnectionController serverConnectionController;
   final VaultSetupController vaultSetupController;
   final Future<void> Function() onVaultProvisioned;
+  final AppLocaleController localeController;
 
   @override
   Widget build(BuildContext context) => _PageFrame(
-    title: 'Settings',
-    subtitle: 'Connection and device security.',
+    title: _localized(context, en: 'Settings', ru: 'Настройки'),
+    subtitle: _localized(
+      context,
+      en: 'Connection and device security.',
+      ru: 'Подключение и безопасность устройства.',
+    ),
     child: ListView(
       children: [
+        _LanguageCard(controller: localeController),
         _ServerConnectionCard(controller: serverConnectionController),
         _DeviceIdentityCard(controller: deviceSetupController),
         _DeviceProvisioningCard(
@@ -1848,6 +2072,50 @@ class _SettingsSection extends StatelessWidget {
         const _AutostartCard(),
       ],
     ),
+  );
+}
+
+final class _LanguageCard extends StatelessWidget {
+  const _LanguageCard({required this.controller});
+
+  final AppLocaleController controller;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: controller,
+    builder: (context, _) {
+      return Card(
+        child: ListTile(
+          leading: const Icon(Icons.language_outlined),
+          title: Text(_localized(context, en: 'Language', ru: 'Язык')),
+          subtitle: Text(
+            _localized(
+              context,
+              en: 'Choose the application interface language.',
+              ru: 'Выберите язык интерфейса приложения.',
+            ),
+          ),
+          trailing: DropdownButtonHideUnderline(
+            child: DropdownButton<AppLanguage>(
+              value: controller.language,
+              onChanged: (language) {
+                if (language != null) unawaited(controller.setLanguage(language));
+              },
+              items: const [
+                DropdownMenuItem(
+                  value: AppLanguage.english,
+                  child: Text('English'),
+                ),
+                DropdownMenuItem(
+                  value: AppLanguage.russian,
+                  child: Text('Русский'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    },
   );
 }
 

@@ -46,7 +46,11 @@ final class SyncEngine extends ChangeNotifier {
        nodeCache = NodeCache(localDatabase.db),
        pendingOperations = PendingOperationsStore(localDatabase.db),
        materializedFiles = MaterializedFilesStore(localDatabase.db),
-       _syncState = SyncStateStore(localDatabase.db);
+       _syncState = SyncStateStore(localDatabase.db) {
+    _connectionWasAuthenticated =
+        serverConnection.status == ServerConnectionStatus.authenticated;
+    _serverConnection.addListener(_onServerConnectionChanged);
+  }
 
   final ServerConnectionController _serverConnection;
   final LocalDatabase _localDatabase;
@@ -62,6 +66,7 @@ final class SyncEngine extends ChangeNotifier {
   bool _runningNow = false;
   Future<void>? _inFlight;
   bool _disposed = false;
+  bool _connectionWasAuthenticated = false;
   SyncStatus _status = SyncStatus.idle;
   String? _errorMessage;
 
@@ -107,6 +112,21 @@ final class SyncEngine extends ChangeNotifier {
     }
     _timer = Timer.periodic(_interval, (_) => unawaited(runOnce()));
     unawaited(runOnce());
+  }
+
+  /// The engine can be created while the persisted refresh-token exchange is
+  /// still in flight. Its initial pass correctly reports Offline then, but
+  /// waiting for the periodic timer after authentication makes the header
+  /// look disconnected for up to one interval. Start a pass immediately
+  /// when the connection becomes usable instead.
+  void _onServerConnectionChanged() {
+    final authenticated =
+        _serverConnection.status == ServerConnectionStatus.authenticated;
+    final justAuthenticated = authenticated && !_connectionWasAuthenticated;
+    _connectionWasAuthenticated = authenticated;
+    if (justAuthenticated && _started && !_paused) {
+      unawaited(runOnce());
+    }
   }
 
   /// Pushes pending operations, then pulls remote changes. Safe to call
@@ -337,6 +357,7 @@ final class SyncEngine extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _timer?.cancel();
+    _serverConnection.removeListener(_onServerConnectionChanged);
     _localDatabase.dispose();
     super.dispose();
   }

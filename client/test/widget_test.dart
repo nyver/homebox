@@ -59,7 +59,7 @@ void main() {
   });
 
   testWidgets(
-    'the Sync page explains that a local sync folder is unavailable on Android',
+    'the Sync page lets Android users choose a local sync folder',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -71,9 +71,12 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Local sync folder'), findsOneWidget);
-      expect(find.text('Choose'), findsNothing);
+      expect(find.text('Choose'), findsOneWidget);
       expect(find.text('Change'), findsNothing);
-      expect(find.textContaining('All files access'), findsOneWidget);
+      expect(
+        find.textContaining('Choose a folder to mirror server files'),
+        findsOneWidget,
+      );
 
       // Reset inline rather than relying solely on addTearDown: the
       // framework's post-test invariant check runs before registered

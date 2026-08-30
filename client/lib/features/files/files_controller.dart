@@ -27,6 +27,8 @@ enum FilesStatus { idle, loading, ready, failed }
 /// saying "upload" even while a download is in progress.
 enum FileTransferDirection { upload, download }
 
+enum FileListSort { name, extension, updatedAt }
+
 /// A decrypted-for-display file or folder entry. The server only ever knows
 /// [node]'s opaque ID and ciphertext; [metadata] is decrypted locally.
 final class FileEntry {
@@ -98,6 +100,11 @@ final class FilesController extends ChangeNotifier {
   final VaultKeyStore _vaultKeyStore;
   final SyncEngine _syncEngine;
   final MetadataCipher _metadataCipher = MetadataCipher();
+  static const int _maxImagePreviewSourceSize = 12 * 1024 * 1024;
+  static const int _maxCachedImagePreviews = 8;
+  static const int _maxConcurrentImagePreviews = 2;
+  final Map<String, Uint8List?> _imagePreviewCache = {};
+  final Map<String, Future<Uint8List?>> _imagePreviewLoads = {};
 
   FilesStatus _status = FilesStatus.idle;
   String? _errorMessage;
@@ -106,6 +113,7 @@ final class FilesController extends ChangeNotifier {
   bool _busy = false;
   double? _progress;
   FileTransferDirection? _transferDirection;
+  FileListSort _sort = FileListSort.name;
   bool _disposed = false;
 
   FilesStatus get status => _status;
@@ -114,9 +122,69 @@ final class FilesController extends ChangeNotifier {
   bool get busy => _busy;
   double? get progress => _progress;
   FileTransferDirection? get transferDirection => _transferDirection;
+  FileListSort get sort => _sort;
   bool get canGoUp => _path.isNotEmpty;
   List<String> get breadcrumbNames =>
       _path.map((e) => e.name).toList(growable: false);
+
+  /// The selected local sync folder has already received this file when a
+  /// materialization record exists. Android uses this to open that local
+  /// document directly instead of downloading a second copy on every tap.
+  String? materializedRelativePath(String nodeId) =>
+      _syncEngine.materializedFiles.getById(nodeId)?.relativePath;
+
+  /// Returns a decrypted image source for a compact list preview. Previews
+  /// deliberately use a separate, bounded cache and never claim the primary
+  /// transfer state, so rendering a list cannot block an explicit upload or
+  /// download. Large images remain a regular file icon to avoid excessive
+  /// network and memory use while scrolling.
+  Future<Uint8List?> imagePreview(FileEntry entry) {
+    if (!canShowImagePreview(entry)) {
+      return Future<Uint8List?>.value(null);
+    }
+    final key = '${entry.node.id}:${entry.node.currentVersionId}';
+    if (_imagePreviewCache.containsKey(key)) {
+      return Future<Uint8List?>.value(_imagePreviewCache[key]);
+    }
+    final pending = _imagePreviewLoads[key];
+    if (pending != null) return pending;
+    if (_imagePreviewLoads.length >= _maxConcurrentImagePreviews) {
+      return Future<Uint8List?>.value(null);
+    }
+    final preview = _downloadImagePreview(entry);
+    _imagePreviewLoads[key] = preview;
+    unawaited(
+      preview.then((bytes) {
+        _imagePreviewLoads.remove(key);
+        if (_imagePreviewCache.length >= _maxCachedImagePreviews) {
+          _imagePreviewCache.remove(_imagePreviewCache.keys.first);
+        }
+        _imagePreviewCache[key] = bytes;
+        if (!_disposed) notifyListeners();
+      }),
+    );
+    return preview;
+  }
+
+  bool canShowImagePreview(FileEntry entry) {
+    final mimeType = entry.metadata.mimeType?.toLowerCase();
+    final size = entry.metadata.plaintextSize;
+    return !entry.isDirectory &&
+        mimeType != null &&
+        mimeType.startsWith('image/') &&
+        size != null &&
+        size <= _maxImagePreviewSourceSize &&
+        entry.node.currentVersionId != null;
+  }
+
+  /// Updates the local display ordering without reloading or decrypting the
+  /// current folder again. Directories always remain before regular files.
+  void setSort(FileListSort sort) {
+    if (_sort == sort) return;
+    _sort = sort;
+    _entries = List<FileEntry>.of(_entries)..sort(_compareEntries);
+    notifyListeners();
+  }
   String? get _currentParentId => _path.isEmpty ? null : _path.last.id;
 
   void _onSyncEngineChanged() {
@@ -150,10 +218,7 @@ final class FilesController extends ChangeNotifier {
           // ArgumentError, which does not extend Exception.
         }
       }
-      decrypted.sort((a, b) {
-        if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
-        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-      });
+      decrypted.sort(_compareEntries);
       _entries = decrypted;
       _setStatus(FilesStatus.ready);
     } catch (e) {
@@ -179,6 +244,13 @@ final class FilesController extends ChangeNotifier {
   void goToRoot() {
     if (_path.isEmpty) return;
     _path.clear();
+    unawaited(refresh());
+  }
+
+  /// Navigates to the parent of the currently open folder.
+  void goUp() {
+    if (_path.isEmpty) return;
+    _path.removeLast();
     unawaited(refresh());
   }
 
@@ -641,6 +713,27 @@ final class FilesController extends ChangeNotifier {
     }
   }
 
+  Future<Uint8List?> _downloadImagePreview(FileEntry entry) async {
+    try {
+      final api = _serverConnection.api;
+      final session = _serverConnection.session;
+      final vaultKey = await _vaultKeyStore.loadVaultKey();
+      if (api == null || session == null || vaultKey == null) return null;
+      return await downloadAndDecryptFile(
+        api: api,
+        accessToken: session.accessToken,
+        vaultKey: vaultKey,
+        vaultId: uuidStringToBytes(session.user.id),
+        nodeId: entry.node.id,
+        expectedPlaintextSha256: entry.metadata.plaintextSha256,
+      );
+    } catch (_) {
+      // A thumbnail is cosmetic. Keep the normal file icon if downloading or
+      // decoding it fails, without changing the Files page's error state.
+      return null;
+    }
+  }
+
   void _upsertFromServer(transport.NodeInfo node) {
     _syncEngine.nodeCache.upsert(localNodeFromServerNode(node));
   }
@@ -679,6 +772,39 @@ final class FilesController extends ChangeNotifier {
     );
   }
 
+  int _compareEntries(FileEntry a, FileEntry b) {
+    if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
+    // Folder names always use a predictable alphabetical order. Extension
+    // and date sorts are useful for files, not for navigating folders.
+    if (a.isDirectory) return _compareNames(a, b);
+    return switch (_sort) {
+      FileListSort.name => _compareNames(a, b),
+      FileListSort.extension => _compareExtensions(a, b),
+      FileListSort.updatedAt => _compareUpdatedAt(a, b),
+    };
+  }
+
+  int _compareNames(FileEntry a, FileEntry b) =>
+      a.name.toLowerCase().compareTo(b.name.toLowerCase());
+
+  int _compareExtensions(FileEntry a, FileEntry b) {
+    final extensionComparison = _extensionOf(a.name).compareTo(
+      _extensionOf(b.name),
+    );
+    return extensionComparison == 0 ? _compareNames(a, b) : extensionComparison;
+  }
+
+  int _compareUpdatedAt(FileEntry a, FileEntry b) {
+    final dateComparison = b.node.updatedAt.compareTo(a.node.updatedAt);
+    return dateComparison == 0 ? _compareNames(a, b) : dateComparison;
+  }
+
+  String _extensionOf(String name) {
+    final index = name.lastIndexOf('.');
+    if (index <= 0 || index == name.length - 1) return '';
+    return name.substring(index + 1).toLowerCase();
+  }
+
   void _setStatus(FilesStatus status) {
     _status = status;
     if (!_disposed) notifyListeners();
@@ -700,7 +826,8 @@ final class FilesController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _syncEngine.removeListener(_onSyncEngineChanged);
+    _imagePreviewCache.clear();
+    _imagePreviewLoads.clear();
     super.dispose();
   }
 }
-

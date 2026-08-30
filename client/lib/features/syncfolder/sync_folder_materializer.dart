@@ -5,10 +5,12 @@ import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
+import '../../core/platform/android_sync_folder.dart';
 import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
@@ -39,13 +41,16 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     required ServerConnectionController serverConnection,
     required VaultKeyStore vaultKeyStore,
     required SyncEngine syncEngine,
+    AndroidSyncFolder? androidSyncFolder,
   }) : _serverConnection = serverConnection,
        _vaultKeyStore = vaultKeyStore,
-       _syncEngine = syncEngine;
+       _syncEngine = syncEngine,
+       _androidSyncFolder = androidSyncFolder;
 
   final ServerConnectionController _serverConnection;
   final VaultKeyStore _vaultKeyStore;
   final SyncEngine _syncEngine;
+  final AndroidSyncFolder? _androidSyncFolder;
   final MetadataCipher _metadataCipher = MetadataCipher();
 
   bool _running = false;
@@ -119,7 +124,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           ? metadata.fileName
           : '$relativePath/${metadata.fileName}';
       if (node.isDirectory) {
-        await Directory('$rootPath/$childRelativePath').create(recursive: true);
+        await _createDirectory(rootPath, childRelativePath);
         await _materializeDirectory(
           rootPath: rootPath,
           parentId: node.id,
@@ -163,7 +168,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     // to tell "just moved" apart from "content actually changed."
     if (existing != null &&
         existing.contentVersionId == node.currentVersionId) {
-      if (existing.relativePath != relativePath) {
+      if (existing.relativePath != relativePath && !_usesAndroidStorage) {
         // Only the name/location changed since last time; relocate the
         // bytes already on disk instead of re-downloading them.
         final oldFile = File('$rootPath/${existing.relativePath}');
@@ -179,7 +184,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           );
         }
       }
-      if (await File(targetPath).exists()) {
+      if (await _fileExists(rootPath, relativePath)) {
         return; // content is unchanged and present at its target path.
       }
     }
@@ -195,16 +200,11 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         nodeId: node.id,
         expectedPlaintextSha256: metadata.plaintextSha256,
       );
-      await Directory(File(targetPath).parent.path).create(recursive: true);
-      final tempPath = '$targetPath.homebox-tmp';
-      await File(tempPath).writeAsBytes(bytes, flush: true);
-      await File(tempPath)
-          .rename(targetPath); // atomic replace on the same volume.
+      await _writeFile(rootPath, relativePath, targetPath, bytes);
       if (existing != null && existing.relativePath != relativePath) {
         // Content changed and it moved/was renamed in the same pass -
         // clean up the stale copy at its old location.
-        final oldFile = File('$rootPath/${existing.relativePath}');
-        if (await oldFile.exists()) await oldFile.delete();
+        await _deleteFile(rootPath, existing.relativePath);
       }
       _syncEngine.materializedFiles.upsert(
         MaterializedFile(
@@ -224,12 +224,73 @@ final class SyncFolderMaterializer extends ChangeNotifier {
   Future<void> _pruneUnseen(String rootPath, Set<String> seenNodeIds) async {
     for (final entry in _syncEngine.materializedFiles.listAll()) {
       if (seenNodeIds.contains(entry.nodeId)) continue;
-      final file = File('$rootPath/${entry.relativePath}');
-      if (await file.exists()) {
-        await file.delete();
-      }
+      await _deleteFile(rootPath, entry.relativePath);
       _syncEngine.materializedFiles.remove(entry.nodeId);
     }
+  }
+
+  bool get _usesAndroidStorage =>
+      defaultTargetPlatform == TargetPlatform.android &&
+      _androidSyncFolder != null;
+
+  Future<void> _createDirectory(String rootPath, String relativePath) {
+    final android = _androidSyncFolder;
+    if (_usesAndroidStorage && android != null) {
+      return android.createDirectory(
+        treeUri: rootPath,
+        relativePath: relativePath,
+      );
+    }
+    return Directory('$rootPath/$relativePath').create(recursive: true);
+  }
+
+  Future<bool> _fileExists(String rootPath, String relativePath) {
+    final android = _androidSyncFolder;
+    if (_usesAndroidStorage && android != null) {
+      return android.fileExists(treeUri: rootPath, relativePath: relativePath);
+    }
+    return File('$rootPath/$relativePath').exists();
+  }
+
+  Future<void> _writeFile(
+    String rootPath,
+    String relativePath,
+    String targetPath,
+    Uint8List bytes,
+  ) async {
+    final android = _androidSyncFolder;
+    if (_usesAndroidStorage && android != null) {
+      final temporaryDirectory = await getTemporaryDirectory();
+      final source = File(
+        '${temporaryDirectory.path}/sync_$relativePath.homebox-tmp',
+      );
+      await source.parent.create(recursive: true);
+      try {
+        await source.writeAsBytes(bytes, flush: true);
+        await android.writeFile(
+          treeUri: rootPath,
+          relativePath: relativePath,
+          sourcePath: source.path,
+        );
+      } finally {
+        if (await source.exists()) await source.delete();
+      }
+      return;
+    }
+    await Directory(File(targetPath).parent.path).create(recursive: true);
+    final tempPath = '$targetPath.homebox-tmp';
+    await File(tempPath).writeAsBytes(bytes, flush: true);
+    await File(tempPath).rename(targetPath); // Atomic on the same volume.
+  }
+
+  Future<void> _deleteFile(String rootPath, String relativePath) async {
+    final android = _androidSyncFolder;
+    if (_usesAndroidStorage && android != null) {
+      await android.deleteFile(treeUri: rootPath, relativePath: relativePath);
+      return;
+    }
+    final file = File('$rootPath/$relativePath');
+    if (await file.exists()) await file.delete();
   }
 
   Future<SensitiveNodeMetadata> _decryptMetadata(

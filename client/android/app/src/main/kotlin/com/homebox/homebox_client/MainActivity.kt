@@ -20,10 +20,13 @@ import java.io.FileInputStream
 /// destination — it never touches the E2EE layer.
 class MainActivity : FlutterFragmentActivity() {
     private val fileSaveChannel = "homebox/file_save"
+    private val syncFolderChannel = "homebox/sync_folder"
     private val saveFileRequestCode = 4173
+    private val selectSyncFolderRequestCode = 4174
 
     private var pendingResult: MethodChannel.Result? = null
     private var pendingSourcePath: String? = null
+    private var pendingSyncFolderResult: MethodChannel.Result? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Excludes HomeBox from the OS recent-apps thumbnail and blocks
@@ -71,6 +74,202 @@ class MainActivity : FlutterFragmentActivity() {
                     result.error("save_failed", e.message, null)
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, syncFolderChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "selectFolder" -> selectSyncFolder(result)
+                    "createDirectory" -> withTreeAndPath(call, result) { treeUri, relativePath ->
+                        runSyncFolderOperation(result) {
+                            ensureDirectory(treeUri, relativePath)
+                            null
+                        }
+                    }
+                    "writeFile" -> {
+                        val sourcePath = call.argument<String>("sourcePath")
+                        if (sourcePath.isNullOrEmpty()) {
+                            result.error("invalid_arguments", "sourcePath is required.", null)
+                            return@setMethodCallHandler
+                        }
+                        withTreeAndPath(call, result) { treeUri, relativePath ->
+                            runSyncFolderOperation(result) {
+                                val destination = findOrCreateFile(treeUri, relativePath)
+                                contentResolver.openOutputStream(destination, "wt")?.use { output ->
+                                    FileInputStream(File(sourcePath)).use { input -> input.copyTo(output) }
+                                } ?: throw IllegalStateException("Could not open the sync-folder destination.")
+                                null
+                            }
+                        }
+                    }
+                    "fileExists" -> withTreeAndPath(call, result) { treeUri, relativePath ->
+                        runSyncFolderOperation(result) {
+                            findDocument(treeUri, relativePath) != null
+                        }
+                    }
+                    "deleteFile" -> withTreeAndPath(call, result) { treeUri, relativePath ->
+                        runSyncFolderOperation(result) {
+                            findDocument(treeUri, relativePath)?.let { document ->
+                                DocumentsContract.deleteDocument(contentResolver, document)
+                            }
+                            null
+                        }
+                    }
+                    "openFile" -> {
+                        val mimeType = call.argument<String>("mimeType") ?: "application/octet-stream"
+                        withTreeAndPath(call, result) { treeUri, relativePath ->
+                            Thread {
+                                try {
+                                    val document = findDocument(treeUri, relativePath)
+                                    runOnUiThread {
+                                        if (document == null) {
+                                            result.success(false)
+                                            return@runOnUiThread
+                                        }
+                                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                                            setDataAndType(document, mimeType)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        try {
+                                            startActivity(Intent.createChooser(intent, "Open file"))
+                                            result.success(true)
+                                        } catch (e: Exception) {
+                                            result.error("open_failed", e.message, null)
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    runOnUiThread { result.error("open_failed", e.message, null) }
+                                }
+                            }
+                            .start()
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun selectSyncFolder(result: MethodChannel.Result) {
+        if (pendingSyncFolderResult != null) {
+            result.error("busy", "A folder selection is already in progress.", null)
+            return
+        }
+        pendingSyncFolderResult = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+            )
+        }
+        try {
+            startActivityForResult(intent, selectSyncFolderRequestCode)
+        } catch (e: Exception) {
+            pendingSyncFolderResult = null
+            result.error("folder_selection_failed", e.message, null)
+        }
+    }
+
+    private fun withTreeAndPath(
+        call: io.flutter.plugin.common.MethodCall,
+        result: MethodChannel.Result,
+        action: (Uri, String) -> Unit,
+    ) {
+        val rawTreeUri = call.argument<String>("treeUri")
+        val relativePath = call.argument<String>("relativePath")
+        if (rawTreeUri.isNullOrEmpty() || relativePath.isNullOrEmpty() || !isSafeRelativePath(relativePath)) {
+            result.error("invalid_arguments", "treeUri and a safe relativePath are required.", null)
+            return
+        }
+        try {
+            action(Uri.parse(rawTreeUri), relativePath)
+        } catch (e: Exception) {
+            result.error("sync_folder_failed", e.message, null)
+        }
+    }
+
+    private fun runSyncFolderOperation(result: MethodChannel.Result, operation: () -> Any?) {
+        Thread {
+            try {
+                val value = operation()
+                runOnUiThread { result.success(value) }
+            } catch (e: Exception) {
+                runOnUiThread { result.error("sync_folder_failed", e.message, null) }
+            }
+        }.start()
+    }
+
+    private fun isSafeRelativePath(path: String): Boolean =
+        path.split('/').all { it.isNotEmpty() && it != "." && it != ".." && !it.contains('\\') }
+
+    private fun ensureDirectory(treeUri: Uri, relativePath: String): Uri {
+        var current = DocumentsContract.buildDocumentUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+        )
+        for (part in relativePath.split('/')) {
+            val existing = findChild(current, part)
+            current = existing ?: DocumentsContract.createDocument(
+                contentResolver,
+                current,
+                DocumentsContract.Document.MIME_TYPE_DIR,
+                part,
+            ) ?: throw IllegalStateException("Could not create sync-folder directory.")
+        }
+        return current
+    }
+
+    private fun findOrCreateFile(treeUri: Uri, relativePath: String): Uri {
+        val parts = relativePath.split('/')
+        val parent = if (parts.size == 1) {
+            DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
+        } else {
+            ensureDirectory(treeUri, parts.dropLast(1).joinToString("/"))
+        }
+        val existing = findChild(parent, parts.last())
+        if (existing != null) return existing
+        return DocumentsContract.createDocument(
+            contentResolver,
+            parent,
+            "application/octet-stream",
+            parts.last(),
+        ) ?: throw IllegalStateException("Could not create sync-folder file.")
+    }
+
+    private fun findDocument(treeUri: Uri, relativePath: String): Uri? {
+        var current = DocumentsContract.buildDocumentUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+        )
+        for (part in relativePath.split('/')) {
+            current = findChild(current, part) ?: return null
+        }
+        return current
+    }
+
+    private fun findChild(parent: Uri, name: String): Uri? {
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(
+            parent,
+            DocumentsContract.getDocumentId(parent),
+        )
+        contentResolver.query(
+            children,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            ),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            while (cursor.moveToNext()) {
+                if (name == cursor.getString(nameIndex)) {
+                    return DocumentsContract.buildDocumentUriUsingTree(parent, cursor.getString(idIndex))
+                }
+            }
+        }
+        return null
     }
 
     /// A best-effort hint for the SAF picker to open in the public Downloads
@@ -81,6 +280,25 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == selectSyncFolderRequestCode) {
+            val result = pendingSyncFolderResult ?: return
+            pendingSyncFolderResult = null
+            val treeUri = data?.data
+            if (resultCode != Activity.RESULT_OK || treeUri == null) {
+                result.success(null)
+                return
+            }
+            try {
+                val granted = (data?.flags ?: 0) and (
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                contentResolver.takePersistableUriPermission(treeUri, granted)
+                result.success(treeUri.toString())
+            } catch (e: Exception) {
+                result.error("folder_permission_failed", e.message, null)
+            }
+            return
+        }
         if (requestCode != saveFileRequestCode) return
         val result = pendingResult ?: return
         val sourcePath = pendingSourcePath
