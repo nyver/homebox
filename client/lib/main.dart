@@ -12,6 +12,7 @@ import 'core/platform/windows_autostart.dart';
 import 'core/platform/windows_file_drop.dart';
 import 'core/storage/local_database.dart';
 import 'features/device/device_setup_controller.dart';
+import 'features/device/device_provisioning_controller.dart';
 import 'features/files/files_controller.dart';
 import 'features/server/server_connection_controller.dart';
 import 'features/sync/sync_engine.dart';
@@ -20,6 +21,7 @@ import 'features/syncfolder/sync_folder_materializer.dart';
 import 'features/syncfolder/sync_folder_store.dart';
 import 'features/syncfolder/sync_folder_watcher.dart';
 import 'features/vault/vault_setup_controller.dart';
+import 'core/transport/homebox_api_client.dart' as transport;
 
 void main() => runApp(const HomeBoxApp());
 
@@ -85,6 +87,7 @@ class HomeBoxDesktopPage extends StatefulWidget {
 class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final DeviceIdentityStore _deviceIdentityStore;
   late final DeviceSetupController _deviceSetupController;
+  late final DeviceProvisioningController _deviceProvisioningController;
   late final ServerConnectionController _serverConnectionController;
   late final VaultKeyStore _vaultKeyStore;
   late final VaultSetupController _vaultSetupController;
@@ -116,6 +119,11 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         ServerConnectionController(deviceIdentityStore: _deviceIdentityStore);
     _vaultKeyStore = widget.vaultKeyStore ?? VaultKeyStore();
     _vaultSetupController = VaultSetupController(_vaultKeyStore);
+    _deviceProvisioningController = DeviceProvisioningController(
+      deviceIdentityStore: _deviceIdentityStore,
+      vaultKeyStore: _vaultKeyStore,
+      serverConnection: _serverConnectionController,
+    );
     _syncFolderStore = widget.syncFolderStore ?? SyncFolderStore();
     _syncFolderWatcher = SyncFolderWatcher(onChange: _runSyncFolderPass);
     _cameraPhotoPicker =
@@ -148,6 +156,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   }
 
   void _onServerConnectionChanged() {
+    unawaited(_deviceSetupController.initialize());
     unawaited(_rebuildSyncEngineForCurrentServer());
     _maybeRefreshFiles();
   }
@@ -250,6 +259,11 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       unawaited(files.refresh());
       unawaited(_uploadRecoveredCameraPhotoIfReady());
     }
+  }
+
+  Future<void> _onVaultProvisioned() async {
+    await _vaultSetupController.initialize();
+    _maybeRefreshFiles();
   }
 
   Future<void> _recoverLostCameraPhoto() async {
@@ -384,6 +398,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _syncFolderWatcher.dispose();
     _syncEngine?.dispose();
     _vaultSetupController.dispose();
+    _deviceProvisioningController.dispose();
     _deviceSetupController.dispose();
     _serverConnectionController.dispose();
     super.dispose();
@@ -422,8 +437,10 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       selectingFolder: _selectingFolder,
       onSelectSyncFolder: _selectSyncFolder,
       deviceSetupController: _deviceSetupController,
+      deviceProvisioningController: _deviceProvisioningController,
       serverConnectionController: _serverConnectionController,
       vaultSetupController: _vaultSetupController,
+      onVaultProvisioned: _onVaultProvisioned,
       filesController: _filesController,
       syncEngine: _syncEngine,
       syncFolderMaterializer: _syncFolderMaterializer,
@@ -558,8 +575,10 @@ class _SectionContent extends StatelessWidget {
     required this.selectingFolder,
     required this.onSelectSyncFolder,
     required this.deviceSetupController,
+    required this.deviceProvisioningController,
     required this.serverConnectionController,
     required this.vaultSetupController,
+    required this.onVaultProvisioned,
     required this.filesController,
     required this.syncEngine,
     required this.syncFolderMaterializer,
@@ -574,8 +593,10 @@ class _SectionContent extends StatelessWidget {
   final bool selectingFolder;
   final Future<void> Function() onSelectSyncFolder;
   final DeviceSetupController deviceSetupController;
+  final DeviceProvisioningController deviceProvisioningController;
   final ServerConnectionController serverConnectionController;
   final VaultSetupController vaultSetupController;
+  final Future<void> Function() onVaultProvisioned;
   final FilesController? filesController;
   final SyncEngine? syncEngine;
   final SyncFolderMaterializer? syncFolderMaterializer;
@@ -601,8 +622,10 @@ class _SectionContent extends StatelessWidget {
     ),
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
+      deviceProvisioningController: deviceProvisioningController,
       serverConnectionController: serverConnectionController,
       vaultSetupController: vaultSetupController,
+      onVaultProvisioned: onVaultProvisioned,
     ),
   };
 }
@@ -1166,13 +1189,17 @@ class _SyncSection extends StatelessWidget {
 class _SettingsSection extends StatelessWidget {
   const _SettingsSection({
     required this.deviceSetupController,
+    required this.deviceProvisioningController,
     required this.serverConnectionController,
     required this.vaultSetupController,
+    required this.onVaultProvisioned,
   });
 
   final DeviceSetupController deviceSetupController;
+  final DeviceProvisioningController deviceProvisioningController;
   final ServerConnectionController serverConnectionController;
   final VaultSetupController vaultSetupController;
+  final Future<void> Function() onVaultProvisioned;
 
   @override
   Widget build(BuildContext context) => _PageFrame(
@@ -1182,6 +1209,13 @@ class _SettingsSection extends StatelessWidget {
       children: [
         _ServerConnectionCard(controller: serverConnectionController),
         _DeviceIdentityCard(controller: deviceSetupController),
+        _DeviceProvisioningCard(
+          controller: deviceProvisioningController,
+          deviceSetupController: deviceSetupController,
+          serverConnectionController: serverConnectionController,
+          vaultSetupController: vaultSetupController,
+          onVaultProvisioned: onVaultProvisioned,
+        ),
         _VaultSetupCard(
           controller: vaultSetupController,
           serverConnectionController: serverConnectionController,
@@ -1191,6 +1225,190 @@ class _SettingsSection extends StatelessWidget {
     ),
   );
 }
+
+final class _DeviceProvisioningCard extends StatelessWidget {
+  const _DeviceProvisioningCard({
+    required this.controller,
+    required this.deviceSetupController,
+    required this.serverConnectionController,
+    required this.vaultSetupController,
+    required this.onVaultProvisioned,
+  });
+
+  final DeviceProvisioningController controller;
+  final DeviceSetupController deviceSetupController;
+  final ServerConnectionController serverConnectionController;
+  final VaultSetupController vaultSetupController;
+  final Future<void> Function() onVaultProvisioned;
+
+  Future<void> _addDevice(BuildContext context) async {
+    final devices = await controller.availableRecipientDevices();
+    if (!context.mounted) return;
+    if (devices.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            controller.errorMessage ?? 'No other active device is registered yet. Sign in on the new device first.',
+          ),
+        ),
+      );
+      return;
+    }
+    final target = await showDialog<transport.HomeBoxDevice>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Choose a device to approve'),
+        content: SizedBox(
+          width: 420,
+          child: ListView.separated(
+            shrinkWrap: true,
+            itemCount: devices.length,
+            separatorBuilder: (context, _) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final device = devices[index];
+              return ListTile(
+                leading: Icon(
+                  device.platform == 'ANDROID'
+                      ? Icons.phone_android_outlined
+                      : Icons.desktop_windows_outlined,
+                ),
+                title: Text('${device.name} (${_deviceCode(device.id)})'),
+                subtitle: Text(
+                  '${device.platform} · Last seen ${device.lastSeenAt.toLocal()}',
+                ),
+                onTap: () => Navigator.pop(context, device),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (!context.mounted || target == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Approve this device?'),
+        content: Text(
+          'HomeBox will encrypt this vault key for ${target.name}. Verify that this is the device you just signed in on.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Approve'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final approved = await controller.provisionDevice(target);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          approved
+              ? 'Device approved. Open Settings there and choose Check approval.'
+              : (controller.errorMessage ?? 'Could not approve this device.'),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _checkApproval(BuildContext context) async {
+    final provisioned = await controller.collectProvisioning();
+    if (provisioned) await onVaultProvisioned();
+    if (!context.mounted) return;
+    final message = provisioned
+        ? 'This device is approved and the vault is unlocked.'
+        : controller.status == DeviceProvisioningStatus.awaitingApproval
+        ? 'Waiting for approval from a trusted device.'
+        : (controller.errorMessage ?? 'Could not check device approval.');
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([
+      controller,
+      deviceSetupController,
+      serverConnectionController,
+      vaultSetupController,
+    ]),
+    builder: (context, _) {
+      final signedIn =
+          serverConnectionController.status ==
+          ServerConnectionStatus.authenticated;
+      final vaultReady = vaultSetupController.status == VaultSetupStatus.ready;
+      final deviceReady =
+          deviceSetupController.status == DeviceSetupStatus.ready;
+      final canApproveAnother = signedIn && vaultReady;
+      final canCollectApproval = signedIn && !vaultReady && deviceReady;
+      final deviceCode = signedIn
+          ? _deviceCode(serverConnectionController.session!.device.id)
+          : null;
+      final subtitle = switch (controller.status) {
+        DeviceProvisioningStatus.loading =>
+          'Exchanging the encrypted vault key…',
+        DeviceProvisioningStatus.awaitingApproval =>
+          'Waiting for a trusted device to approve this device.',
+        DeviceProvisioningStatus.ready =>
+          vaultReady
+              ? 'This device can approve another signed-in device.'
+              : 'Vault key received from a trusted device.',
+        DeviceProvisioningStatus.failed =>
+          controller.errorMessage ?? 'Provisioning failed.',
+        DeviceProvisioningStatus.idle when !signedIn =>
+          'Sign in on both devices before linking them.',
+        DeviceProvisioningStatus.idle when !deviceReady =>
+          'Prepare this device identity before linking it.',
+        DeviceProvisioningStatus.idle when vaultReady =>
+          'Approve another device that has signed in to this account.',
+        DeviceProvisioningStatus.idle => 'Sign in on a trusted device, approve this one there, then check here.',
+      };
+      final trailing = controller.busy
+          ? const SizedBox.square(
+              dimension: 22,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : canApproveAnother
+          ? OutlinedButton(
+              onPressed: () => _addDevice(context),
+              child: const Text('Add device'),
+            )
+          : canCollectApproval
+          ? FilledButton(
+              onPressed: () => _checkApproval(context),
+              child: const Text('Check approval'),
+            )
+          : null;
+      return Card(
+        child: ListTile(
+          leading: const Icon(Icons.phonelink_lock_outlined),
+          title: const Text('Trusted devices'),
+          subtitle: Text(
+            deviceCode == null
+                ? subtitle
+                : '$subtitle\nDevice code: $deviceCode',
+          ),
+          trailing: trailing,
+          isThreeLine: true,
+        ),
+      );
+    },
+  );
+}
+
+String _deviceCode(String deviceId) => deviceId.substring(0, 8).toUpperCase();
 
 final class _AutostartCard extends StatefulWidget {
   const _AutostartCard();

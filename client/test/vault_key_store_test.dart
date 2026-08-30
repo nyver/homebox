@@ -37,12 +37,35 @@ void main() {
     expect(() => store.createVault(userId: userId), throwsStateError);
   });
 
+  test(
+    'a provisioned Vault Key is persisted without recovery material',
+    () async {
+      final store = VaultKeyStore(MemoryVaultKeyStorage());
+      final provisionedKey = SecretKeyData(
+        List<int>.generate(32, (index) => index),
+      );
+
+      await store.saveProvisionedVaultKey(provisionedKey);
+
+      expect(await store.exists(), isTrue);
+      expect(
+        await _bytesOf((await store.loadVaultKey())!),
+        await _bytesOf(provisionedKey),
+      );
+      expect(await store.loadUserMasterKey(), isNull);
+      expect(await store.loadRecoveryPackage(), isNull);
+      provisionedKey.destroy();
+    },
+  );
+
   test('a Recovery Package created during setup restores the exact User Master Key elsewhere', () async {
     final originStorage = MemoryVaultKeyStorage();
     final originStore = VaultKeyStore(originStorage);
     final userId = generateUuidV4();
     final recoverySecret = await originStore.createVault(userId: userId);
-    final originalUmkBytes = await _bytesOf((await originStore.loadUserMasterKey())!);
+    final originalUmkBytes = await _bytesOf(
+      (await originStore.loadUserMasterKey())!,
+    );
     final package = (await originStore.loadRecoveryPackage())!;
 
     // Simulate a clean device: a fresh store with no local vault yet.
@@ -53,7 +76,9 @@ void main() {
       recoverySecret: recoverySecret,
       recoveryPackage: package,
     );
-    final restoredUmkBytes = await _bytesOf((await cleanStore.loadUserMasterKey())!);
+    final restoredUmkBytes = await _bytesOf(
+      (await cleanStore.loadUserMasterKey())!,
+    );
     expect(restoredUmkBytes, originalUmkBytes);
     // Recovery restores the UMK but never the Vault Key itself — that still
     // requires trusted-device provisioning.
@@ -62,21 +87,28 @@ void main() {
     recoverySecret.destroy();
   });
 
-  test('restoring with the wrong Recovery Secret fails authentication', () async {
-    final originStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final userId = generateUuidV4();
-    final recoverySecret = await originStore.createVault(userId: userId);
-    final package = (await originStore.loadRecoveryPackage())!;
-    recoverySecret.destroy();
+  test(
+    'restoring with the wrong Recovery Secret fails authentication',
+    () async {
+      final originStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final userId = generateUuidV4();
+      final recoverySecret = await originStore.createVault(userId: userId);
+      final package = (await originStore.loadRecoveryPackage())!;
+      recoverySecret.destroy();
 
-    final wrongSecret = RecoverySecret.generate();
-    final cleanStore = VaultKeyStore(MemoryVaultKeyStorage());
-    await expectLater(
-      cleanStore.restoreUserMasterKeyFromRecovery(userId: userId, recoverySecret: wrongSecret, recoveryPackage: package),
-      throwsA(isA<SecretBoxAuthenticationError>()),
-    );
-    wrongSecret.destroy();
-  });
+      final wrongSecret = RecoverySecret.generate();
+      final cleanStore = VaultKeyStore(MemoryVaultKeyStorage());
+      await expectLater(
+        cleanStore.restoreUserMasterKeyFromRecovery(
+          userId: userId,
+          recoverySecret: wrongSecret,
+          recoveryPackage: package,
+        ),
+        throwsA(isA<SecretBoxAuthenticationError>()),
+      );
+      wrongSecret.destroy();
+    },
+  );
 
   test('clear removes every persisted secret', () async {
     final store = VaultKeyStore(MemoryVaultKeyStorage());

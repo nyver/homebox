@@ -160,6 +160,12 @@ flutter build apk --release
 
 Windows builds require Visual Studio 2022 with the **Desktop development with C++** workload and the Windows 10/11 SDK. The Android release APK is written to `client/build/app/outputs/flutter-apk/app-release.apk`. It is signed with the template debug key until a production signing configuration is supplied in `client/android/app/build.gradle.kts`; do not distribute that debug-signed APK.
 
+### Link a second trusted device
+
+Use the same HomeBox server and account on both devices. On the new device, sign in and open **Settings**; its device identity is registered during login. If needed, choose **Prepare device**, then use **Check approval**. On a device with an unlocked vault, open **Settings**, select **Add device**, choose the newly registered device, verify its name/platform and approve it. Return to the new device and choose **Check approval** again. The approving device encrypts the Vault Key only for that new device's X25519 public key; the server stores and relays the ciphertext envelope and never receives the key. Do not choose **Create vault** on a second device, because that creates a separate vault instead of joining the existing one.
+
+The eight-character device code shown on both devices is an out-of-band check to help select the intended device from the account's registered-device list.
+
 ### Windows drag-and-drop uploads
 
 The Windows Files view accepts files dropped from Explorer. Each drop captures the currently open HomeBox folder, then encrypts and uploads the selected files sequentially through the normal resumable upload flow. A bad or oversized item does not cancel the remaining files, and navigating while the transfer runs does not change their destination. Dropping directories is not supported.

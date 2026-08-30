@@ -29,7 +29,8 @@ final class PlatformVaultKeyStorage implements VaultKeyStorage {
   Future<String?> read(String key) => _storage.read(key: key);
 
   @override
-  Future<void> write(String key, String value) => _storage.write(key: key, value: value);
+  Future<void> write(String key, String value) =>
+      _storage.write(key: key, value: value);
 
   @override
   Future<void> delete(String key) => _storage.delete(key: key);
@@ -51,16 +52,20 @@ final class PlatformVaultKeyStorage implements VaultKeyStorage {
 /// (ADR-011) is instead used for what it's actually for: the Recovery
 /// Package, and delivering the Vault Key to a *different* device.
 final class VaultKeyStore {
-  VaultKeyStore([VaultKeyStorage? storage]) : _storage = storage ?? const PlatformVaultKeyStorage();
+  VaultKeyStore([VaultKeyStorage? storage])
+    : _storage = storage ?? const PlatformVaultKeyStorage();
 
-  static const String _userMasterKeyStorageKey = 'homebox.e2ee.vault.user_master_key.v1';
+  static const String _userMasterKeyStorageKey =
+      'homebox.e2ee.vault.user_master_key.v1';
   static const String _vaultKeyStorageKey = 'homebox.e2ee.vault.key.v1';
-  static const String _recoveryPackageStorageKey = 'homebox.e2ee.vault.recovery_package.v1';
+  static const String _recoveryPackageStorageKey =
+      'homebox.e2ee.vault.recovery_package.v1';
 
   final VaultKeyStorage _storage;
   final Xchacha20 _algorithm = Xchacha20.poly1305Aead();
 
-  Future<bool> exists() async => (await _storage.read(_vaultKeyStorageKey)) != null;
+  Future<bool> exists() async =>
+      (await _storage.read(_vaultKeyStorageKey)) != null;
 
   /// Creates this device's vault for the first time: a random UMK and Vault
   /// Key, plus a Recovery Secret and its encrypted Recovery Package. Throws
@@ -77,11 +82,17 @@ final class VaultKeyStore {
       throw StateError('A vault already exists on this device.');
     }
     final userIdBytes = uuidStringToBytes(userId);
-    final userMasterKey = SecretKeyData.random(length: 32, debugLabel: 'HomeBox User Master Key');
+    final userMasterKey = SecretKeyData.random(
+      length: 32,
+      debugLabel: 'HomeBox User Master Key',
+    );
     SecretKeyData? vaultKey;
     RecoverySecret? recoverySecret;
     try {
-      vaultKey = SecretKeyData.random(length: 32, debugLabel: 'HomeBox Vault Key');
+      vaultKey = SecretKeyData.random(
+        length: 32,
+        debugLabel: 'HomeBox Vault Key',
+      );
       recoverySecret = RecoverySecret.generate();
       final package = await RecoveryPackageCipher().create(
         recoverySecret: recoverySecret,
@@ -91,7 +102,10 @@ final class VaultKeyStore {
 
       await _persistSecretKey(_userMasterKeyStorageKey, userMasterKey);
       await _persistSecretKey(_vaultKeyStorageKey, vaultKey);
-      await _storage.write(_recoveryPackageStorageKey, base64Encode(package.encode()));
+      await _storage.write(
+        _recoveryPackageStorageKey,
+        base64Encode(package.encode()),
+      );
 
       final result = recoverySecret;
       recoverySecret = null; // ownership transfers to the caller from here.
@@ -121,7 +135,10 @@ final class VaultKeyStore {
     );
     try {
       await _persistSecretKey(_userMasterKeyStorageKey, userMasterKey);
-      await _storage.write(_recoveryPackageStorageKey, base64Encode(recoveryPackage.encode()));
+      await _storage.write(
+        _recoveryPackageStorageKey,
+        base64Encode(recoveryPackage.encode()),
+      );
     } finally {
       userMasterKey.destroy();
     }
@@ -129,7 +146,20 @@ final class VaultKeyStore {
 
   Future<SecretKey?> loadVaultKey() => _loadSecretKey(_vaultKeyStorageKey);
 
-  Future<SecretKey?> loadUserMasterKey() => _loadSecretKey(_userMasterKeyStorageKey);
+  /// Persists the Vault Key received from a trusted device. A provisioned
+  /// device intentionally receives no Recovery Secret or User Master Key:
+  /// those remain recovery material owned by the device that created the
+  /// vault. The Vault Key is sufficient to encrypt and decrypt this
+  /// account's file and metadata envelopes.
+  Future<void> saveProvisionedVaultKey(SecretKey vaultKey) async {
+    if (await exists()) {
+      throw StateError('A vault already exists on this device.');
+    }
+    await _persistSecretKey(_vaultKeyStorageKey, vaultKey);
+  }
+
+  Future<SecretKey?> loadUserMasterKey() =>
+      _loadSecretKey(_userMasterKeyStorageKey);
 
   Future<RecoveryPackage?> loadRecoveryPackage() async {
     final encoded = await _storage.read(_recoveryPackageStorageKey);
