@@ -41,7 +41,9 @@ security:
     # prefers each platform's standard TLS stack over an unvetted one.
     protocol: "tls1.3-ecdsa-p256-cert-pinning"
     # Access-token lifetime. A session older than this must present its
-    # refresh token to get a new access token.
+    # refresh token to get a new access token. Flutter clients renew their
+    # access token in the background shortly before this elapses, so an
+    # idle client stays authenticated without the user noticing.
     session_max_age: "15m"
   e2ee:
     # File framing is fixed by protocol v1: XChaCha20-Poly1305, 4 MB plaintext chunks.
@@ -51,6 +53,8 @@ security:
     # Device private keys remain in OS secure storage; only public keys and recipient envelopes reach the server.
     # Android camera photos use the same client-only encrypted upload path; the
     # app requests CAMERA at capture time, never broad gallery storage access.
+    # Android app-lock biometrics are device-local (`USE_BIOMETRIC`) and do
+    # not add a server-side setting or send biometric data to HomeBox.
     # Family Vault envelopes stay opaque ciphertext; per-folder keys are bound to the recipient device only in clients.
     required: true
     server_decryption_enabled: false

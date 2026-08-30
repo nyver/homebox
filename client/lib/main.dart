@@ -1,12 +1,16 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'core/e2ee/device_identity.dart';
 import 'core/e2ee/vault_key_store.dart';
+import 'core/platform/android_file_saver.dart';
+import 'core/platform/biometric_authenticator.dart';
 import 'core/platform/camera_photo_picker.dart';
 import 'core/platform/windows_autostart.dart';
 import 'core/platform/windows_file_drop.dart';
@@ -33,6 +37,8 @@ class HomeBoxApp extends StatelessWidget {
     this.vaultKeyStore,
     this.syncFolderStore,
     this.cameraPhotoPicker,
+    this.biometricAuthenticator,
+    this.androidFileSaver,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
@@ -40,6 +46,8 @@ class HomeBoxApp extends StatelessWidget {
   final VaultKeyStore? vaultKeyStore;
   final SyncFolderStore? syncFolderStore;
   final CameraPhotoPicker? cameraPhotoPicker;
+  final BiometricAuthenticator? biometricAuthenticator;
+  final AndroidFileSaver? androidFileSaver;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -54,6 +62,8 @@ class HomeBoxApp extends StatelessWidget {
       vaultKeyStore: vaultKeyStore,
       syncFolderStore: syncFolderStore,
       cameraPhotoPicker: cameraPhotoPicker,
+      biometricAuthenticator: biometricAuthenticator,
+      androidFileSaver: androidFileSaver,
     ),
   );
 }
@@ -68,6 +78,8 @@ class HomeBoxDesktopPage extends StatefulWidget {
     this.vaultKeyStore,
     this.syncFolderStore,
     this.cameraPhotoPicker,
+    this.biometricAuthenticator,
+    this.androidFileSaver,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
@@ -79,12 +91,15 @@ class HomeBoxDesktopPage extends StatefulWidget {
   final VaultKeyStore? vaultKeyStore;
   final SyncFolderStore? syncFolderStore;
   final CameraPhotoPicker? cameraPhotoPicker;
+  final BiometricAuthenticator? biometricAuthenticator;
+  final AndroidFileSaver? androidFileSaver;
 
   @override
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
 }
 
-class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
+class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
+    with WidgetsBindingObserver {
   late final DeviceIdentityStore _deviceIdentityStore;
   late final DeviceSetupController _deviceSetupController;
   late final DeviceProvisioningController _deviceProvisioningController;
@@ -94,6 +109,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final SyncFolderStore _syncFolderStore;
   late final SyncFolderWatcher _syncFolderWatcher;
   late final CameraPhotoPicker _cameraPhotoPicker;
+  late final AndroidFileSaver _androidFileSaver;
+  BiometricAuthenticator? _biometricAuthenticator;
   SyncEngine? _syncEngine;
   FilesController? _filesController;
   SyncFolderMaterializer? _syncFolderMaterializer;
@@ -107,10 +124,15 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   String? _syncFolder;
   bool _selectingFolder = false;
   String? _recoveredCameraPhotoPath;
+  bool _biometricGateReady = false;
+  bool _biometricAvailable = false;
+  bool _biometricLocked = false;
+  bool _biometricAuthenticationInProgress = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _deviceIdentityStore =
         widget.deviceIdentityStore ?? DeviceIdentityStore.platform();
     _deviceSetupController = DeviceSetupController(_deviceIdentityStore);
@@ -128,6 +150,15 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _syncFolderWatcher = SyncFolderWatcher(onChange: _runSyncFolderPass);
     _cameraPhotoPicker =
         widget.cameraPhotoPicker ?? ImagePickerCameraPhotoPicker();
+    _androidFileSaver =
+        widget.androidFileSaver ?? MethodChannelAndroidFileSaver();
+    if (supportsBiometricAppLock(defaultTargetPlatform)) {
+      _biometricAuthenticator =
+          widget.biometricAuthenticator ?? LocalAuthBiometricAuthenticator();
+      unawaited(_initializeBiometricGate());
+    } else {
+      _biometricGateReady = true;
+    }
     unawaited(_deviceSetupController.initialize());
     unawaited(_initializeServerConnection());
     unawaited(_vaultSetupController.initialize());
@@ -389,8 +420,82 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     }
   }
 
+  Future<void> _initializeBiometricGate() async {
+    final authenticator = _biometricAuthenticator;
+    if (authenticator == null) return;
+    var available = false;
+    try {
+      available = await authenticator.isAvailable();
+    } catch (_) {
+      // Authentication is an optional Android capability. A platform error
+      // must not make the rest of the local client inaccessible.
+    }
+    if (!mounted) return;
+    setState(() {
+      _biometricGateReady = true;
+      _biometricAvailable = available;
+      _biometricLocked = available;
+    });
+    if (available) unawaited(_unlockWithBiometrics());
+  }
+
+  Future<void> _unlockWithBiometrics() async {
+    final authenticator = _biometricAuthenticator;
+    if (authenticator == null ||
+        !_biometricGateReady ||
+        !_biometricAvailable ||
+        !_biometricLocked ||
+        _biometricAuthenticationInProgress) {
+      return;
+    }
+    _biometricAuthenticationInProgress = true;
+    var authenticated = false;
+    try {
+      authenticated = await authenticator.authenticate();
+    } catch (_) {
+      // The lock screen offers an explicit retry after a cancelled or failed
+      // prompt, while leaving encrypted content hidden.
+    } finally {
+      _biometricAuthenticationInProgress = false;
+    }
+    if (!mounted) return;
+    if (authenticated) {
+      setState(() => _biometricLocked = false);
+    } else {
+      setState(() {});
+    }
+  }
+
+  void _lockForBackground() {
+    if (!_biometricGateReady ||
+        !_biometricAvailable ||
+        _biometricLocked ||
+        _biometricAuthenticationInProgress) {
+      return;
+    }
+    setState(() => _biometricLocked = true);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        _lockForBackground();
+        break;
+      case AppLifecycleState.resumed:
+        unawaited(_unlockWithBiometrics());
+        break;
+      case AppLifecycleState.hidden:
+        _lockForBackground();
+        break;
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _serverConnectionController.removeListener(_onServerConnectionChanged);
     _vaultSetupController.removeListener(_maybeRefreshFiles);
     _filesController?.dispose();
@@ -431,6 +536,15 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_biometricGateReady) {
+      return const _BiometricGateLoadingScreen();
+    }
+    if (_biometricLocked) {
+      return _BiometricLockScreen(
+        authenticating: _biometricAuthenticationInProgress,
+        onUnlock: _unlockWithBiometrics,
+      );
+    }
     final wideLayout = MediaQuery.sizeOf(context).width >= 720;
     final content = _SectionContent(
       section: _section,
@@ -450,6 +564,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       onToggleSyncPause: _toggleSyncPause,
       onCapturePhoto: supportsCameraCapture(defaultTargetPlatform)
           ? _capturePhoto
+          : null,
+      androidFileSaver: supportsAndroidSaveDialog(defaultTargetPlatform)
+          ? _androidFileSaver
           : null,
     );
     if (!wideLayout) {
@@ -543,6 +660,58 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   }
 }
 
+final class _BiometricGateLoadingScreen extends StatelessWidget {
+  const _BiometricGateLoadingScreen();
+
+  @override
+  Widget build(BuildContext context) =>
+      const Scaffold(body: Center(child: CircularProgressIndicator()));
+}
+
+final class _BiometricLockScreen extends StatelessWidget {
+  const _BiometricLockScreen({
+    required this.authenticating,
+    required this.onUnlock,
+  });
+
+  final bool authenticating;
+  final VoidCallback onUnlock;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.fingerprint, size: 72),
+              const SizedBox(height: 20),
+              Text(
+                'HomeBox locked',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Use your enrolled biometric to access encrypted files.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: authenticating ? null : onUnlock,
+                icon: const Icon(Icons.fingerprint),
+                label: Text(authenticating ? 'Checking…' : 'Unlock'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 class _VaultStateChip extends StatelessWidget {
   const _VaultStateChip({required this.controller});
 
@@ -587,6 +756,7 @@ class _SectionContent extends StatelessWidget {
     required this.syncFolderWatcher,
     required this.onToggleSyncPause,
     required this.onCapturePhoto,
+    required this.androidFileSaver,
   });
 
   final AppSection section;
@@ -605,12 +775,14 @@ class _SectionContent extends StatelessWidget {
   final SyncFolderWatcher syncFolderWatcher;
   final VoidCallback onToggleSyncPause;
   final Future<void> Function()? onCapturePhoto;
+  final AndroidFileSaver? androidFileSaver;
 
   @override
   Widget build(BuildContext context) => switch (section) {
     AppSection.files => _FilesSection(
       controller: filesController,
       onCapturePhoto: onCapturePhoto,
+      androidFileSaver: androidFileSaver,
     ),
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,
@@ -631,11 +803,46 @@ class _SectionContent extends StatelessWidget {
   };
 }
 
+/// "mimeType • size • Uploaded date time" for a file's [ListTile] subtitle.
+/// [FileEntry.metadata.plaintextSize] is null for files uploaded before that
+/// field existed, so the size segment is simply omitted for those.
+String _fileEntrySubtitle(FileEntry entry) {
+  final parts = <String>[entry.metadata.mimeType ?? 'Encrypted file'];
+  final size = entry.metadata.plaintextSize;
+  if (size != null) parts.add(_formatFileSize(size));
+  parts.add('Uploaded ${_formatDateTime(entry.node.createdAt)}');
+  return parts.join(' • ');
+}
+
+String _formatFileSize(int bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var size = bytes.toDouble();
+  var unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex++;
+  }
+  final precision = unitIndex == 0 ? 0 : 1;
+  return '${size.toStringAsFixed(precision)} ${units[unitIndex]}';
+}
+
+String _formatDateTime(DateTime utc) {
+  final local = utc.toLocal();
+  String two(int value) => value.toString().padLeft(2, '0');
+  return '${local.year}-${two(local.month)}-${two(local.day)} '
+      '${two(local.hour)}:${two(local.minute)}';
+}
+
 final class _FilesSection extends StatefulWidget {
-  const _FilesSection({required this.controller, required this.onCapturePhoto});
+  const _FilesSection({
+    required this.controller,
+    required this.onCapturePhoto,
+    required this.androidFileSaver,
+  });
 
   final FilesController? controller;
   final Future<void> Function()? onCapturePhoto;
+  final AndroidFileSaver? androidFileSaver;
 
   @override
   State<_FilesSection> createState() => _FilesSectionState();
@@ -709,6 +916,11 @@ final class _FilesSectionState extends State<_FilesSection> {
   Future<void> _downloadFile(BuildContext context, FileEntry entry) async {
     final controller = widget.controller;
     if (controller == null) return;
+    final saver = widget.androidFileSaver;
+    if (saver != null) {
+      await _downloadFileWithAndroidSaveDialog(context, controller, saver, entry);
+      return;
+    }
     final destination = await getSaveLocation(suggestedName: entry.name);
     if (destination == null) return;
     final ok = await controller.downloadFile(entry, destination.path);
@@ -722,6 +934,48 @@ final class _FilesSectionState extends State<_FilesSection> {
           ),
         ),
       );
+    }
+  }
+
+  /// Android's `file_selector` has no save-dialog implementation, so this
+  /// decrypts to a private temp file first, then hands that off to the OS
+  /// "Save As" picker (defaulting to Downloads) via [AndroidFileSaver] —
+  /// which only ever copies already-decrypted bytes, keeping the E2EE
+  /// boundary in [FilesController] unchanged.
+  Future<void> _downloadFileWithAndroidSaveDialog(
+    BuildContext context,
+    FilesController controller,
+    AndroidFileSaver saver,
+    FileEntry entry,
+  ) async {
+    final tempDir = await getTemporaryDirectory();
+    final tempFile = File('${tempDir.path}/download_${entry.node.id}');
+    final downloaded = await controller.downloadFile(entry, tempFile.path);
+    if (!downloaded) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(controller.errorMessage ?? 'Download failed.')),
+        );
+      }
+      unawaited(tempFile.delete().catchError((_) => tempFile));
+      return;
+    }
+    String? message;
+    try {
+      final destination = await saver.saveFile(
+        sourcePath: tempFile.path,
+        suggestedName: entry.name,
+        mimeType: entry.metadata.mimeType,
+      );
+      message = destination == null ? null : 'Saved to Downloads.';
+    } catch (_) {
+      message = 'Download failed.';
+    } finally {
+      unawaited(tempFile.delete().catchError((_) => tempFile));
+    }
+    if (context.mounted && message != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -836,6 +1090,16 @@ final class _FilesSectionState extends State<_FilesSection> {
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) {
+        final transferProgressPercent = ((controller.progress ?? 0) * 100)
+            .round()
+            .clamp(0, 100);
+        final transferProgressLabel = switch (controller.transferDirection) {
+          FileTransferDirection.upload =>
+            'Upload progress $transferProgressPercent percent',
+          FileTransferDirection.download =>
+            'Download progress $transferProgressPercent percent',
+          null => 'Transfer progress $transferProgressPercent percent',
+        };
         final Widget body;
         if (controller.status == FilesStatus.idle) {
           body = const _FilesMessageState(
@@ -870,7 +1134,7 @@ final class _FilesSectionState extends State<_FilesSection> {
                 title: Text(entry.name),
                 subtitle: entry.isDirectory
                     ? null
-                    : Text(entry.metadata.mimeType ?? 'Encrypted file'),
+                    : Text(_fileEntrySubtitle(entry)),
                 onTap: entry.isDirectory
                     ? () => controller.openFolder(entry)
                     : () => _downloadFile(context, entry),
@@ -926,6 +1190,12 @@ final class _FilesSectionState extends State<_FilesSection> {
                         strokeWidth: 2,
                         value: controller.progress,
                       ),
+                    ),
+                  if (controller.busy)
+                    Semantics(
+                      label: transferProgressLabel,
+                      excludeSemantics: true,
+                      child: Text('$transferProgressPercent%'),
                     ),
                   if (defaultTargetPlatform == TargetPlatform.android) ...[
                     IconButton(

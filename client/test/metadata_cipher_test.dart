@@ -16,6 +16,7 @@ void main() {
     fileName: 'Family Photo.jpg',
     mimeType: 'image/jpeg',
     plaintextSha256: List.filled(64, 'a').join(),
+    plaintextSize: 123456,
     labels: const ['favorite'],
   );
 
@@ -41,7 +42,28 @@ void main() {
     expect(decrypted.fileName, metadata.fileName);
     expect(decrypted.mimeType, metadata.mimeType);
     expect(decrypted.plaintextSha256, metadata.plaintextSha256);
+    expect(decrypted.plaintextSize, metadata.plaintextSize);
     expect(decrypted.labels, metadata.labels);
+  });
+
+  test('plaintext size is optional, for metadata encrypted before it existed', () async {
+    final withoutSize = SensitiveNodeMetadata(fileName: 'legacy.txt');
+    final encrypted = await cipher.encrypt(
+      metadata: withoutSize,
+      metadataKey: key,
+      keyVersion: 1,
+      nodeType: MetadataNodeType.file,
+      scopeId: scopeId,
+      nodeId: nodeId,
+    );
+    final decrypted = await cipher.decrypt(
+      envelope: EncryptedMetadataEnvelope.decode(encrypted.encode()),
+      metadataKey: key,
+      nodeType: MetadataNodeType.file,
+      scopeId: scopeId,
+      nodeId: nodeId,
+    );
+    expect(decrypted.plaintextSize, isNull);
   });
 
   test('metadata cannot be moved to another node', () async {

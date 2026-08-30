@@ -21,6 +21,11 @@ import 'file_transfer.dart';
 
 enum FilesStatus { idle, loading, ready, failed }
 
+/// Which direction [FilesController.progress] currently reports, so the
+/// Files page can label a busy transfer accurately instead of always
+/// saying "upload" even while a download is in progress.
+enum FileTransferDirection { upload, download }
+
 /// A decrypted-for-display file or folder entry. The server only ever knows
 /// [node]'s opaque ID and ciphertext; [metadata] is decrypted locally.
 final class FileEntry {
@@ -99,6 +104,7 @@ final class FilesController extends ChangeNotifier {
   final List<_Breadcrumb> _path = [];
   bool _busy = false;
   double? _progress;
+  FileTransferDirection? _transferDirection;
   bool _disposed = false;
 
   FilesStatus get status => _status;
@@ -106,6 +112,7 @@ final class FilesController extends ChangeNotifier {
   List<FileEntry> get entries => _entries;
   bool get busy => _busy;
   double? get progress => _progress;
+  FileTransferDirection? get transferDirection => _transferDirection;
   bool get canGoUp => _path.isNotEmpty;
   List<String> get breadcrumbNames =>
       _path.map((e) => e.name).toList(growable: false);
@@ -251,6 +258,7 @@ final class FilesController extends ChangeNotifier {
           fileName: newName,
           mimeType: entry.metadata.mimeType,
           plaintextSha256: entry.metadata.plaintextSha256,
+          plaintextSize: entry.metadata.plaintextSize,
         ),
         metadataKey: ctx.vaultKey,
         keyVersion: homeBoxPersonalVaultKeyVersion,
@@ -404,7 +412,7 @@ final class FilesController extends ChangeNotifier {
     // Capture this before any asynchronous work. A user may navigate while a
     // large drop is uploading, but that must not move later files elsewhere.
     final targetParentId = _currentParentId;
-    _setBusy(true);
+    _setBusy(true, direction: FileTransferDirection.upload);
     _errorMessage = null;
     var succeeded = 0;
     var failed = 0;
@@ -459,6 +467,7 @@ final class FilesController extends ChangeNotifier {
       metadata: SensitiveNodeMetadata(
         fileName: fileName,
         plaintextSha256: plaintextHash,
+        plaintextSize: plaintextLength,
       ),
       metadataKey: ctx.vaultKey,
       keyVersion: homeBoxPersonalVaultKeyVersion,
@@ -517,7 +526,7 @@ final class FilesController extends ChangeNotifier {
     if (entry.isDirectory) return false;
     final ctx = await _requireContext();
     if (ctx == null) return false;
-    _setBusy(true);
+    _setBusy(true, direction: FileTransferDirection.upload);
     try {
       final file = File(localPath);
       final plaintextLength = await file.length();
@@ -529,6 +538,7 @@ final class FilesController extends ChangeNotifier {
         metadata: SensitiveNodeMetadata(
           fileName: entry.name,
           plaintextSha256: plaintextHash,
+          plaintextSize: plaintextLength,
         ),
         metadataKey: ctx.vaultKey,
         keyVersion: homeBoxPersonalVaultKeyVersion,
@@ -589,7 +599,7 @@ final class FilesController extends ChangeNotifier {
   Future<bool> downloadFile(FileEntry entry, String destinationPath) async {
     final ctx = await _requireContext();
     if (ctx == null) return false;
-    _setBusy(true);
+    _setBusy(true, direction: FileTransferDirection.download);
     try {
       final plaintextBytes = await downloadAndDecryptFile(
         api: ctx.api,
@@ -657,9 +667,10 @@ final class FilesController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  void _setBusy(bool value) {
+  void _setBusy(bool value, {FileTransferDirection? direction}) {
     _busy = value;
     _progress = value ? 0 : null;
+    _transferDirection = value ? direction : null;
     if (!_disposed) notifyListeners();
   }
 

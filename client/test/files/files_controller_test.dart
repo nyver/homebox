@@ -387,6 +387,7 @@ void main() {
     expect(uploaded.name, 'photo.jpg');
     expect(uploaded.isDirectory, isFalse);
     expect(uploaded.metadata.plaintextSha256, isNotNull);
+    expect(uploaded.metadata.plaintextSize, originalBytes.length);
 
     final destinationPath = '${tempDir.path}/downloaded.jpg';
     expect(
@@ -396,6 +397,64 @@ void main() {
     );
     final downloadedBytes = await File(destinationPath).readAsBytes();
     expect(downloadedBytes, originalBytes);
+  });
+
+  test('busy transfers report their direction so the Files page can label upload vs. download progress', () async {
+    final fakeServer = _FakeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(controller.dispose);
+
+    final tempDir = await Directory.systemTemp.createTemp(
+      'homebox_files_test_',
+    );
+    addTearDown(() => tempDir.delete(recursive: true));
+    final sourceFile = File('${tempDir.path}/photo.jpg');
+    await sourceFile.writeAsBytes(
+      Uint8List.fromList(List<int>.generate(10 * 1024 + 7, (i) => i % 256)),
+    );
+
+    final observedDirections = <FileTransferDirection?>[];
+    controller.addListener(() {
+      if (controller.busy) observedDirections.add(controller.transferDirection);
+    });
+
+    expect(
+      await controller.uploadFile(sourceFile.path),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    expect(observedDirections, isNotEmpty);
+    expect(observedDirections, everyElement(FileTransferDirection.upload));
+    expect(controller.transferDirection, isNull, reason: 'reset once idle');
+
+    observedDirections.clear();
+    final destinationPath = '${tempDir.path}/downloaded.jpg';
+    expect(
+      await controller.downloadFile(controller.entries.single, destinationPath),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    expect(observedDirections, isNotEmpty);
+    expect(observedDirections, everyElement(FileTransferDirection.download));
+    expect(controller.transferDirection, isNull, reason: 'reset once idle');
   });
 
   test('uploadFiles keeps a dropped batch in its opening folder and continues after one bad path', () async {
@@ -502,6 +561,10 @@ void main() {
     final secondVersion = controller.entries.single;
     expect(secondVersion.node.id, firstVersion.node.id);
     expect(secondVersion.node.revision, greaterThan(revisionAfterFirstUpload));
+    expect(
+      secondVersion.metadata.plaintextSize,
+      'version two, replacing the first'.length,
+    );
     expect(
       fakeServer._fileVersions[firstVersion.node.id],
       hasLength(2),

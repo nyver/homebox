@@ -2,6 +2,7 @@
 // readable arguments (`deviceIdentityStore:`) instead of the backing
 // private field names.
 // ignore_for_file: prefer_initializing_formals
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -49,13 +50,20 @@ final class ServerConnectionController extends ChangeNotifier {
     required DeviceIdentityStore deviceIdentityStore,
     PinnedServerStore? serverStore,
     SessionStore? sessionStore,
+    Duration refreshBuffer = const Duration(seconds: 30),
   }) : _deviceIdentityStore = deviceIdentityStore,
        _serverStore = serverStore ?? PinnedServerStore(),
-       _sessionStore = sessionStore ?? SessionStore();
+       _sessionStore = sessionStore ?? SessionStore(),
+       _refreshBuffer = refreshBuffer;
 
   final DeviceIdentityStore _deviceIdentityStore;
   final PinnedServerStore _serverStore;
   final SessionStore _sessionStore;
+
+  // How long before the access token's own expiry to proactively renew it.
+  // Overridable only so tests can use a short-lived fake session without
+  // waiting out a realistic `session_max_age` (15 minutes by default).
+  final Duration _refreshBuffer;
 
   PinnedHttpClient? _transport;
   HomeBoxApiClient? _api;
@@ -64,6 +72,7 @@ final class ServerConnectionController extends ChangeNotifier {
   String? _pendingBaseUrl;
   String? _discoveredFingerprint;
   String? _errorMessage;
+  Timer? _refreshTimer;
   bool _disposed = false;
 
   ServerConnectionStatus _status = ServerConnectionStatus.disconnected;
@@ -98,6 +107,7 @@ final class ServerConnectionController extends ChangeNotifier {
       _session = session;
       await _sessionStore.saveRefreshToken(session.refreshToken);
       _setStatus(ServerConnectionStatus.authenticated);
+      _scheduleAccessTokenRefresh();
     } catch (_) {
       // The refresh token may be expired, revoked, or the device may have
       // been removed server-side; fall back to requiring a fresh login
@@ -167,6 +177,7 @@ final class ServerConnectionController extends ChangeNotifier {
       _session = session;
       await _sessionStore.saveRefreshToken(session.refreshToken);
       _setStatus(ServerConnectionStatus.authenticated);
+      _scheduleAccessTokenRefresh();
     } on HomeBoxApiException catch (e) {
       _errorMessage = e.message;
       _setStatus(ServerConnectionStatus.connectedLoggedOut);
@@ -179,6 +190,8 @@ final class ServerConnectionController extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
     final api = _api;
     final session = _session;
     if (api != null && session != null) {
@@ -192,6 +205,49 @@ final class ServerConnectionController extends ChangeNotifier {
     _session = null;
     await _sessionStore.clearRefreshToken();
     _setStatus(_server == null ? ServerConnectionStatus.disconnected : ServerConnectionStatus.connectedLoggedOut);
+  }
+
+  /// Renews the access token shortly before it expires (`session_max_age`,
+  /// 15 minutes by default) so an open Files/Sync session left idle for a
+  /// while never hits a stale-token 401 mid-operation — previously nothing
+  /// refreshed it again after the initial login/[initialize], so every
+  /// authenticated call started failing once that lifetime elapsed.
+  void _scheduleAccessTokenRefresh() {
+    _refreshTimer?.cancel();
+    final session = _session;
+    if (session == null) return;
+    final delay = session.accessTokenExpiresAt
+        .subtract(_refreshBuffer)
+        .difference(DateTime.now().toUtc());
+    // A non-positive delay only happens with significant clock skew (or a
+    // test fixture using an unrelated fixed timestamp); skip scheduling
+    // rather than refreshing in a tight loop. The next authenticated call
+    // simply hits a normal 401 in that unlikely case, same as before.
+    if (delay <= Duration.zero) return;
+    _refreshTimer = Timer(delay, () => unawaited(_refreshAccessToken()));
+  }
+
+  Future<void> _refreshAccessToken() async {
+    final api = _api;
+    final session = _session;
+    if (_disposed || api == null || session == null) return;
+    try {
+      final refreshed = await api.refresh(session.refreshToken);
+      if (_disposed) return;
+      _session = refreshed;
+      await _sessionStore.saveRefreshToken(refreshed.refreshToken);
+      notifyListeners();
+      _scheduleAccessTokenRefresh();
+    } catch (_) {
+      // The refresh token may itself now be expired or revoked (e.g. the
+      // device was removed server-side while this session sat idle); fall
+      // back to requiring a fresh login, same as a failed refresh in
+      // [initialize].
+      if (_disposed) return;
+      _session = null;
+      await _sessionStore.clearRefreshToken();
+      _setStatus(ServerConnectionStatus.connectedLoggedOut);
+    }
   }
 
   Future<void> forgetServer() async {
@@ -228,6 +284,7 @@ final class ServerConnectionController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _refreshTimer?.cancel();
     _transport?.close();
     super.dispose();
   }

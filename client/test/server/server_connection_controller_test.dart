@@ -51,6 +51,11 @@ final class _FakeHomeBoxServer {
     await request.response.close();
   }
 
+  /// How far past "now" each issued access token expires. A real value
+  /// (rather than a fixed past timestamp) lets tests exercise
+  /// [ServerConnectionController]'s proactive pre-expiry refresh.
+  Duration accessTokenLifetime = const Duration(minutes: 15);
+
   void _writeSession(HttpRequest request, String deviceId) {
     final access = 'access-${_tokenCounter++}';
     final refresh = 'refresh-${_tokenCounter++}';
@@ -62,7 +67,10 @@ final class _FakeHomeBoxServer {
         'user': {'id': 'user-1', 'username': 'admin', 'role': 'ADMIN'},
         'device': {'id': deviceId, 'platform': 'WINDOWS'},
         'accessToken': access,
-        'accessTokenExpiresAt': '2026-01-01T00:00:00Z',
+        'accessTokenExpiresAt': DateTime.now()
+            .toUtc()
+            .add(accessTokenLifetime)
+            .toIso8601String(),
         'refreshToken': refresh,
         'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
       }));
@@ -160,6 +168,39 @@ void main() {
 
     expect(second.status, ServerConnectionStatus.authenticated);
     expect(second.session, isNotNull);
+  });
+
+  test('the access token is proactively refreshed before it expires, so an idle session never surfaces a stale-token 401', () async {
+    final fakeServer = _FakeHomeBoxServer()
+      ..accessTokenLifetime = const Duration(milliseconds: 200);
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+
+    final controller = ServerConnectionController(
+      deviceIdentityStore: DeviceIdentityStore(MemoryDevicePrivateKeyStorage()),
+      serverStore: PinnedServerStore(MemoryPinnedServerStorage()),
+      sessionStore: SessionStore(MemorySessionStorage()),
+      // Small enough that the 200ms access token lifetime above still
+      // leaves a positive delay to schedule the background refresh timer.
+      refreshBuffer: const Duration(milliseconds: 50),
+    );
+    addTearDown(controller.dispose);
+    await controller.discover('127.0.0.1:${httpServer.port}');
+    await controller.confirmTrust();
+    await controller.login('admin', 'correct horse battery staple');
+    final firstAccessToken = controller.session!.accessToken;
+
+    // Past accessTokenLifetime - refreshBuffer, giving the scheduled
+    // background refresh time to complete its own HTTP round trip.
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+
+    expect(controller.status, ServerConnectionStatus.authenticated);
+    expect(controller.session, isNotNull);
+    expect(
+      controller.session!.accessToken,
+      isNot(firstAccessToken),
+      reason: 'a new access token should have been fetched automatically',
+    );
   });
 
   test('logout clears the session but keeps the server pinned', () async {

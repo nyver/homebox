@@ -22,6 +22,7 @@ final class SensitiveNodeMetadata {
     required String fileName,
     this.mimeType,
     this.plaintextSha256,
+    this.plaintextSize,
     this.conflictDetails,
     List<String> labels = const [],
   }) : fileName = PortableName.normalizeAndValidate(fileName),
@@ -37,6 +38,9 @@ final class SensitiveNodeMetadata {
         'Plaintext SHA-256 must be 64 hexadecimal characters.',
       );
     }
+    if (plaintextSize != null && plaintextSize! < 0) {
+      throw const FormatException('Plaintext size cannot be negative.');
+    }
     if (conflictDetails != null && conflictDetails!.length > 4096) {
       throw const FormatException('Conflict details are too long.');
     }
@@ -49,6 +53,12 @@ final class SensitiveNodeMetadata {
   final String fileName;
   final String? mimeType;
   final String? plaintextSha256;
+
+  /// The file's decrypted size in bytes, so the Files page can show it
+  /// without the server (which only ever sees AEAD-chunked ciphertext)
+  /// having any notion of plaintext length. Null for directories and for
+  /// files uploaded before this field existed.
+  final int? plaintextSize;
   final String? conflictDetails;
   final List<String> labels;
 
@@ -57,6 +67,7 @@ final class SensitiveNodeMetadata {
     if (mimeType != null) 'mimeType': mimeType,
     if (plaintextSha256 != null)
       'plaintextSha256': plaintextSha256!.toLowerCase(),
+    if (plaintextSize != null) 'plaintextSize': plaintextSize,
     if (conflictDetails != null) 'conflictDetails': conflictDetails,
     if (labels.isNotEmpty) 'labels': labels,
   };
@@ -64,8 +75,12 @@ final class SensitiveNodeMetadata {
   factory SensitiveNodeMetadata.fromJson(Map<String, Object?> json) {
     final fileName = json['filename'];
     final labelsValue = json['labels'];
+    final plaintextSizeValue = json['plaintextSize'];
     if (fileName is! String) {
       throw const FormatException('Encrypted metadata has an invalid schema.');
+    }
+    if (plaintextSizeValue != null && plaintextSizeValue is! int) {
+      throw const FormatException('Encrypted metadata plaintext size is invalid.');
     }
     final List<Object?> rawLabels;
     if (labelsValue == null) {
@@ -87,6 +102,7 @@ final class SensitiveNodeMetadata {
       fileName: fileName,
       mimeType: _optionalString(json, 'mimeType'),
       plaintextSha256: _optionalString(json, 'plaintextSha256'),
+      plaintextSize: plaintextSizeValue as int?,
       conflictDetails: _optionalString(json, 'conflictDetails'),
       labels: labels,
     );
