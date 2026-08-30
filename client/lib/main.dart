@@ -927,26 +927,53 @@ final class _FilesSectionState extends State<_FilesSection> {
                         value: controller.progress,
                       ),
                     ),
-                  OutlinedButton.icon(
-                    onPressed: controller.busy
-                        ? null
-                        : () => _createFolder(context),
-                    icon: const Icon(Icons.create_new_folder_outlined),
-                    label: const Text('New folder'),
-                  ),
-                  if (widget.onCapturePhoto != null)
-                    FilledButton.tonalIcon(
-                      onPressed: controller.busy ? null : widget.onCapturePhoto,
-                      icon: const Icon(Icons.photo_camera_outlined),
-                      label: const Text('Camera'),
+                  if (defaultTargetPlatform == TargetPlatform.android) ...[
+                    IconButton(
+                      onPressed: controller.busy
+                          ? null
+                          : () => _createFolder(context),
+                      icon: const Icon(Icons.create_new_folder_outlined),
+                      tooltip: 'New folder',
                     ),
-                  FilledButton.icon(
-                    onPressed: controller.busy
-                        ? null
-                        : () => _uploadFile(context),
-                    icon: const Icon(Icons.upload_outlined),
-                    label: const Text('Upload'),
-                  ),
+                    if (widget.onCapturePhoto != null)
+                      IconButton(
+                        onPressed: controller.busy
+                            ? null
+                            : widget.onCapturePhoto,
+                        icon: const Icon(Icons.photo_camera_outlined),
+                        tooltip: 'Camera',
+                      ),
+                    IconButton(
+                      onPressed: controller.busy
+                          ? null
+                          : () => _uploadFile(context),
+                      icon: const Icon(Icons.upload_outlined),
+                      tooltip: 'Upload',
+                    ),
+                  ] else ...[
+                    OutlinedButton.icon(
+                      onPressed: controller.busy
+                          ? null
+                          : () => _createFolder(context),
+                      icon: const Icon(Icons.create_new_folder_outlined),
+                      label: const Text('New folder'),
+                    ),
+                    if (widget.onCapturePhoto != null)
+                      FilledButton.tonalIcon(
+                        onPressed: controller.busy
+                            ? null
+                            : widget.onCapturePhoto,
+                        icon: const Icon(Icons.photo_camera_outlined),
+                        label: const Text('Camera'),
+                      ),
+                    FilledButton.icon(
+                      onPressed: controller.busy
+                          ? null
+                          : () => _uploadFile(context),
+                      icon: const Icon(Icons.upload_outlined),
+                      label: const Text('Upload'),
+                    ),
+                  ],
                 ],
               ),
               if (defaultTargetPlatform == TargetPlatform.windows) ...[
