@@ -160,6 +160,10 @@ flutter build apk --release
 
 Windows builds require Visual Studio 2022 with the **Desktop development with C++** workload and the Windows 10/11 SDK. The Android release APK is written to `client/build/app/outputs/flutter-apk/app-release.apk`. It is signed with the template debug key until a production signing configuration is supplied in `client/android/app/build.gradle.kts`; do not distribute that debug-signed APK.
 
+### Windows drag-and-drop uploads
+
+The Windows Files view accepts files dropped from Explorer. Each drop captures the currently open HomeBox folder, then encrypts and uploads the selected files sequentially through the normal resumable upload flow. A bad or oversized item does not cancel the remaining files, and navigating while the transfer runs does not change their destination. Dropping directories is not supported.
+
 ## Security status
 
 Ciphertext-only server backup/restore now validates the SQLite snapshot, transport identity, and every database-referenced blob before placing a restore into a new storage directory. Manual maintenance safely cleans expired server state and uses a two-pass grace period for ciphertext garbage collection.

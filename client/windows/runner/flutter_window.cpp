@@ -2,6 +2,8 @@
 
 #include <optional>
 #include <shellapi.h>
+#include <string>
+#include <vector>
 
 #include "flutter/generated_plugin_registrant.h"
 #include <flutter/standard_method_codec.h>
@@ -14,6 +16,20 @@ constexpr UINT kTrayShowCommand = 1;
 constexpr UINT kTrayExitCommand = 2;
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"HomeBox";
+
+std::string Utf8FromWide(const std::wstring& value) {
+  if (value.empty()) return {};
+  const int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                         value.data(),
+                                         static_cast<int>(value.size()), nullptr,
+                                         0, nullptr, nullptr);
+  if (length == 0) return {};
+  std::string result(length, '\0');
+  WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+                      static_cast<int>(value.size()), result.data(), length,
+                      nullptr, nullptr);
+  return result;
+}
 
 }  // namespace
 
@@ -40,6 +56,7 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   ConfigurePlatformChannel();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  DragAcceptFiles(GetHandle(), TRUE);
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -57,6 +74,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  DragAcceptFiles(GetHandle(), FALSE);
   RemoveTrayIcon();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -69,6 +87,11 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == WM_DROPFILES) {
+    HandleFileDrop(reinterpret_cast<HDROP>(wparam));
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =
@@ -119,6 +142,27 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
+}
+
+void FlutterWindow::HandleFileDrop(HDROP drop) {
+  const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+  flutter::EncodableList paths;
+  for (UINT index = 0; index < count; index++) {
+    const UINT length = DragQueryFileW(drop, index, nullptr, 0);
+    if (length == 0) continue;
+    std::vector<wchar_t> path(length + 1);
+    if (DragQueryFileW(drop, index, path.data(),
+                       static_cast<UINT>(path.size())) == 0) {
+      continue;
+    }
+    const std::string utf8_path = Utf8FromWide(path.data());
+    if (!utf8_path.empty()) paths.emplace_back(utf8_path);
+  }
+  DragFinish(drop);
+  if (paths.empty() || !platform_channel_) return;
+  platform_channel_->InvokeMethod(
+      "filesDropped",
+      std::make_unique<flutter::EncodableValue>(std::move(paths)));
 }
 
 bool FlutterWindow::AddTrayIcon() {

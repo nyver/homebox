@@ -33,6 +33,15 @@ final class FileEntry {
   String get name => metadata.fileName;
 }
 
+/// The outcome of one user-initiated batch of file uploads.
+final class FileUploadBatchResult {
+  const FileUploadBatchResult({required this.succeeded, required this.failed});
+
+  final int succeeded;
+  final int failed;
+  int get total => succeeded + failed;
+}
+
 final class _Breadcrumb {
   const _Breadcrumb(this.id, this.name);
   final String id;
@@ -40,7 +49,13 @@ final class _Breadcrumb {
 }
 
 final class _UploadContext {
-  const _UploadContext({required this.api, required this.accessToken, required this.vaultKey, required this.vaultId, required this.userId});
+  const _UploadContext({
+    required this.api,
+    required this.accessToken,
+    required this.vaultKey,
+    required this.vaultId,
+    required this.userId,
+  });
   final transport.HomeBoxApiClient api;
   final String accessToken;
   final SecretKey vaultKey;
@@ -67,9 +82,9 @@ final class FilesController extends ChangeNotifier {
     required ServerConnectionController serverConnection,
     required VaultKeyStore vaultKeyStore,
     required SyncEngine syncEngine,
-  })  : _serverConnection = serverConnection,
-        _vaultKeyStore = vaultKeyStore,
-        _syncEngine = syncEngine {
+  }) : _serverConnection = serverConnection,
+       _vaultKeyStore = vaultKeyStore,
+       _syncEngine = syncEngine {
     _syncEngine.addListener(_onSyncEngineChanged);
   }
 
@@ -92,7 +107,8 @@ final class FilesController extends ChangeNotifier {
   bool get busy => _busy;
   double? get progress => _progress;
   bool get canGoUp => _path.isNotEmpty;
-  List<String> get breadcrumbNames => _path.map((e) => e.name).toList(growable: false);
+  List<String> get breadcrumbNames =>
+      _path.map((e) => e.name).toList(growable: false);
   String? get _currentParentId => _path.isEmpty ? null : _path.last.id;
 
   void _onSyncEngineChanged() {
@@ -116,7 +132,9 @@ final class FilesController extends ChangeNotifier {
       final decrypted = <FileEntry>[];
       for (final node in nodes) {
         try {
-          decrypted.add(FileEntry(node: node, metadata: await _decryptMetadata(node, ctx)));
+          decrypted.add(
+            FileEntry(node: node, metadata: await _decryptMetadata(node, ctx)),
+          );
         } catch (_) {
           // A node this device cannot decrypt or parse (wrong/missing key
           // version, or malformed metadata) is skipped rather than failing
@@ -175,33 +193,37 @@ final class FilesController extends ChangeNotifier {
       );
       final metadataCiphertext = envelope.encode();
       final now = DateTime.now().toUtc();
-      _syncEngine.nodeCache.upsert(LocalNode(
-        id: nodeId,
-        parentId: _currentParentId,
-        nodeType: 'DIRECTORY',
-        metadataCiphertext: metadataCiphertext,
-        metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
-        currentVersionId: null,
-        revision: 0,
-        createdAt: now,
-        updatedAt: now,
-        pendingCreate: true,
-      ));
-      _syncEngine.pendingOperations.enqueue(PendingOperation(
-        id: generateUuidV4(),
-        operationId: generateUuidV4(),
-        type: PendingOperationType.createNode,
-        nodeId: nodeId,
-        payload: {
-          'parentId': _currentParentId,
-          'nodeType': 'DIRECTORY',
-          'metadataCiphertext': base64Encode(metadataCiphertext),
-          'metadataKeyVersion': homeBoxPersonalVaultKeyVersion,
-        },
-        createdAt: now,
-        retryCount: 0,
-        status: PendingOperationStatus.pending,
-      ));
+      _syncEngine.nodeCache.upsert(
+        LocalNode(
+          id: nodeId,
+          parentId: _currentParentId,
+          nodeType: 'DIRECTORY',
+          metadataCiphertext: metadataCiphertext,
+          metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+          currentVersionId: null,
+          revision: 0,
+          createdAt: now,
+          updatedAt: now,
+          pendingCreate: true,
+        ),
+      );
+      _syncEngine.pendingOperations.enqueue(
+        PendingOperation(
+          id: generateUuidV4(),
+          operationId: generateUuidV4(),
+          type: PendingOperationType.createNode,
+          nodeId: nodeId,
+          payload: {
+            'parentId': _currentParentId,
+            'nodeType': 'DIRECTORY',
+            'metadataCiphertext': base64Encode(metadataCiphertext),
+            'metadataKeyVersion': homeBoxPersonalVaultKeyVersion,
+          },
+          createdAt: now,
+          retryCount: 0,
+          status: PendingOperationStatus.pending,
+        ),
+      );
       unawaited(_syncEngine.runOnce());
       await refresh();
       return true;
@@ -215,33 +237,52 @@ final class FilesController extends ChangeNotifier {
   /// Renames or moves an existing node the same local-first way as
   /// [createFolder]. [newParentId] of `null` with [move] true means "move
   /// to root"; omit [move] (default false) for a pure rename.
-  Future<bool> renameNode(FileEntry entry, String newName, {bool move = false, String? newParentId}) async {
+  Future<bool> renameNode(
+    FileEntry entry,
+    String newName, {
+    bool move = false,
+    String? newParentId,
+  }) async {
     final ctx = await _requireContext();
     if (ctx == null) return false;
     try {
       final envelope = await _metadataCipher.encrypt(
-        metadata: SensitiveNodeMetadata(fileName: newName, mimeType: entry.metadata.mimeType, plaintextSha256: entry.metadata.plaintextSha256),
+        metadata: SensitiveNodeMetadata(
+          fileName: newName,
+          mimeType: entry.metadata.mimeType,
+          plaintextSha256: entry.metadata.plaintextSha256,
+        ),
         metadataKey: ctx.vaultKey,
         keyVersion: homeBoxPersonalVaultKeyVersion,
-        nodeType: entry.isDirectory ? MetadataNodeType.directory : MetadataNodeType.file,
+        nodeType: entry.isDirectory
+            ? MetadataNodeType.directory
+            : MetadataNodeType.file,
         scopeId: ctx.vaultId,
         nodeId: uuidStringToBytes(entry.node.id),
       );
       final metadataCiphertext = envelope.encode();
       final targetParentId = move ? newParentId : entry.node.parentId;
-      _syncEngine.nodeCache.upsert(LocalNode(
-        id: entry.node.id,
-        parentId: targetParentId,
-        nodeType: entry.node.nodeType,
+      _syncEngine.nodeCache.upsert(
+        LocalNode(
+          id: entry.node.id,
+          parentId: targetParentId,
+          nodeType: entry.node.nodeType,
+          metadataCiphertext: metadataCiphertext,
+          metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+          currentVersionId: entry.node.currentVersionId,
+          revision: entry.node.revision,
+          createdAt: entry.node.createdAt,
+          updatedAt: DateTime.now().toUtc(),
+          pendingCreate: entry.node.pendingCreate,
+        ),
+      );
+      _enqueueUpdate(
+        entry.node,
+        baseRevision: entry.node.revision,
         metadataCiphertext: metadataCiphertext,
-        metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
-        currentVersionId: entry.node.currentVersionId,
-        revision: entry.node.revision,
-        createdAt: entry.node.createdAt,
-        updatedAt: DateTime.now().toUtc(),
-        pendingCreate: entry.node.pendingCreate,
-      ));
-      _enqueueUpdate(entry.node, baseRevision: entry.node.revision, metadataCiphertext: metadataCiphertext, moveParent: move, parentId: targetParentId);
+        moveParent: move,
+        parentId: targetParentId,
+      );
       unawaited(_syncEngine.runOnce());
       await refresh();
       return true;
@@ -259,30 +300,34 @@ final class FilesController extends ChangeNotifier {
     if (ctx == null) return false;
     try {
       final now = DateTime.now().toUtc();
-      _syncEngine.nodeCache.upsert(LocalNode(
-        id: entry.node.id,
-        parentId: entry.node.parentId,
-        nodeType: entry.node.nodeType,
-        metadataCiphertext: entry.node.metadataCiphertext,
-        metadataKeyVersion: entry.node.metadataKeyVersion,
-        currentVersionId: entry.node.currentVersionId,
-        revision: entry.node.revision,
-        createdAt: entry.node.createdAt,
-        updatedAt: now,
-        deletedAt: now,
-        pendingCreate: entry.node.pendingCreate,
-      ));
-      _syncEngine.pendingOperations.enqueue(PendingOperation(
-        id: generateUuidV4(),
-        operationId: generateUuidV4(),
-        type: PendingOperationType.deleteNode,
-        nodeId: entry.node.id,
-        payload: const {},
-        baseRevision: entry.node.revision,
-        createdAt: now,
-        retryCount: 0,
-        status: PendingOperationStatus.pending,
-      ));
+      _syncEngine.nodeCache.upsert(
+        LocalNode(
+          id: entry.node.id,
+          parentId: entry.node.parentId,
+          nodeType: entry.node.nodeType,
+          metadataCiphertext: entry.node.metadataCiphertext,
+          metadataKeyVersion: entry.node.metadataKeyVersion,
+          currentVersionId: entry.node.currentVersionId,
+          revision: entry.node.revision,
+          createdAt: entry.node.createdAt,
+          updatedAt: now,
+          deletedAt: now,
+          pendingCreate: entry.node.pendingCreate,
+        ),
+      );
+      _syncEngine.pendingOperations.enqueue(
+        PendingOperation(
+          id: generateUuidV4(),
+          operationId: generateUuidV4(),
+          type: PendingOperationType.deleteNode,
+          nodeId: entry.node.id,
+          payload: const {},
+          baseRevision: entry.node.revision,
+          createdAt: now,
+          retryCount: 0,
+          status: PendingOperationStatus.pending,
+        ),
+      );
       unawaited(_syncEngine.runOnce());
       await refresh();
       return true;
@@ -293,23 +338,33 @@ final class FilesController extends ChangeNotifier {
     }
   }
 
-  void _enqueueUpdate(LocalNode node, {required int baseRevision, Uint8List? metadataCiphertext, bool moveParent = false, String? parentId}) {
-    _syncEngine.pendingOperations.enqueue(PendingOperation(
-      id: generateUuidV4(),
-      operationId: generateUuidV4(),
-      type: PendingOperationType.updateNode,
-      nodeId: node.id,
-      payload: {
-        if (metadataCiphertext != null) 'metadataCiphertext': base64Encode(metadataCiphertext),
-        if (metadataCiphertext != null) 'metadataKeyVersion': homeBoxPersonalVaultKeyVersion,
-        'moveParent': moveParent,
-        'parentId': parentId,
-      },
-      baseRevision: baseRevision,
-      createdAt: DateTime.now().toUtc(),
-      retryCount: 0,
-      status: PendingOperationStatus.pending,
-    ));
+  void _enqueueUpdate(
+    LocalNode node, {
+    required int baseRevision,
+    Uint8List? metadataCiphertext,
+    bool moveParent = false,
+    String? parentId,
+  }) {
+    _syncEngine.pendingOperations.enqueue(
+      PendingOperation(
+        id: generateUuidV4(),
+        operationId: generateUuidV4(),
+        type: PendingOperationType.updateNode,
+        nodeId: node.id,
+        payload: {
+          if (metadataCiphertext != null)
+            'metadataCiphertext': base64Encode(metadataCiphertext),
+          if (metadataCiphertext != null)
+            'metadataKeyVersion': homeBoxPersonalVaultKeyVersion,
+          'moveParent': moveParent,
+          'parentId': parentId,
+        },
+        baseRevision: baseRevision,
+        createdAt: DateTime.now().toUtc(),
+        retryCount: 0,
+        status: PendingOperationStatus.pending,
+      ),
+    );
   }
 
   /// Encrypts and uploads a local file (spec §22): a new opaque node, a
@@ -320,70 +375,124 @@ final class FilesController extends ChangeNotifier {
   /// unfinished). Unlike folder/rename/delete, this requires connectivity
   /// up front rather than queuing — see the class doc comment.
   Future<bool> uploadFile(String localPath) async {
-    final ctx = await _requireContext();
-    if (ctx == null) return false;
-    _setBusy(true);
-    try {
-      final file = File(localPath);
-      final plaintextLength = await file.length();
-      if (plaintextLength > homeBoxMaxPlaintextFileSize) {
-        throw const FormatException('HomeBox files are limited to 500 MiB.');
-      }
-      final fileName = _basename(localPath);
-      final plaintextHash = await plaintextFileSha256(file);
+    final result = await uploadFiles([localPath]);
+    return result.succeeded == 1;
+  }
 
-      final nodeId = generateUuidV4();
-      final nodeIdBytes = uuidStringToBytes(nodeId);
-
-      final metadataEnvelope = await _metadataCipher.encrypt(
-        metadata: SensitiveNodeMetadata(fileName: fileName, plaintextSha256: plaintextHash),
-        metadataKey: ctx.vaultKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
-        nodeType: MetadataNodeType.file,
-        scopeId: ctx.vaultId,
-        nodeId: nodeIdBytes,
-      );
-      final metadataCiphertext = metadataEnvelope.encode();
-
-      final createdNode = await ctx.api.createNode(
-        ctx.accessToken,
-        id: nodeId,
-        operationId: generateUuidV4(),
-        parentId: _currentParentId,
-        nodeType: 'FILE',
-        metadataCiphertext: metadataCiphertext,
-        metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
-      );
-      _upsertFromServer(createdNode);
-
-      final updatedNode = await uploadFilePathVersion(
-        api: ctx.api,
-        accessToken: ctx.accessToken,
-        vaultKey: ctx.vaultKey,
-        vaultId: ctx.vaultId,
-        keyScopeId: ctx.userId,
-        targetNodeId: nodeId,
-        expectedRevision: createdNode.revision,
-        file: file,
-        plaintextLength: plaintextLength,
-        expectedPlaintextSha256: plaintextHash,
-        metadataCiphertext: metadataCiphertext,
-        onProgress: _setProgress,
-      );
-      _upsertFromServer(updatedNode);
-
-      await refresh();
-      return true;
-    } catch (e) {
-      // Broad on purpose: StateError/ArgumentError (thrown by this class's
-      // own checks) do not extend Exception, so `on Exception` would miss
-      // them and crash instead of surfacing errorMessage.
-      _errorMessage = '$e';
+  /// Encrypts and uploads [localPaths] sequentially into the folder that was
+  /// open when this call started. Sequential uploads keep memory and network
+  /// use bounded, and a failure for one dropped file does not discard the
+  /// others.
+  Future<FileUploadBatchResult> uploadFiles(List<String> localPaths) async {
+    final uniquePaths = <String>[];
+    final seen = <String>{};
+    for (final path in localPaths) {
+      if (path.isNotEmpty && seen.add(path)) uniquePaths.add(path);
+    }
+    if (uniquePaths.isEmpty) {
+      return const FileUploadBatchResult(succeeded: 0, failed: 0);
+    }
+    if (_busy) {
+      _errorMessage = 'Another file transfer is already in progress.';
       notifyListeners();
-      return false;
+      return FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length);
+    }
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      return FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length);
+    }
+    // Capture this before any asynchronous work. A user may navigate while a
+    // large drop is uploading, but that must not move later files elsewhere.
+    final targetParentId = _currentParentId;
+    _setBusy(true);
+    _errorMessage = null;
+    var succeeded = 0;
+    var failed = 0;
+    try {
+      for (var index = 0; index < uniquePaths.length; index++) {
+        try {
+          await _uploadFileToParent(
+            localPath: uniquePaths[index],
+            ctx: ctx,
+            parentId: targetParentId,
+            onProgress: (progress) =>
+                _setProgress((index + progress) / uniquePaths.length),
+          );
+          succeeded++;
+        } catch (e) {
+          // Continue so a single unreadable or oversized dropped file does
+          // not prevent the rest of the selection from being backed up.
+          failed++;
+          _errorMessage = '$e';
+          notifyListeners();
+        }
+      }
+      await refresh();
+      return FileUploadBatchResult(succeeded: succeeded, failed: failed);
     } finally {
       _setBusy(false);
     }
+  }
+
+  Future<void> _uploadFileToParent({
+    required String localPath,
+    required _UploadContext ctx,
+    required String? parentId,
+    required void Function(double progress) onProgress,
+  }) async {
+    final file = File(localPath);
+    if (!await file.exists()) {
+      throw const FormatException(
+        'The selected item is no longer a readable file.',
+      );
+    }
+    final plaintextLength = await file.length();
+    if (plaintextLength > homeBoxMaxPlaintextFileSize) {
+      throw const FormatException('HomeBox files are limited to 500 MiB.');
+    }
+    final fileName = _basename(localPath);
+    final plaintextHash = await plaintextFileSha256(file);
+
+    final nodeId = generateUuidV4();
+    final nodeIdBytes = uuidStringToBytes(nodeId);
+    final metadataEnvelope = await _metadataCipher.encrypt(
+      metadata: SensitiveNodeMetadata(
+        fileName: fileName,
+        plaintextSha256: plaintextHash,
+      ),
+      metadataKey: ctx.vaultKey,
+      keyVersion: homeBoxPersonalVaultKeyVersion,
+      nodeType: MetadataNodeType.file,
+      scopeId: ctx.vaultId,
+      nodeId: nodeIdBytes,
+    );
+    final metadataCiphertext = metadataEnvelope.encode();
+    final createdNode = await ctx.api.createNode(
+      ctx.accessToken,
+      id: nodeId,
+      operationId: generateUuidV4(),
+      parentId: parentId,
+      nodeType: 'FILE',
+      metadataCiphertext: metadataCiphertext,
+      metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+    );
+    _upsertFromServer(createdNode);
+
+    final updatedNode = await uploadFilePathVersion(
+      api: ctx.api,
+      accessToken: ctx.accessToken,
+      vaultKey: ctx.vaultKey,
+      vaultId: ctx.vaultId,
+      keyScopeId: ctx.userId,
+      targetNodeId: nodeId,
+      expectedRevision: createdNode.revision,
+      file: file,
+      plaintextLength: plaintextLength,
+      expectedPlaintextSha256: plaintextHash,
+      metadataCiphertext: metadataCiphertext,
+      onProgress: onProgress,
+    );
+    _upsertFromServer(updatedNode);
   }
 
   /// Uploads [localPath] as a new version of an already-existing file
@@ -417,7 +526,10 @@ final class FilesController extends ChangeNotifier {
       }
       final plaintextHash = await plaintextFileSha256(file);
       final metadataEnvelope = await _metadataCipher.encrypt(
-        metadata: SensitiveNodeMetadata(fileName: entry.name, plaintextSha256: plaintextHash),
+        metadata: SensitiveNodeMetadata(
+          fileName: entry.name,
+          plaintextSha256: plaintextHash,
+        ),
         metadataKey: ctx.vaultKey,
         keyVersion: homeBoxPersonalVaultKeyVersion,
         nodeType: MetadataNodeType.file,
@@ -506,12 +618,17 @@ final class FilesController extends ChangeNotifier {
     _syncEngine.nodeCache.upsert(localNodeFromServerNode(node));
   }
 
-  Future<SensitiveNodeMetadata> _decryptMetadata(LocalNode node, _UploadContext ctx) {
+  Future<SensitiveNodeMetadata> _decryptMetadata(
+    LocalNode node,
+    _UploadContext ctx,
+  ) {
     final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
     return _metadataCipher.decrypt(
       envelope: envelope,
       metadataKey: ctx.vaultKey,
-      nodeType: node.isDirectory ? MetadataNodeType.directory : MetadataNodeType.file,
+      nodeType: node.isDirectory
+          ? MetadataNodeType.directory
+          : MetadataNodeType.file,
       scopeId: ctx.vaultId,
       nodeId: uuidStringToBytes(node.id),
     );
@@ -522,7 +639,8 @@ final class FilesController extends ChangeNotifier {
     final session = _serverConnection.session;
     final vaultKey = await _vaultKeyStore.loadVaultKey();
     if (api == null || session == null || vaultKey == null) {
-      _errorMessage = 'Connect to a server, sign in, and set up the vault first.';
+      _errorMessage =
+          'Connect to a server, sign in, and set up the vault first.';
       return null;
     }
     return _UploadContext(

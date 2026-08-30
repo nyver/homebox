@@ -32,7 +32,8 @@ final class _FakeServer {
   final Map<String, Map<String, dynamic>> _nodes = {};
   final Map<String, List<Uint8List>> _uploadChunks = {};
   final Map<String, Map<String, dynamic>> _uploadSessions = {};
-  final Map<String, List<Map<String, dynamic>>> _fileVersions = {}; // by nodeId, newest first
+  final Map<String, List<Map<String, dynamic>>> _fileVersions =
+      {}; // by nodeId, newest first
   final Map<String, Uint8List> _blobs = {}; // by nodeId
 
   Future<HttpServer> start() => startFixtureServer(_handle);
@@ -41,7 +42,9 @@ final class _FakeServer {
     final path = request.uri.path;
     final method = request.method;
     if (method == 'POST' && path == '/api/v1/auth/login') {
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       final deviceId = (body['device'] as Map<String, dynamic>)['id'] as String;
       _writeJson(request, 200, {
         'user': {'id': userId, 'username': 'admin', 'role': 'ADMIN'},
@@ -52,7 +55,9 @@ final class _FakeServer {
         'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
       });
     } else if (method == 'POST' && path == '/api/v1/nodes') {
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       final id = body['id'] as String;
       final node = {
         'id': id,
@@ -70,23 +75,39 @@ final class _FakeServer {
       _writeJson(request, 201, node);
     } else if (method == 'GET' && path == '/api/v1/nodes/children') {
       final parentId = request.uri.queryParameters['parentId'];
-      final children = _nodes.values.where((n) => n['parentId'] == parentId && n['deletedAt'] == null).toList();
+      final children = _nodes.values
+          .where((n) => n['parentId'] == parentId && n['deletedAt'] == null)
+          .toList();
       _writeJson(request, 200, children);
     } else if (method == 'GET' && path == '/api/v1/sync/changes') {
-      _writeJson(request, 200, {'changes': <dynamic>[], 'nextAfter': 0, 'hasMore': false});
+      _writeJson(request, 200, {
+        'changes': <dynamic>[],
+        'nextAfter': 0,
+        'hasMore': false,
+      });
     } else if (method == 'PATCH' && path.startsWith('/api/v1/nodes/')) {
       final id = path.substring('/api/v1/nodes/'.length);
       final node = _nodes[id];
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       if (node == null) {
         _writeJson(request, 404, {
-          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'not found',
+            'requestId': 'req',
+          },
         });
         return;
       }
       if (node['revision'] != body['expectedRevision']) {
         _writeJson(request, 409, {
-          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+          'error': {
+            'code': 'REVISION_CONFLICT',
+            'message': 'stale revision',
+            'requestId': 'req',
+          },
         });
         return;
       }
@@ -102,16 +123,26 @@ final class _FakeServer {
     } else if (method == 'DELETE' && path.startsWith('/api/v1/nodes/')) {
       final id = path.substring('/api/v1/nodes/'.length);
       final node = _nodes[id];
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       if (node == null) {
         _writeJson(request, 404, {
-          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'not found',
+            'requestId': 'req',
+          },
         });
         return;
       }
       if (node['revision'] != body['expectedRevision']) {
         _writeJson(request, 409, {
-          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+          'error': {
+            'code': 'REVISION_CONFLICT',
+            'message': 'stale revision',
+            'requestId': 'req',
+          },
         });
         return;
       }
@@ -124,17 +155,30 @@ final class _FakeServer {
       final node = _nodes[id];
       if (node == null) {
         _writeJson(request, 404, {
-          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'not found',
+            'requestId': 'req',
+          },
         });
       } else {
         _writeJson(request, 200, node);
       }
     } else if (method == 'POST' && path == '/api/v1/uploads') {
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       final uploadId = generateUuidV4();
       _uploadSessions[uploadId] = body;
-      _uploadChunks[uploadId] = List.filled(body['chunkCount'] as int, Uint8List(0));
-      _writeJson(request, 201, {'id': uploadId, 'chunkCount': body['chunkCount'], 'receivedChunks': <int>[]});
+      _uploadChunks[uploadId] = List.filled(
+        body['chunkCount'] as int,
+        Uint8List(0),
+      );
+      _writeJson(request, 201, {
+        'id': uploadId,
+        'chunkCount': body['chunkCount'],
+        'receivedChunks': <int>[],
+      });
     } else if (method == 'PUT' && path.contains('/chunks/')) {
       final segments = request.uri.pathSegments;
       final uploadId = segments[segments.length - 3];
@@ -143,14 +187,21 @@ final class _FakeServer {
       request.response.statusCode = 204;
       await request.response.close();
     } else if (method == 'POST' && path.endsWith('/complete')) {
-      final uploadId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final uploadId =
+          request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       final session = _uploadSessions[uploadId]!;
       final nodeId = session['targetNodeId'] as String;
       final node = _nodes[nodeId]!;
       if (node['revision'] != body['expectedRevision']) {
         _writeJson(request, 409, {
-          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+          'error': {
+            'code': 'REVISION_CONFLICT',
+            'message': 'stale revision',
+            'requestId': 'req',
+          },
         });
         return;
       }
@@ -173,12 +224,18 @@ final class _FakeServer {
       });
       node['currentVersionId'] = fileVersionId;
       node['revision'] = newRevision;
-      _writeJson(request, 200, {'blobId': session['blobId'], 'fileVersionId': fileVersionId, 'revision': newRevision});
+      _writeJson(request, 200, {
+        'blobId': session['blobId'],
+        'fileVersionId': fileVersionId,
+        'revision': newRevision,
+      });
     } else if (method == 'GET' && path.endsWith('/versions')) {
-      final nodeId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final nodeId =
+          request.uri.pathSegments[request.uri.pathSegments.length - 2];
       _writeJson(request, 200, _fileVersions[nodeId] ?? <dynamic>[]);
     } else if (method == 'GET' && path.endsWith('/content')) {
-      final nodeId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final nodeId =
+          request.uri.pathSegments[request.uri.pathSegments.length - 2];
       final blob = _blobs[nodeId];
       if (blob == null) {
         request.response.statusCode = 404;
@@ -230,7 +287,9 @@ Future<void> _awaitBackgroundSync(SyncEngine engine) async {
   }
 }
 
-Future<ServerConnectionController> _connectedAndSignedIn(HttpServer httpServer) async {
+Future<ServerConnectionController> _connectedAndSignedIn(
+  HttpServer httpServer,
+) async {
   final controller = ServerConnectionController(
     deviceIdentityStore: DeviceIdentityStore(MemoryDevicePrivateKeyStorage()),
     serverStore: PinnedServerStore(MemoryPinnedServerStorage()),
@@ -240,7 +299,9 @@ Future<ServerConnectionController> _connectedAndSignedIn(HttpServer httpServer) 
   await controller.confirmTrust();
   await controller.login('admin', 'correct horse battery staple');
   if (controller.status != ServerConnectionStatus.authenticated) {
-    throw StateError('test setup failed to authenticate: ${controller.errorMessage}');
+    throw StateError(
+      'test setup failed to authenticate: ${controller.errorMessage}',
+    );
   }
   return controller;
 }
@@ -253,7 +314,10 @@ void main() {
       sessionStore: SessionStore(MemorySessionStorage()),
     );
     addTearDown(serverConnection.dispose);
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
     final controller = FilesController(
       serverConnection: serverConnection,
@@ -275,12 +339,21 @@ void main() {
     addTearDown(serverConnection.dispose);
 
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: _FakeServer.userId);
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
     recoverySecret.destroy();
 
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
-    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(controller.dispose);
 
     expect(await controller.createFolder('Documents'), isTrue);
@@ -294,13 +367,21 @@ void main() {
     expect(controller.breadcrumbNames, ['Documents']);
     expect(controller.entries, isEmpty);
 
-    final tempDir = await Directory.systemTemp.createTemp('homebox_files_test_');
+    final tempDir = await Directory.systemTemp.createTemp(
+      'homebox_files_test_',
+    );
     addTearDown(() => tempDir.delete(recursive: true));
     final sourceFile = File('${tempDir.path}/photo.jpg');
-    final originalBytes = Uint8List.fromList(List<int>.generate(10 * 1024 + 7, (i) => i % 256));
+    final originalBytes = Uint8List.fromList(
+      List<int>.generate(10 * 1024 + 7, (i) => i % 256),
+    );
     await sourceFile.writeAsBytes(originalBytes);
 
-    expect(await controller.uploadFile(sourceFile.path), isTrue, reason: controller.errorMessage);
+    expect(
+      await controller.uploadFile(sourceFile.path),
+      isTrue,
+      reason: controller.errorMessage,
+    );
     expect(controller.entries, hasLength(1));
     final uploaded = controller.entries.single;
     expect(uploaded.name, 'photo.jpg');
@@ -308,9 +389,64 @@ void main() {
     expect(uploaded.metadata.plaintextSha256, isNotNull);
 
     final destinationPath = '${tempDir.path}/downloaded.jpg';
-    expect(await controller.downloadFile(uploaded, destinationPath), isTrue, reason: controller.errorMessage);
+    expect(
+      await controller.downloadFile(uploaded, destinationPath),
+      isTrue,
+      reason: controller.errorMessage,
+    );
     final downloadedBytes = await File(destinationPath).readAsBytes();
     expect(downloadedBytes, originalBytes);
+  });
+
+  test('uploadFiles keeps a dropped batch in its opening folder and continues after one bad path', () async {
+    final fakeServer = _FakeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(controller.dispose);
+
+    expect(await controller.createFolder('Dropped files'), isTrue);
+    controller.openFolder(controller.entries.single);
+    await pumpEventQueue();
+
+    final tempDir = await Directory.systemTemp.createTemp('homebox_drop_test_');
+    addTearDown(() => tempDir.delete(recursive: true));
+    final first = File('${tempDir.path}/first.txt');
+    final second = File('${tempDir.path}/second.txt');
+    await first.writeAsString('first');
+    await second.writeAsString('second');
+
+    final result = await controller.uploadFiles([
+      first.path,
+      '${tempDir.path}/no-longer-here.txt',
+      second.path,
+    ]);
+
+    expect(result.succeeded, 2);
+    expect(result.failed, 1);
+    expect(controller.entries.map((entry) => entry.name), [
+      'first.txt',
+      'second.txt',
+    ]);
+    for (final entry in controller.entries) {
+      expect(fakeServer._nodes[entry.node.id]!['parentId'], isNotNull);
+    }
   });
 
   test('replaceFileContent adds a new version without creating a new node, and download fetches the latest', () async {
@@ -320,32 +456,68 @@ void main() {
     final serverConnection = await _connectedAndSignedIn(httpServer);
     addTearDown(serverConnection.dispose);
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: _FakeServer.userId);
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
     recoverySecret.destroy();
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
-    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(controller.dispose);
 
-    final tempDir = await Directory.systemTemp.createTemp('homebox_files_test_');
+    final tempDir = await Directory.systemTemp.createTemp(
+      'homebox_files_test_',
+    );
     addTearDown(() => tempDir.delete(recursive: true));
     final sourceFile = File('${tempDir.path}/note.txt');
     await sourceFile.writeAsBytes(utf8.encode('version one'));
-    expect(await controller.uploadFile(sourceFile.path), isTrue, reason: controller.errorMessage);
+    expect(
+      await controller.uploadFile(sourceFile.path),
+      isTrue,
+      reason: controller.errorMessage,
+    );
     final firstVersion = controller.entries.single;
     final revisionAfterFirstUpload = firstVersion.node.revision;
 
-    await sourceFile.writeAsBytes(utf8.encode('version two, replacing the first'));
-    expect(await controller.replaceFileContent(firstVersion, sourceFile.path), isTrue, reason: controller.errorMessage);
-    expect(controller.entries, hasLength(1), reason: 'no new node should have been created');
+    await sourceFile.writeAsBytes(
+      utf8.encode('version two, replacing the first'),
+    );
+    expect(
+      await controller.replaceFileContent(firstVersion, sourceFile.path),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    expect(
+      controller.entries,
+      hasLength(1),
+      reason: 'no new node should have been created',
+    );
     final secondVersion = controller.entries.single;
     expect(secondVersion.node.id, firstVersion.node.id);
     expect(secondVersion.node.revision, greaterThan(revisionAfterFirstUpload));
-    expect(fakeServer._fileVersions[firstVersion.node.id], hasLength(2), reason: 'the earlier version must remain retrievable');
+    expect(
+      fakeServer._fileVersions[firstVersion.node.id],
+      hasLength(2),
+      reason: 'the earlier version must remain retrievable',
+    );
 
     final destinationPath = '${tempDir.path}/downloaded.txt';
-    expect(await controller.downloadFile(secondVersion, destinationPath), isTrue, reason: controller.errorMessage);
-    expect(await File(destinationPath).readAsString(), 'version two, replacing the first');
+    expect(
+      await controller.downloadFile(secondVersion, destinationPath),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    expect(
+      await File(destinationPath).readAsString(),
+      'version two, replacing the first',
+    );
   });
 
   test('renameNode and deleteNode apply locally right away and reach the server through the outbox', () async {
@@ -355,29 +527,66 @@ void main() {
     final serverConnection = await _connectedAndSignedIn(httpServer);
     addTearDown(serverConnection.dispose);
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: _FakeServer.userId);
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
     recoverySecret.destroy();
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
-    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(controller.dispose);
 
     expect(await controller.createFolder('Docs'), isTrue);
-    await _awaitBackgroundSync(syncEngine); // let the background push (fired by createFolder) reach the fake server.
+    await _awaitBackgroundSync(
+      syncEngine,
+    ); // let the background push (fired by createFolder) reach the fake server.
     await controller.refresh(); // pick up the confirmed revision, not the pre-push optimistic one.
     final folder = controller.entries.single;
-    expect(fakeServer._nodes[folder.node.id], isNotNull, reason: 'the create should have reached the fake server');
-    expect(folder.node.revision, 1, reason: 'the local cache should reflect the server-confirmed revision by now');
+    expect(
+      fakeServer._nodes[folder.node.id],
+      isNotNull,
+      reason: 'the create should have reached the fake server',
+    );
+    expect(
+      folder.node.revision,
+      1,
+      reason:
+          'the local cache should reflect the server-confirmed revision by now',
+    );
 
     expect(await controller.renameNode(folder, 'Renamed'), isTrue);
-    expect(controller.entries.single.name, 'Renamed', reason: 'the local cache reflects the rename immediately, offline or not');
+    expect(
+      controller.entries.single.name,
+      'Renamed',
+      reason: 'the local cache reflects the rename immediately, offline or not',
+    );
     await _awaitBackgroundSync(syncEngine);
-    expect(fakeServer._nodes[folder.node.id]!['revision'], 2, reason: 'the rename should have reached the fake server');
+    expect(
+      fakeServer._nodes[folder.node.id]!['revision'],
+      2,
+      reason: 'the rename should have reached the fake server',
+    );
 
     expect(await controller.deleteNode(controller.entries.single), isTrue);
-    expect(controller.entries, isEmpty, reason: 'a soft-deleted node disappears from its parent listing immediately');
+    expect(
+      controller.entries,
+      isEmpty,
+      reason:
+          'a soft-deleted node disappears from its parent listing immediately',
+    );
     await _awaitBackgroundSync(syncEngine);
-    expect(fakeServer._nodes[folder.node.id]!['deletedAt'], isNotNull, reason: 'the delete should have reached the fake server');
+    expect(
+      fakeServer._nodes[folder.node.id]!['deletedAt'],
+      isNotNull,
+      reason: 'the delete should have reached the fake server',
+    );
   });
 
   test('downloadFile refuses to save content whose plaintext hash does not match the encrypted metadata', () async {
@@ -387,14 +596,25 @@ void main() {
     final serverConnection = await _connectedAndSignedIn(httpServer);
     addTearDown(serverConnection.dispose);
     final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(userId: _FakeServer.userId);
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
     recoverySecret.destroy();
-    final syncEngine = SyncEngine(serverConnection: serverConnection, localDatabase: LocalDatabase.openInMemory());
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
     addTearDown(syncEngine.dispose);
-    final controller = FilesController(serverConnection: serverConnection, vaultKeyStore: vaultKeyStore, syncEngine: syncEngine);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
     addTearDown(controller.dispose);
 
-    final tempDir = await Directory.systemTemp.createTemp('homebox_files_test_');
+    final tempDir = await Directory.systemTemp.createTemp(
+      'homebox_files_test_',
+    );
     addTearDown(() => tempDir.delete(recursive: true));
     final sourceFile = File('${tempDir.path}/note.txt');
     await sourceFile.writeAsBytes(utf8.encode('original content'));

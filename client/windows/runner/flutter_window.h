@@ -29,6 +29,7 @@ class FlutterWindow : public Win32Window {
   void RemoveTrayIcon();
   void ShowFromTray();
   void ConfigurePlatformChannel();
+  void HandleFileDrop(HDROP drop);
   bool IsAutostartEnabled() const;
   bool SetAutostartEnabled(bool enabled) const;
 

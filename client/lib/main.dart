@@ -9,6 +9,7 @@ import 'core/e2ee/device_identity.dart';
 import 'core/e2ee/vault_key_store.dart';
 import 'core/platform/camera_photo_picker.dart';
 import 'core/platform/windows_autostart.dart';
+import 'core/platform/windows_file_drop.dart';
 import 'core/storage/local_database.dart';
 import 'features/device/device_setup_controller.dart';
 import 'features/files/files_controller.dart';
@@ -117,7 +118,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _vaultSetupController = VaultSetupController(_vaultKeyStore);
     _syncFolderStore = widget.syncFolderStore ?? SyncFolderStore();
     _syncFolderWatcher = SyncFolderWatcher(onChange: _runSyncFolderPass);
-    _cameraPhotoPicker = widget.cameraPhotoPicker ?? ImagePickerCameraPhotoPicker();
+    _cameraPhotoPicker =
+        widget.cameraPhotoPicker ?? ImagePickerCameraPhotoPicker();
     unawaited(_deviceSetupController.initialize());
     unawaited(_initializeServerConnection());
     unawaited(_vaultSetupController.initialize());
@@ -259,7 +261,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('HomeBox could not recover the captured photo.')),
+          const SnackBar(
+            content: Text('HomeBox could not recover the captured photo.'),
+          ),
         );
       }
     }
@@ -282,7 +286,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   Future<void> _uploadRecoveredCameraPhotoIfReady() async {
     final path = _recoveredCameraPhotoPath;
     if (path == null ||
-        _serverConnectionController.status != ServerConnectionStatus.authenticated ||
+        _serverConnectionController.status !=
+            ServerConnectionStatus.authenticated ||
         _vaultSetupController.status != VaultSetupStatus.ready ||
         _filesController == null) {
       return;
@@ -291,7 +296,10 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     await _uploadCameraPhoto(path, recovered: true);
   }
 
-  Future<void> _uploadCameraPhoto(String path, {required bool recovered}) async {
+  Future<void> _uploadCameraPhoto(
+    String path, {
+    required bool recovered,
+  }) async {
     final files = _filesController;
     if (files == null) return;
     final uploaded = await files.uploadFile(path);
@@ -599,14 +607,31 @@ class _SectionContent extends StatelessWidget {
   };
 }
 
-final class _FilesSection extends StatelessWidget {
+final class _FilesSection extends StatefulWidget {
   const _FilesSection({required this.controller, required this.onCapturePhoto});
 
   final FilesController? controller;
   final Future<void> Function()? onCapturePhoto;
 
+  @override
+  State<_FilesSection> createState() => _FilesSectionState();
+}
+
+final class _FilesSectionState extends State<_FilesSection> {
+  @override
+  void initState() {
+    super.initState();
+    unawaited(WindowsFileDrop.listen(_uploadDroppedFiles));
+  }
+
+  @override
+  void dispose() {
+    WindowsFileDrop.stopListening();
+    super.dispose();
+  }
+
   Future<void> _createFolder(BuildContext context) async {
-    final controller = this.controller;
+    final controller = widget.controller;
     if (controller == null) return;
     final nameController = TextEditingController();
     final name = await showDialog<String>(
@@ -645,7 +670,7 @@ final class _FilesSection extends StatelessWidget {
   }
 
   Future<void> _uploadFile(BuildContext context) async {
-    final controller = this.controller;
+    final controller = widget.controller;
     if (controller == null) return;
     final file = await openFile();
     if (file == null) return;
@@ -658,7 +683,7 @@ final class _FilesSection extends StatelessWidget {
   }
 
   Future<void> _downloadFile(BuildContext context, FileEntry entry) async {
-    final controller = this.controller;
+    final controller = widget.controller;
     if (controller == null) return;
     final destination = await getSaveLocation(suggestedName: entry.name);
     if (destination == null) return;
@@ -677,7 +702,7 @@ final class _FilesSection extends StatelessWidget {
   }
 
   Future<void> _replaceContent(BuildContext context, FileEntry entry) async {
-    final controller = this.controller;
+    final controller = widget.controller;
     if (controller == null) return;
     final file = await openFile();
     if (file == null) return;
@@ -694,7 +719,7 @@ final class _FilesSection extends StatelessWidget {
   }
 
   Future<void> _renameEntry(BuildContext context, FileEntry entry) async {
-    final controller = this.controller;
+    final controller = widget.controller;
     if (controller == null) return;
     final nameController = TextEditingController(text: entry.name);
     final name = await showDialog<String>(
@@ -731,7 +756,7 @@ final class _FilesSection extends StatelessWidget {
   }
 
   Future<void> _deleteEntry(BuildContext context, FileEntry entry) async {
-    final controller = this.controller;
+    final controller = widget.controller;
     if (controller == null) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -759,9 +784,25 @@ final class _FilesSection extends StatelessWidget {
     }
   }
 
+  Future<void> _uploadDroppedFiles(List<String> paths) async {
+    final controller = widget.controller;
+    if (controller == null || controller.busy) return;
+    final result = await controller.uploadFiles(paths);
+    if (!mounted || result.total == 0) return;
+    final message = switch ((result.succeeded, result.failed)) {
+      (0, final failed) =>
+        controller.errorMessage ?? 'Could not upload $failed dropped file(s).',
+      (final succeeded, 0) => 'Encrypted and uploaded $succeeded file(s).',
+      (final succeeded, final failed) =>
+        'Uploaded $succeeded file(s); $failed file(s) could not be uploaded.',
+    };
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
   @override
   Widget build(BuildContext context) {
-    final controller = this.controller;
+    final controller = widget.controller;
     if (controller == null) {
       return const _FilesMessageState(
         icon: Icons.cloud_off_outlined,
@@ -869,9 +910,9 @@ final class _FilesSection extends StatelessWidget {
                     icon: const Icon(Icons.create_new_folder_outlined),
                     label: const Text('New folder'),
                   ),
-                  if (onCapturePhoto != null)
+                  if (widget.onCapturePhoto != null)
                     FilledButton.tonalIcon(
-                      onPressed: controller.busy ? null : onCapturePhoto,
+                      onPressed: controller.busy ? null : widget.onCapturePhoto,
                       icon: const Icon(Icons.photo_camera_outlined),
                       label: const Text('Camera'),
                     ),
@@ -884,6 +925,13 @@ final class _FilesSection extends StatelessWidget {
                   ),
                 ],
               ),
+              if (defaultTargetPlatform == TargetPlatform.windows) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Drag files into this window to encrypt and upload them to this folder.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
               const SizedBox(height: 12),
               Expanded(child: body),
             ],
