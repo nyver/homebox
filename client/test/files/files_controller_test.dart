@@ -457,6 +457,81 @@ void main() {
     expect(controller.transferDirection, isNull, reason: 'reset once idle');
   });
 
+  test('downloadFile and replaceFileContent refuse to start while another transfer is already busy', () async {
+    final fakeServer = _FakeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(controller.dispose);
+
+    final tempDir = await Directory.systemTemp.createTemp(
+      'homebox_files_test_',
+    );
+    addTearDown(() => tempDir.delete(recursive: true));
+    final existing = File('${tempDir.path}/existing.bin');
+    await existing.writeAsBytes(
+      Uint8List.fromList(List<int>.generate(5 * 1024, (i) => i % 256)),
+    );
+    expect(
+      await controller.uploadFile(existing.path),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    final existingEntry = controller.entries.single;
+
+    final second = File('${tempDir.path}/second.bin');
+    await second.writeAsBytes(
+      Uint8List.fromList(List<int>.generate(64 * 1024, (i) => i % 256)),
+    );
+    // Kicked off but not awaited, so it's still in flight (busy == true)
+    // while the assertions below run against it concurrently.
+    final inFlight = controller.uploadFiles([second.path]);
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (!controller.busy) {
+      if (DateTime.now().isAfter(deadline)) {
+        fail('uploadFiles never reported busy within the test timeout.');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+
+    expect(
+      await controller.replaceFileContent(existingEntry, second.path),
+      isFalse,
+    );
+    expect(controller.errorMessage, contains('already in progress'));
+    expect(
+      await controller.downloadFile(
+        existingEntry,
+        '${tempDir.path}/downloaded.bin',
+      ),
+      isFalse,
+    );
+    expect(controller.errorMessage, contains('already in progress'));
+
+    final result = await inFlight;
+    expect(
+      result.succeeded,
+      1,
+      reason: 'the original in-flight upload must complete undisturbed',
+    );
+  });
+
   test('uploadFiles keeps a dropped batch in its opening folder and continues after one bad path', () async {
     final fakeServer = _FakeServer();
     final httpServer = await fakeServer.start();

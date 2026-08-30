@@ -34,6 +34,9 @@ final class _FakeHomeBoxServer {
           _writeSession(request, (decoded['device'] as Map<String, dynamic>)['id'] as String);
         }
       case '/api/v1/auth/refresh':
+        if (refreshDelay > Duration.zero) {
+          await Future<void>.delayed(refreshDelay);
+        }
         final decoded = jsonDecode(body) as Map<String, dynamic>;
         final refreshToken = decoded['refreshToken'] as String;
         if (!_validRefreshTokens.remove(refreshToken)) {
@@ -55,6 +58,10 @@ final class _FakeHomeBoxServer {
   /// (rather than a fixed past timestamp) lets tests exercise
   /// [ServerConnectionController]'s proactive pre-expiry refresh.
   Duration accessTokenLifetime = const Duration(minutes: 15);
+
+  /// Artificial delay before responding to `/api/v1/auth/refresh`, so a
+  /// test can act (e.g. log out) while a refresh call is still in flight.
+  Duration refreshDelay = Duration.zero;
 
   void _writeSession(HttpRequest request, String deviceId) {
     final access = 'access-${_tokenCounter++}';
@@ -201,6 +208,43 @@ void main() {
       isNot(firstAccessToken),
       reason: 'a new access token should have been fetched automatically',
     );
+  });
+
+  test('logging out while a proactive access-token refresh is in flight does not resurrect the session', () async {
+    final fakeServer = _FakeHomeBoxServer()
+      ..accessTokenLifetime = const Duration(milliseconds: 100)
+      ..refreshDelay = const Duration(milliseconds: 300);
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+
+    final controller = ServerConnectionController(
+      deviceIdentityStore: DeviceIdentityStore(MemoryDevicePrivateKeyStorage()),
+      serverStore: PinnedServerStore(MemoryPinnedServerStorage()),
+      sessionStore: SessionStore(MemorySessionStorage()),
+      refreshBuffer: const Duration(milliseconds: 20),
+    );
+    addTearDown(controller.dispose);
+    await controller.discover('127.0.0.1:${httpServer.port}');
+    await controller.confirmTrust();
+    await controller.login('admin', 'correct horse battery staple');
+
+    // Past accessTokenLifetime - refreshBuffer (80ms), so the background
+    // refresh has started its HTTP call but not received the (300ms
+    // delayed) response yet.
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    await controller.logout();
+
+    // Give the delayed refresh response time to arrive after logout.
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+
+    expect(
+      controller.session,
+      isNull,
+      reason:
+          'a refresh that was already in flight when the user logged out '
+          'must not resurrect the session once it completes',
+    );
+    expect(controller.status, ServerConnectionStatus.connectedLoggedOut);
   });
 
   test('logout clears the session but keeps the server pinned', () async {

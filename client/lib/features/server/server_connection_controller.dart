@@ -229,11 +229,16 @@ final class ServerConnectionController extends ChangeNotifier {
 
   Future<void> _refreshAccessToken() async {
     final api = _api;
-    final session = _session;
-    if (_disposed || api == null || session == null) return;
+    // Captured up front and compared by identity after the await: if the
+    // user logs out (or another refresh/login already replaced the
+    // session) while this HTTP call is in flight, _session will no longer
+    // be this exact object, and the now-stale result below must be
+    // discarded rather than resurrecting a session the user just left.
+    final startedWithSession = _session;
+    if (_disposed || api == null || startedWithSession == null) return;
     try {
-      final refreshed = await api.refresh(session.refreshToken);
-      if (_disposed) return;
+      final refreshed = await api.refresh(startedWithSession.refreshToken);
+      if (_disposed || !identical(_session, startedWithSession)) return;
       _session = refreshed;
       await _sessionStore.saveRefreshToken(refreshed.refreshToken);
       notifyListeners();
@@ -243,7 +248,7 @@ final class ServerConnectionController extends ChangeNotifier {
       // device was removed server-side while this session sat idle); fall
       // back to requiring a fresh login, same as a failed refresh in
       // [initialize].
-      if (_disposed) return;
+      if (_disposed || !identical(_session, startedWithSession)) return;
       _session = null;
       await _sessionStore.clearRefreshToken();
       _setStatus(ServerConnectionStatus.connectedLoggedOut);

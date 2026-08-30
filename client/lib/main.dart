@@ -833,6 +833,47 @@ String _formatDateTime(DateTime utc) {
       '${two(local.hour)}:${two(local.minute)}';
 }
 
+/// Mirrors `_basename` in files_controller.dart so a name collision check
+/// here matches exactly what an upload would actually be named on the
+/// server (Windows paths use `\`, which `Uri`/`path` helpers don't split).
+String _uploadBasename(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  final index = normalized.lastIndexOf('/');
+  return index == -1 ? normalized : normalized.substring(index + 1);
+}
+
+enum _OverwriteChoice { overwrite, skip, cancel }
+
+Future<_OverwriteChoice> _askOverwrite(
+  BuildContext context,
+  String fileName,
+) async {
+  final choice = await showDialog<_OverwriteChoice>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('File already exists'),
+      content: Text('"$fileName" already exists in this folder.'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, _OverwriteChoice.cancel),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, _OverwriteChoice.skip),
+          child: const Text('Skip'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _OverwriteChoice.overwrite),
+          child: const Text('Overwrite'),
+        ),
+      ],
+    ),
+  );
+  // A dismissed dialog (back button/tap outside) is treated the same as an
+  // explicit Cancel — the safer default for a destructive action.
+  return choice ?? _OverwriteChoice.cancel;
+}
+
 final class _FilesSection extends StatefulWidget {
   const _FilesSection({
     required this.controller,
@@ -904,13 +945,71 @@ final class _FilesSectionState extends State<_FilesSection> {
     final controller = widget.controller;
     if (controller == null) return;
     final file = await openFile();
-    if (file == null) return;
-    final ok = await controller.uploadFile(file.path);
-    if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(controller.errorMessage ?? 'Upload failed.')),
-      );
+    if (file == null || !context.mounted) return;
+    await _uploadPathsWithOverwritePrompt(context, [file.path]);
+  }
+
+  /// Uploads [paths] into the currently open folder, asking before silently
+  /// clobbering a same-named file already there: a name already present in
+  /// [FilesController.entries] prompts overwrite/skip/cancel, and an
+  /// overwrite goes through [FilesController.replaceFileContent] (a new
+  /// version of the existing node) rather than creating a duplicate.
+  Future<void> _uploadPathsWithOverwritePrompt(
+    BuildContext context,
+    List<String> paths,
+  ) async {
+    final controller = widget.controller;
+    if (controller == null || paths.isEmpty) return;
+    final toCreate = <String>[];
+    final toReplace = <(FileEntry, String)>[];
+    for (final path in paths) {
+      final name = _uploadBasename(path);
+      FileEntry? existing;
+      for (final entry in controller.entries) {
+        if (!entry.isDirectory && entry.name == name) {
+          existing = entry;
+          break;
+        }
+      }
+      if (existing == null) {
+        toCreate.add(path);
+        continue;
+      }
+      if (!context.mounted) return;
+      final choice = await _askOverwrite(context, name);
+      if (choice == _OverwriteChoice.cancel) return;
+      if (choice == _OverwriteChoice.overwrite) {
+        toReplace.add((existing, path));
+      }
+      // _OverwriteChoice.skip: leave this path out of both lists.
     }
+
+    var succeeded = 0;
+    var failed = 0;
+    if (toCreate.isNotEmpty) {
+      final result = await controller.uploadFiles(toCreate);
+      succeeded += result.succeeded;
+      failed += result.failed;
+    }
+    for (final (entry, path) in toReplace) {
+      if (await controller.replaceFileContent(entry, path)) {
+        succeeded++;
+      } else {
+        failed++;
+      }
+    }
+
+    if (!context.mounted || (succeeded == 0 && failed == 0)) return;
+    final message = switch ((succeeded, failed)) {
+      (0, final f) =>
+        controller.errorMessage ?? 'Could not upload $f file(s).',
+      (final s, 0) => 'Encrypted and uploaded $s file(s).',
+      (final s, final f) =>
+        'Uploaded $s file(s); $f file(s) could not be uploaded.',
+    };
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _downloadFile(BuildContext context, FileEntry entry) async {
@@ -1065,17 +1164,7 @@ final class _FilesSectionState extends State<_FilesSection> {
   Future<void> _uploadDroppedFiles(List<String> paths) async {
     final controller = widget.controller;
     if (controller == null || controller.busy) return;
-    final result = await controller.uploadFiles(paths);
-    if (!mounted || result.total == 0) return;
-    final message = switch ((result.succeeded, result.failed)) {
-      (0, final failed) =>
-        controller.errorMessage ?? 'Could not upload $failed dropped file(s).',
-      (final succeeded, 0) => 'Encrypted and uploaded $succeeded file(s).',
-      (final succeeded, final failed) =>
-        'Uploaded $succeeded file(s); $failed file(s) could not be uploaded.',
-    };
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    await _uploadPathsWithOverwritePrompt(context, paths);
   }
 
   @override

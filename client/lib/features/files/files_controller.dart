@@ -524,6 +524,11 @@ final class FilesController extends ChangeNotifier {
   /// combined upload+metadata endpoint server-side.
   Future<bool> replaceFileContent(FileEntry entry, String localPath) async {
     if (entry.isDirectory) return false;
+    if (_busy) {
+      _errorMessage = 'Another file transfer is already in progress.';
+      notifyListeners();
+      return false;
+    }
     final ctx = await _requireContext();
     if (ctx == null) return false;
     _setBusy(true, direction: FileTransferDirection.upload);
@@ -597,6 +602,11 @@ final class FilesController extends ChangeNotifier {
   /// and verifies the plaintext SHA-256 recorded in the encrypted metadata
   /// before the file is saved.
   Future<bool> downloadFile(FileEntry entry, String destinationPath) async {
+    if (_busy) {
+      _errorMessage = 'Another file transfer is already in progress.';
+      notifyListeners();
+      return false;
+    }
     final ctx = await _requireContext();
     if (ctx == null) return false;
     _setBusy(true, direction: FileTransferDirection.download);
