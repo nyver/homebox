@@ -15,6 +15,7 @@ import '../../core/e2ee/vault_key_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/storage/pending_operations_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
+import '../../core/util/local_path.dart';
 import '../server/server_connection_controller.dart';
 import '../sync/sync_engine.dart';
 import 'file_transfer.dart';
@@ -458,7 +459,7 @@ final class FilesController extends ChangeNotifier {
     if (plaintextLength > homeBoxMaxPlaintextFileSize) {
       throw const FormatException('HomeBox files are limited to 500 MiB.');
     }
-    final fileName = _basename(localPath);
+    final fileName = basenameOfLocalPath(localPath);
     final plaintextHash = await plaintextFileSha256(file);
 
     final nodeId = generateUuidV4();
@@ -697,8 +698,3 @@ final class FilesController extends ChangeNotifier {
   }
 }
 
-String _basename(String path) {
-  final normalized = path.replaceAll('\\', '/');
-  final index = normalized.lastIndexOf('/');
-  return index == -1 ? normalized : normalized.substring(index + 1);
-}

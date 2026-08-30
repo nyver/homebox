@@ -52,6 +52,30 @@ void main() {
     );
   });
 
+  testWidgets(
+    'the Sync page explains that a local sync folder is unavailable on Android',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      await tester.pumpWidget(_testApp());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Sync'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Local sync folder'), findsOneWidget);
+      expect(find.text('Choose'), findsNothing);
+      expect(find.text('Change'), findsNothing);
+      expect(find.textContaining('All files access'), findsOneWidget);
+
+      // Reset inline rather than relying solely on addTearDown: the
+      // framework's post-test invariant check runs before registered
+      // tearDowns fire, so leaving this to addTearDown alone trips it.
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   testWidgets('Settings prepares a device without unlocking vault', (
     tester,
   ) async {
@@ -77,7 +101,7 @@ void main() {
   });
 
   testWidgets(
-    'Android keeps content hidden until biometrics pass and locks in background',
+    'Android keeps content hidden until biometrics pass at launch, and does not re-lock in the background',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -96,21 +120,22 @@ void main() {
 
       expect(find.text('Vault locked'), findsOneWidget);
 
-      // Flutter disables frame scheduling while paused (matching a real
-      // backgrounded app, which cannot draw), so the lock re-engaging while
-      // paused is only observable once a frame actually renders again —
-      // i.e. on resume, which is also the security-relevant moment: content
-      // must never flash before the lock screen when the app comes back.
+      // Backgrounding must not re-engage the lock: many in-app flows (the
+      // system file/save picker, camera capture) pause the app as part of
+      // their own normal operation, and re-locking on each of those both
+      // interrupts whatever was in progress and re-prompts far more often
+      // than a user expects — see BiometricAuthenticator's doc comment.
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pump();
 
-      expect(find.text('HomeBox locked'), findsOneWidget);
-
-      // Settle the still-pending second authentication prompt so no async
-      // work is left outstanding when the test ends.
-      authenticator.completeAuthentication(true);
-      await tester.pumpAndSettle();
+      expect(find.text('Vault locked'), findsOneWidget);
+      expect(find.text('HomeBox locked'), findsNothing);
+      expect(
+        authenticator.authenticationCalls,
+        1,
+        reason: 'resuming from the background must not prompt again',
+      );
 
       // Reset inline rather than relying solely on addTearDown: the
       // framework's post-test invariant check runs before registered

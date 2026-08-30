@@ -15,6 +15,7 @@ import 'core/platform/camera_photo_picker.dart';
 import 'core/platform/windows_autostart.dart';
 import 'core/platform/windows_file_drop.dart';
 import 'core/storage/local_database.dart';
+import 'core/util/local_path.dart';
 import 'features/device/device_setup_controller.dart';
 import 'features/device/device_provisioning_controller.dart';
 import 'features/files/files_controller.dart';
@@ -98,8 +99,7 @@ class HomeBoxDesktopPage extends StatefulWidget {
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
 }
 
-class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
-    with WidgetsBindingObserver {
+class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final DeviceIdentityStore _deviceIdentityStore;
   late final DeviceSetupController _deviceSetupController;
   late final DeviceProvisioningController _deviceProvisioningController;
@@ -132,7 +132,6 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _deviceIdentityStore =
         widget.deviceIdentityStore ?? DeviceIdentityStore.platform();
     _deviceSetupController = DeviceSetupController(_deviceIdentityStore);
@@ -179,6 +178,12 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
   }
 
   Future<void> _loadSyncFolder() async {
+    // Android's scoped storage means a picked folder can never actually be
+    // written into without the broad "All files access" permission this
+    // app deliberately does not request (see the Sync page's explanation),
+    // so a value persisted from before that restriction was enforced here
+    // must not be acted on — it would just fail on every pass.
+    if (defaultTargetPlatform == TargetPlatform.android) return;
     final saved = await _syncFolderStore.load();
     if (!mounted || saved == null) return;
     setState(() => _syncFolder = saved);
@@ -420,6 +425,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     }
   }
 
+  /// Runs once, from [initState] — see [BiometricAuthenticator]'s doc
+  /// comment for why this is not repeated on every app resume.
   Future<void> _initializeBiometricGate() async {
     final authenticator = _biometricAuthenticator;
     if (authenticator == null) return;
@@ -448,7 +455,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
         _biometricAuthenticationInProgress) {
       return;
     }
-    _biometricAuthenticationInProgress = true;
+    setState(() => _biometricAuthenticationInProgress = true);
     var authenticated = false;
     try {
       authenticated = await authenticator.authenticate();
@@ -466,36 +473,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     }
   }
 
-  void _lockForBackground() {
-    if (!_biometricGateReady ||
-        !_biometricAvailable ||
-        _biometricLocked ||
-        _biometricAuthenticationInProgress) {
-      return;
-    }
-    setState(() => _biometricLocked = true);
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    switch (state) {
-      case AppLifecycleState.inactive:
-      case AppLifecycleState.paused:
-      case AppLifecycleState.detached:
-        _lockForBackground();
-        break;
-      case AppLifecycleState.resumed:
-        unawaited(_unlockWithBiometrics());
-        break;
-      case AppLifecycleState.hidden:
-        _lockForBackground();
-        break;
-    }
-  }
-
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _serverConnectionController.removeListener(_onServerConnectionChanged);
     _vaultSetupController.removeListener(_maybeRefreshFiles);
     _filesController?.dispose();
@@ -1024,15 +1003,6 @@ String _formatDateTime(DateTime utc) {
       '${two(local.hour)}:${two(local.minute)}';
 }
 
-/// Mirrors `_basename` in files_controller.dart so a name collision check
-/// here matches exactly what an upload would actually be named on the
-/// server (Windows paths use `\`, which `Uri`/`path` helpers don't split).
-String _uploadBasename(String path) {
-  final normalized = path.replaceAll('\\', '/');
-  final index = normalized.lastIndexOf('/');
-  return index == -1 ? normalized : normalized.substring(index + 1);
-}
-
 enum _OverwriteChoice { overwrite, skip, cancel }
 
 Future<_OverwriteChoice> _askOverwrite(
@@ -1154,7 +1124,7 @@ final class _FilesSectionState extends State<_FilesSection> {
     final toCreate = <String>[];
     final toReplace = <(FileEntry, String)>[];
     for (final path in paths) {
-      final name = _uploadBasename(path);
+      final name = basenameOfLocalPath(path);
       FileEntry? existing;
       for (final entry in controller.entries) {
         if (!entry.isDirectory && entry.name == name) {
@@ -1259,7 +1229,10 @@ final class _FilesSectionState extends State<_FilesSection> {
       );
       message = destination == null ? null : 'Saved to Downloads.';
     } catch (_) {
-      message = 'Download failed.';
+      // The file was already decrypted successfully at this point — only
+      // handing it to the chosen destination failed (e.g. the device ran
+      // out of storage), distinct from a decrypt/download failure above.
+      message = 'Could not save to the selected location.';
     } finally {
       unawaited(tempFile.delete().catchError((_) => tempFile));
     }
@@ -1630,22 +1603,38 @@ class _SyncSection extends StatelessWidget {
                 );
               },
             ),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.folder_outlined),
-              title: const Text('Local sync folder'),
-              subtitle: Text(
-                syncFolder == null
-                    ? 'Not selected — files stay reachable only through the Files page.'
-                    : '$syncFolder\nFilesystem changes are picked up automatically. New local folders and their files are uploaded; directory deletes remain conservative.',
+          if (defaultTargetPlatform == TargetPlatform.android)
+            const Card(
+              child: ListTile(
+                leading: Icon(Icons.folder_off_outlined),
+                title: Text('Local sync folder'),
+                subtitle: Text(
+                  'Not available on Android: writing into a folder you pick '
+                  'requires the OS\'s broad "All files access" permission, '
+                  'which HomeBox deliberately does not request. Use the '
+                  'Files page to browse and download individual files '
+                  'instead.',
+                ),
+                isThreeLine: true,
               ),
-              isThreeLine: syncFolder != null,
-              trailing: TextButton(
-                onPressed: onSelectSyncFolder,
-                child: Text(syncFolder == null ? 'Choose' : 'Change'),
+            )
+          else
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.folder_outlined),
+                title: const Text('Local sync folder'),
+                subtitle: Text(
+                  syncFolder == null
+                      ? 'Not selected — files stay reachable only through the Files page.'
+                      : '$syncFolder\nFilesystem changes are picked up automatically. New local folders and their files are uploaded; directory deletes remain conservative.',
+                ),
+                isThreeLine: syncFolder != null,
+                trailing: TextButton(
+                  onPressed: onSelectSyncFolder,
+                  child: Text(syncFolder == null ? 'Choose' : 'Change'),
+                ),
               ),
             ),
-          ),
           if (syncFolder != null && syncFolderMaterializer != null)
             AnimatedBuilder(
               animation: syncFolderMaterializer!,

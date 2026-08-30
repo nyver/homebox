@@ -12,6 +12,7 @@ import '../../core/e2ee/vault_key_store.dart';
 import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
+import '../../core/util/local_path.dart';
 import '../files/file_transfer.dart';
 import '../server/server_connection_controller.dart';
 import '../sync/sync_engine.dart';
@@ -118,7 +119,7 @@ final class LocalFolderUploader extends ChangeNotifier {
     final localFiles = <String, File>{};
     final localDirs = <String>{};
     await for (final entry in dir.list()) {
-      final name = _basename(entry.path);
+      final name = basenameOfLocalPath(entry.path);
       if (entry is File) {
         if (name.endsWith('.homebox-tmp')) {
           continue; // SyncFolderMaterializer's own in-flight temp file.
@@ -453,8 +454,3 @@ final class LocalFolderUploader extends ChangeNotifier {
   }
 }
 
-String _basename(String path) {
-  final normalized = path.replaceAll('\\', '/');
-  final index = normalized.lastIndexOf('/');
-  return index == -1 ? normalized : normalized.substring(index + 1);
-}
