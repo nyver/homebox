@@ -247,7 +247,11 @@ final class LocalFolderUploader extends ChangeNotifier {
         return; // unchanged - either untouched, or exactly what materialize() itself just wrote.
       }
       final metadataEnvelope = await _metadataCipher.encrypt(
-        metadata: SensitiveNodeMetadata(fileName: name, plaintextSha256: hash),
+        metadata: SensitiveNodeMetadata(
+          fileName: name,
+          plaintextSha256: hash,
+          plaintextSize: plaintextLength,
+        ),
         metadataKey: vaultKey,
         keyVersion: homeBoxPersonalVaultKeyVersion,
         nodeType: MetadataNodeType.file,
@@ -313,7 +317,11 @@ final class LocalFolderUploader extends ChangeNotifier {
 
       final nodeId = generateUuidV4();
       final metadataEnvelope = await _metadataCipher.encrypt(
-        metadata: SensitiveNodeMetadata(fileName: name, plaintextSha256: hash),
+        metadata: SensitiveNodeMetadata(
+          fileName: name,
+          plaintextSha256: hash,
+          plaintextSize: plaintextLength,
+        ),
         metadataKey: vaultKey,
         keyVersion: homeBoxPersonalVaultKeyVersion,
         nodeType: MetadataNodeType.file,

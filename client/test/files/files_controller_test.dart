@@ -119,6 +119,8 @@ final class _FakeServer {
         node['parentId'] = body['parentId'];
       }
       node['revision'] = (node['revision'] as int) + 1;
+      // Matches the real server: every node mutation bumps updated_at.
+      node['updatedAt'] = DateTime.now().toUtc().toIso8601String();
       _writeJson(request, 200, node);
     } else if (method == 'DELETE' && path.startsWith('/api/v1/nodes/')) {
       final id = path.substring('/api/v1/nodes/'.length);
@@ -532,6 +534,62 @@ void main() {
     );
   });
 
+  test('two downloadFile calls started back to back never both proceed', () async {
+    final fakeServer = _FakeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(controller.dispose);
+
+    final tempDir = await Directory.systemTemp.createTemp(
+      'homebox_files_test_',
+    );
+    addTearDown(() => tempDir.delete(recursive: true));
+    final sourceFile = File('${tempDir.path}/note.txt');
+    await sourceFile.writeAsBytes(utf8.encode('shared by both calls'));
+    expect(
+      await controller.uploadFile(sourceFile.path),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    final entry = controller.entries.single;
+
+    // No await between these two calls: the busy claim must happen
+    // synchronously (before either call's first internal await), or both
+    // would observe `busy == false` and both proceed.
+    final first = controller.downloadFile(
+      entry,
+      '${tempDir.path}/first.txt',
+    );
+    final second = controller.downloadFile(
+      entry,
+      '${tempDir.path}/second.txt',
+    );
+    final results = await Future.wait([first, second]);
+
+    expect(
+      results.where((succeeded) => succeeded).length,
+      1,
+      reason: 'exactly one of the two concurrent calls should have run',
+    );
+  });
+
   test('uploadFiles keeps a dropped batch in its opening folder and continues after one bad path', () async {
     final fakeServer = _FakeServer();
     final httpServer = await fakeServer.start();
@@ -619,7 +677,11 @@ void main() {
     );
     final firstVersion = controller.entries.single;
     final revisionAfterFirstUpload = firstVersion.node.revision;
+    final updatedAtAfterFirstUpload = firstVersion.node.updatedAt;
 
+    // A measurable gap before the overwrite, so its updatedAt is provably
+    // later rather than coincidentally equal down to the millisecond.
+    await Future<void>.delayed(const Duration(milliseconds: 5));
     await sourceFile.writeAsBytes(
       utf8.encode('version two, replacing the first'),
     );
@@ -636,6 +698,13 @@ void main() {
     final secondVersion = controller.entries.single;
     expect(secondVersion.node.id, firstVersion.node.id);
     expect(secondVersion.node.revision, greaterThan(revisionAfterFirstUpload));
+    expect(
+      secondVersion.node.updatedAt.isAfter(updatedAtAfterFirstUpload),
+      isTrue,
+      reason:
+          'the Files page shows this as the file\'s "Updated" date, so '
+          'overwriting content must be reflected in it',
+    );
     expect(
       secondVersion.metadata.plaintextSize,
       'version two, replacing the first'.length,

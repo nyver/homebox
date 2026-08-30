@@ -406,18 +406,20 @@ final class FilesController extends ChangeNotifier {
       notifyListeners();
       return FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length);
     }
-    final ctx = await _requireContext();
-    if (ctx == null) {
-      return FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length);
-    }
-    // Capture this before any asynchronous work. A user may navigate while a
-    // large drop is uploading, but that must not move later files elsewhere.
-    final targetParentId = _currentParentId;
+    // Claimed synchronously, before any `await` — see replaceFileContent.
     _setBusy(true, direction: FileTransferDirection.upload);
     _errorMessage = null;
     var succeeded = 0;
     var failed = 0;
     try {
+      final ctx = await _requireContext();
+      if (ctx == null) {
+        return FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length);
+      }
+      // Capture this before any asynchronous work. A user may navigate
+      // while a large drop is uploading, but that must not move later
+      // files elsewhere.
+      final targetParentId = _currentParentId;
       for (var index = 0; index < uniquePaths.length; index++) {
         try {
           await _uploadFileToParent(
@@ -530,10 +532,13 @@ final class FilesController extends ChangeNotifier {
       notifyListeners();
       return false;
     }
-    final ctx = await _requireContext();
-    if (ctx == null) return false;
+    // Claimed synchronously, before any `await`, so two calls arriving
+    // close together can't both observe `_busy == false` and both proceed
+    // — Dart can't interleave them without an await in between.
     _setBusy(true, direction: FileTransferDirection.upload);
     try {
+      final ctx = await _requireContext();
+      if (ctx == null) return false;
       final file = File(localPath);
       final plaintextLength = await file.length();
       if (plaintextLength > homeBoxMaxPlaintextFileSize) {
@@ -608,10 +613,11 @@ final class FilesController extends ChangeNotifier {
       notifyListeners();
       return false;
     }
-    final ctx = await _requireContext();
-    if (ctx == null) return false;
+    // Claimed synchronously, before any `await` — see replaceFileContent.
     _setBusy(true, direction: FileTransferDirection.download);
     try {
+      final ctx = await _requireContext();
+      if (ctx == null) return false;
       final plaintextBytes = await downloadAndDecryptFile(
         api: ctx.api,
         accessToken: ctx.accessToken,

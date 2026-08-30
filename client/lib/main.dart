@@ -411,6 +411,22 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     }
   }
 
+  /// Drives Android's pull-to-refresh gesture on the Files page. Awaits
+  /// [SyncEngine.runOnce] — which, even if a periodic pass was already in
+  /// flight when the user pulled, now waits for that same pass rather than
+  /// no-op'ing (see its doc comment) — then explicitly refreshes the Files
+  /// listing too: [SyncEngine]'s own change notification already triggers
+  /// [FilesController] to refresh itself, but only as an un-awaited
+  /// fire-and-forget call, which isn't enough to guarantee the list has
+  /// actually finished updating by the time this method's caller (the
+  /// RefreshIndicator) dismisses its spinner. The resulting second refresh
+  /// pass is a small amount of redundant local decrypt work, traded
+  /// deliberately for that guarantee.
+  Future<void> _refreshFromServer() async {
+    await _syncEngine?.runOnce();
+    await _filesController?.refresh();
+  }
+
   void _toggleSyncPause() {
     final engine = _syncEngine;
     if (engine == null) return;
@@ -597,6 +613,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       androidFileSaver: supportsAndroidSaveDialog(defaultTargetPlatform)
           ? _androidFileSaver
           : null,
+      onPullToRefresh: defaultTargetPlatform == TargetPlatform.android
+          ? _refreshFromServer
+          : null,
     );
     if (!wideLayout) {
       return Scaffold(
@@ -758,6 +777,10 @@ final class _BiometricLockScreen extends StatelessWidget {
   );
 }
 
+/// Icon-only (no "locked"/"unlocked" text pill): the open/closed lock shape
+/// already conveys the state, and the header has several of these status
+/// indicators competing for space. The fuller explanation of what "locked"
+/// means here still lives in Settings, next to vault setup itself.
 class _VaultStateChip extends StatelessWidget {
   const _VaultStateChip({required this.controller});
 
@@ -768,17 +791,13 @@ class _VaultStateChip extends StatelessWidget {
     animation: controller,
     builder: (context, _) {
       final ready = controller.status == VaultSetupStatus.ready;
-      return Tooltip(
-        message: ready
+      return _headerStatusIndicator(
+        icon: ready ? Icons.lock_open_outlined : Icons.lock_outline,
+        label: ready ? 'Vault unlocked' : 'Vault locked',
+        tooltip: ready
             ? 'This vault was created on this device. A trusted device or Recovery Secret is required on any other device.'
             : 'Create or restore this account\'s vault in Settings to unlock E2EE data.',
-        child: Chip(
-          avatar: Icon(
-            ready ? Icons.lock_open_outlined : Icons.lock_outline,
-            size: 18,
-          ),
-          label: Text(ready ? 'Vault unlocked' : 'Vault locked'),
-        ),
+        dense: true,
       );
     },
   );
@@ -866,17 +885,26 @@ class _TransferProgressIndicator extends StatelessWidget {
           controller.transferDirection,
           percent,
         );
-        final spinner = SizedBox.square(
-          dimension: dense ? 20 : 18,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            value: controller.progress,
-          ),
+        // An arrow (direction) plus the percent itself, rather than a bare
+        // spinner: a spinner alone doesn't say whether HomeBox is sending
+        // or receiving, or how far along it is, at a glance in the header.
+        final directionIcon = switch (controller.transferDirection) {
+          FileTransferDirection.upload => Icons.arrow_upward,
+          FileTransferDirection.download => Icons.arrow_downward,
+          null => Icons.sync,
+        };
+        final content = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(directionIcon, size: dense ? 18 : 16),
+            const SizedBox(width: 2),
+            Text('$percent%'),
+          ],
         );
-        if (dense) return Tooltip(message: label, child: spinner);
+        if (dense) return Tooltip(message: label, child: content);
         return Tooltip(
           message: label,
-          child: Chip(avatar: spinner, label: Text(label)),
+          child: Chip(avatar: Icon(directionIcon, size: 18), label: Text('$percent%')),
         );
       },
     );
@@ -902,6 +930,7 @@ class _SectionContent extends StatelessWidget {
     required this.onToggleSyncPause,
     required this.onCapturePhoto,
     required this.androidFileSaver,
+    required this.onPullToRefresh,
   });
 
   final AppSection section;
@@ -921,6 +950,7 @@ class _SectionContent extends StatelessWidget {
   final VoidCallback onToggleSyncPause;
   final Future<void> Function()? onCapturePhoto;
   final AndroidFileSaver? androidFileSaver;
+  final Future<void> Function()? onPullToRefresh;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -928,6 +958,7 @@ class _SectionContent extends StatelessWidget {
       controller: filesController,
       onCapturePhoto: onCapturePhoto,
       androidFileSaver: androidFileSaver,
+      onPullToRefresh: onPullToRefresh,
     ),
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,
@@ -973,14 +1004,17 @@ String _transferProgressLabel(FileTransferDirection? direction, int percent) =>
       null => 'Transfer progress $percent percent',
     };
 
-/// "mimeType • size • Uploaded date time" for a file's [ListTile] subtitle.
+/// "mimeType • size • Updated date time" for a file's [ListTile] subtitle.
 /// [FileEntry.metadata.plaintextSize] is null for files uploaded before that
-/// field existed, so the size segment is simply omitted for those.
+/// field existed, so the size segment is simply omitted for those. Uses
+/// [LocalNode.updatedAt] rather than [LocalNode.createdAt] so replacing a
+/// file's content (spec: "Replace content…") is reflected here — the server
+/// bumps `updated_at` on every node mutation, including a completed upload.
 String _fileEntrySubtitle(FileEntry entry) {
   final parts = <String>[entry.metadata.mimeType ?? 'Encrypted file'];
   final size = entry.metadata.plaintextSize;
   if (size != null) parts.add(_formatFileSize(size));
-  parts.add('Uploaded ${_formatDateTime(entry.node.createdAt)}');
+  parts.add('Updated ${_formatDateTime(entry.node.updatedAt)}');
   return parts.join(' • ');
 }
 
@@ -1040,11 +1074,13 @@ final class _FilesSection extends StatefulWidget {
     required this.controller,
     required this.onCapturePhoto,
     required this.androidFileSaver,
+    required this.onPullToRefresh,
   });
 
   final FilesController? controller;
   final Future<void> Function()? onCapturePhoto;
   final AndroidFileSaver? androidFileSaver;
+  final Future<void> Function()? onPullToRefresh;
 
   @override
   State<_FilesSection> createState() => _FilesSectionState();
@@ -1348,27 +1384,52 @@ final class _FilesSectionState extends State<_FilesSection> {
           controller.transferDirection,
           transferProgressPercent,
         );
+        // Whichever message/spinner widget a non-list state below renders,
+        // it has no Scrollable of its own, so pull-to-refresh (below) would
+        // have nothing to detect the drag gesture against — wrapping it in
+        // an always-scrollable, viewport-height ListView fixes that without
+        // changing how it looks.
+        Widget scrollableMessage(Widget child) => LayoutBuilder(
+          builder: (context, constraints) => ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: [
+              SizedBox(height: constraints.maxHeight, child: child),
+            ],
+          ),
+        );
         final Widget body;
         if (controller.status == FilesStatus.idle) {
-          body = const _FilesMessageState(
-            icon: Icons.cloud_off_outlined,
-            message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+          body = scrollableMessage(
+            const _FilesMessageState(
+              icon: Icons.cloud_off_outlined,
+              message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+            ),
           );
         } else if (controller.status == FilesStatus.failed) {
-          body = _FilesMessageState(
-            icon: Icons.error_outline,
-            message: controller.errorMessage ?? 'Files are unavailable.',
+          body = scrollableMessage(
+            _FilesMessageState(
+              icon: Icons.error_outline,
+              message: controller.errorMessage ?? 'Files are unavailable.',
+            ),
           );
         } else if (controller.status == FilesStatus.loading &&
             controller.entries.isEmpty) {
-          body = const Center(child: CircularProgressIndicator());
+          body = scrollableMessage(
+            const Center(child: CircularProgressIndicator()),
+          );
         } else if (controller.entries.isEmpty) {
-          body = const _FilesMessageState(
-            icon: Icons.folder_open_outlined,
-            message: 'This folder is empty.',
+          body = scrollableMessage(
+            const _FilesMessageState(
+              icon: Icons.folder_open_outlined,
+              message: 'This folder is empty.',
+            ),
           );
         } else {
           body = ListView.separated(
+            // Always scrollable (not just when content overflows) so the
+            // pull-to-refresh gesture below still has room to register on
+            // a short list.
+            physics: const AlwaysScrollableScrollPhysics(),
             itemCount: controller.entries.length,
             separatorBuilder: (context, _) => const Divider(height: 1),
             itemBuilder: (context, index) {
@@ -1502,7 +1563,14 @@ final class _FilesSectionState extends State<_FilesSection> {
                 ),
               ],
               const SizedBox(height: 12),
-              Expanded(child: body),
+              Expanded(
+                child: widget.onPullToRefresh == null
+                    ? body
+                    : RefreshIndicator(
+                        onRefresh: widget.onPullToRefresh!,
+                        child: body,
+                      ),
+              ),
             ],
           ),
         );

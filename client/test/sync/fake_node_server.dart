@@ -26,6 +26,10 @@ final class FakeNodeServer {
   int? failMutationsWithStatus;
   String? failMutationsWithCode;
 
+  /// Artificial delay before responding to a sync/changes pull, so a test
+  /// can act (e.g. start a second runOnce()) while a pass is still in flight.
+  Duration pullDelay = Duration.zero;
+
   Future<HttpServer> start() => startFixtureServer(_handle);
 
   Future<void> _handle(HttpRequest request) async {
@@ -72,6 +76,7 @@ final class FakeNodeServer {
       return;
     }
     if (method == 'GET' && path == '/api/v1/sync/changes') {
+      if (pullDelay > Duration.zero) await Future<void>.delayed(pullDelay);
       final after = int.parse(request.uri.queryParameters['after'] ?? '0');
       final pageSize = int.tryParse(request.uri.queryParameters['pageSize'] ?? '') ?? 500;
       final page = _changes.where((c) => (c['revision'] as int) > after).take(pageSize).toList();

@@ -60,6 +60,7 @@ final class SyncEngine extends ChangeNotifier {
   bool _started = false;
   bool _paused = false;
   bool _runningNow = false;
+  Future<void>? _inFlight;
   bool _disposed = false;
   SyncStatus _status = SyncStatus.idle;
   String? _errorMessage;
@@ -109,19 +110,35 @@ final class SyncEngine extends ChangeNotifier {
   }
 
   /// Pushes pending operations, then pulls remote changes. Safe to call
-  /// concurrently — a run already in flight is not duplicated.
-  Future<void> runOnce() async {
+  /// concurrently — a run already in flight is not duplicated, but every
+  /// caller's returned future still only completes once that shared run
+  /// actually finishes (e.g. so pull-to-refresh genuinely waits for it,
+  /// rather than the second caller seeing an instant no-op).
+  Future<void> runOnce() {
+    // Checked before _paused: pause() only cancels the timer, it does not
+    // interrupt a run already underway (see its doc comment), so a caller
+    // arriving after a pause mid-run must still await that real pass
+    // rather than getting an instantly-resolved future while it's still
+    // pulling changes in the background.
+    final inFlight = _inFlight;
+    if (inFlight != null) return inFlight;
     if (_paused) {
-      if (!_runningNow) _setStatus(SyncStatus.paused);
-      return;
+      _setStatus(SyncStatus.paused);
+      return Future<void>.value();
     }
-    if (_runningNow) return;
     final api = _serverConnection.api;
     final session = _serverConnection.session;
     if (api == null || session == null) {
       _setStatus(SyncStatus.offline);
-      return;
+      return Future<void>.value();
     }
+    return _inFlight = _runOnce(api, session);
+  }
+
+  Future<void> _runOnce(
+    transport.HomeBoxApiClient api,
+    transport.HomeBoxSession session,
+  ) async {
     _runningNow = true;
     _setStatus(SyncStatus.syncing);
     try {
@@ -134,6 +151,7 @@ final class SyncEngine extends ChangeNotifier {
       if (!_paused) _setStatus(SyncStatus.error);
     } finally {
       _runningNow = false;
+      _inFlight = null;
     }
   }
 

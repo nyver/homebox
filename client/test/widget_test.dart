@@ -18,12 +18,18 @@ import 'support/memory_session_storage.dart';
 import 'support/memory_sync_folder_storage.dart';
 import 'support/memory_vault_key_storage.dart';
 
+/// The header's vault-lock indicator is icon-only; this is its tooltip
+/// while locked (see _VaultStateChip in main.dart), used here via
+/// find.byTooltip since there is no longer a visible "Vault locked" Text.
+const _vaultLockedTooltip =
+    'Create or restore this account\'s vault in Settings to unlock E2EE data.';
+
 void main() {
   testWidgets('client starts locked and does not expose files', (tester) async {
     await tester.pumpWidget(_testApp());
     await tester.pumpAndSettle();
 
-    expect(find.text('Vault locked'), findsOneWidget);
+    expect(find.byTooltip(_vaultLockedTooltip), findsOneWidget);
     expect(
       find.text(
         'Connect to a server, sign in, and set up the vault in Settings to see your files.',
@@ -97,7 +103,7 @@ void main() {
       find.textContaining('Identity ready · Not provisioned'),
       findsOneWidget,
     );
-    expect(find.text('Vault locked'), findsOneWidget);
+    expect(find.byTooltip(_vaultLockedTooltip), findsOneWidget);
   });
 
   testWidgets(
@@ -113,12 +119,12 @@ void main() {
 
       expect(authenticator.authenticationCalls, 1);
       expect(find.text('HomeBox locked'), findsOneWidget);
-      expect(find.text('Vault locked'), findsNothing);
+      expect(find.byTooltip(_vaultLockedTooltip), findsNothing);
 
       authenticator.completeAuthentication(true);
       await tester.pumpAndSettle();
 
-      expect(find.text('Vault locked'), findsOneWidget);
+      expect(find.byTooltip(_vaultLockedTooltip), findsOneWidget);
 
       // Backgrounding must not re-engage the lock: many in-app flows (the
       // system file/save picker, camera capture) pause the app as part of
@@ -129,7 +135,7 @@ void main() {
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pump();
 
-      expect(find.text('Vault locked'), findsOneWidget);
+      expect(find.byTooltip(_vaultLockedTooltip), findsOneWidget);
       expect(find.text('HomeBox locked'), findsNothing);
       expect(
         authenticator.authenticationCalls,

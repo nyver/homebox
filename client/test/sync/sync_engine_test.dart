@@ -174,6 +174,40 @@ void main() {
     },
   );
 
+  test('a concurrent runOnce() call awaits the already-in-flight pass instead of returning instantly', () async {
+    final fakeServer = FakeNodeServer()
+      ..pullDelay = const Duration(milliseconds: 200);
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    fakeServer.remoteCreate(id: 'remote-node');
+
+    final engine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(engine.dispose);
+
+    final first = engine.runOnce();
+    // Give the first call time to reach _runningNow = true (past its own
+    // request setup) before the second call arrives, so it genuinely
+    // observes a pass already in flight rather than racing to start first.
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(engine.status, SyncStatus.syncing);
+    final second = engine.runOnce();
+
+    await second;
+    expect(
+      engine.nodeCache.getById('remote-node'),
+      isNotNull,
+      reason:
+          'the second call must have waited for the shared pass to '
+          'actually pull the change, not returned before it landed',
+    );
+    await first;
+  });
+
   test('pausing prevents new sync passes until resume', () async {
     final fakeServer = FakeNodeServer();
     final httpServer = await fakeServer.start();

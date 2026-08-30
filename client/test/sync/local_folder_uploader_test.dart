@@ -121,14 +121,32 @@ void main() {
     expect(uploadedNode.currentVersionId, isNotNull);
 
     final session = serverConnection.session!;
+    final vaultKey = (await vaultKeyStore.loadVaultKey())!;
     final downloaded = await downloadAndDecryptFile(
       api: serverConnection.api!,
       accessToken: session.accessToken,
-      vaultKey: (await vaultKeyStore.loadVaultKey())!,
+      vaultKey: vaultKey,
       vaultId: uuidStringToBytes(session.user.id),
       nodeId: uploadedNode.id,
     );
     expect(utf8.decode(downloaded), 'dropped by the user');
+
+    final metadata = await MetadataCipher().decrypt(
+      envelope: EncryptedMetadataEnvelope.decode(
+        uploadedNode.metadataCiphertext,
+      ),
+      metadataKey: vaultKey,
+      nodeType: MetadataNodeType.file,
+      scopeId: uuidStringToBytes(session.user.id),
+      nodeId: uuidStringToBytes(uploadedNode.id),
+    );
+    expect(
+      metadata.plaintextSize,
+      utf8.encode('dropped by the user').length,
+      reason:
+          'a file uploaded by the local sync folder must carry its size '
+          'the same as one uploaded through the Files page',
+    );
   });
 
   test('scan uploads a locally-edited tracked file as a new version', () async {
