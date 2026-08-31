@@ -7,6 +7,7 @@
 #include <shellapi.h>
 
 #include <memory>
+#include <string>
 
 #include "win32_window.h"
 
@@ -28,6 +29,8 @@ class FlutterWindow : public Win32Window {
   bool AddTrayIcon();
   void RemoveTrayIcon();
   void ShowFromTray();
+  bool HasOpenableSyncFolder() const;
+  bool OpenSyncFolder();
   void ConfigurePlatformChannel();
   void HandleFileDrop(HDROP drop);
   bool IsAutostartEnabled() const;
@@ -42,6 +45,7 @@ class FlutterWindow : public Win32Window {
       platform_channel_;
   NOTIFYICONDATA tray_icon_{};
   bool tray_icon_added_ = false;
+  std::wstring sync_folder_path_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

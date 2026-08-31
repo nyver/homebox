@@ -13,7 +13,8 @@ namespace {
 
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT kTrayShowCommand = 1;
-constexpr UINT kTrayExitCommand = 2;
+constexpr UINT kTrayOpenSyncFolderCommand = 2;
+constexpr UINT kTrayExitCommand = 3;
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"HomeBox";
 
@@ -28,6 +29,19 @@ std::string Utf8FromWide(const std::wstring& value) {
   WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
                       static_cast<int>(value.size()), result.data(), length,
                       nullptr, nullptr);
+  return result;
+}
+
+std::wstring WideFromUtf8(const std::string& value) {
+  if (value.empty()) return {};
+  const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                         value.data(),
+                                         static_cast<int>(value.size()),
+                                         nullptr, 0);
+  if (length == 0) return {};
+  std::wstring result(length, L'\0');
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+                      static_cast<int>(value.size()), result.data(), length);
   return result;
 }
 
@@ -115,6 +129,10 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         HMENU menu = CreatePopupMenu();
         if (menu != nullptr) {
           AppendMenu(menu, MF_STRING, kTrayShowCommand, L"Show HomeBox");
+          AppendMenu(menu,
+                     MF_STRING |
+                         (HasOpenableSyncFolder() ? MF_ENABLED : MF_GRAYED),
+                     kTrayOpenSyncFolderCommand, L"Open sync folder");
           AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
           AppendMenu(menu, MF_STRING, kTrayExitCommand, L"Exit");
           POINT cursor;
@@ -129,6 +147,10 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_COMMAND:
       if (LOWORD(wparam) == kTrayShowCommand) {
         ShowFromTray();
+        return 0;
+      }
+      if (LOWORD(wparam) == kTrayOpenSyncFolderCommand) {
+        OpenSyncFolder();
         return 0;
       }
       if (LOWORD(wparam) == kTrayExitCommand) {
@@ -191,6 +213,21 @@ void FlutterWindow::ShowFromTray() {
   SetForegroundWindow(GetHandle());
 }
 
+bool FlutterWindow::HasOpenableSyncFolder() const {
+  if (sync_folder_path_.empty()) return false;
+  const DWORD attributes = GetFileAttributes(sync_folder_path_.c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES &&
+         (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+bool FlutterWindow::OpenSyncFolder() {
+  if (!HasOpenableSyncFolder()) return false;
+  return reinterpret_cast<intptr_t>(
+             ShellExecute(GetHandle(), L"open", sync_folder_path_.c_str(),
+                          nullptr, nullptr, SW_SHOWNORMAL)) >
+         32;
+}
+
 void FlutterWindow::ConfigurePlatformChannel() {
   platform_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       flutter_controller_->engine()->messenger(), "homebox/windows",
@@ -215,6 +252,27 @@ void FlutterWindow::ConfigurePlatformChannel() {
             return;
           }
           result->Success(flutter::EncodableValue(*enabled));
+          return;
+        }
+        if (call.method_name() == "setSyncFolder") {
+          const auto* path = call.arguments() == nullptr
+                                 ? nullptr
+                                 : std::get_if<std::string>(call.arguments());
+          if (path == nullptr) {
+            result->Error("invalid-argument", "Expected a UTF-8 folder path.");
+            return;
+          }
+          const std::wstring wide_path = WideFromUtf8(*path);
+          if (!path->empty() && wide_path.empty()) {
+            result->Error("invalid-argument", "Folder path is not valid UTF-8.");
+            return;
+          }
+          sync_folder_path_ = wide_path;
+          result->Success();
+          return;
+        }
+        if (call.method_name() == "openSyncFolder") {
+          result->Success(flutter::EncodableValue(OpenSyncFolder()));
           return;
         }
         result->NotImplemented();

@@ -61,9 +61,13 @@ final class LocalFolderUploader extends ChangeNotifier {
   bool _disposed = false;
   LocalUploadStatus _status = LocalUploadStatus.idle;
   String? _errorMessage;
+  String? _activeFileName;
+  double? _transferProgress;
 
   LocalUploadStatus get status => _status;
   String? get errorMessage => _errorMessage;
+  String? get activeFileName => _activeFileName;
+  double? get transferProgress => _transferProgress;
 
   /// Scans [rootPath] for local changes and uploads them. Safe to call
   /// repeatedly; a call already in flight is not duplicated. A single
@@ -76,6 +80,7 @@ final class LocalFolderUploader extends ChangeNotifier {
     final vaultKey = await _vaultKeyStore.loadVaultKey();
     if (api == null || session == null || vaultKey == null) return;
     _running = true;
+    _clearTransferProgress();
     _setStatus(LocalUploadStatus.scanning);
     try {
       final vaultId = uuidStringToBytes(session.user.id);
@@ -96,6 +101,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       _setStatus(LocalUploadStatus.error);
     } finally {
       _running = false;
+      _clearTransferProgress();
     }
   }
 
@@ -259,6 +265,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         nodeId: uuidStringToBytes(node.id),
       );
       final metadataCiphertext = metadataEnvelope.encode();
+      _setTransferProgress(name, 0);
 
       final uploadedNode = await uploadFilePathVersion(
         api: api,
@@ -272,6 +279,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         plaintextLength: plaintextLength,
         expectedPlaintextSha256: hash,
         metadataCiphertext: metadataCiphertext,
+        onProgress: (progress) => _setTransferProgress(name, progress),
       );
       // Two separate mutations, same reasoning as FilesController.replaceFileContent:
       // completing an upload does not itself update the node's own metadata.
@@ -340,6 +348,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
       );
       _syncEngine.nodeCache.upsert(localNodeFromServerNode(createdNode));
+      _setTransferProgress(name, 0);
 
       final uploadedNode = await uploadFilePathVersion(
         api: api,
@@ -353,6 +362,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         plaintextLength: plaintextLength,
         expectedPlaintextSha256: hash,
         metadataCiphertext: metadataCiphertext,
+        onProgress: (progress) => _setTransferProgress(name, progress),
       );
       _syncEngine.nodeCache.upsert(localNodeFromServerNode(uploadedNode));
       // Record this device's own upload as already-materialized so the
@@ -455,10 +465,22 @@ final class LocalFolderUploader extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  void _setTransferProgress(String fileName, double progress) {
+    _activeFileName = fileName;
+    _transferProgress = progress.clamp(0, 1).toDouble();
+    if (!_disposed) notifyListeners();
+  }
+
+  void _clearTransferProgress() {
+    if (_activeFileName == null && _transferProgress == null) return;
+    _activeFileName = null;
+    _transferProgress = null;
+    if (!_disposed) notifyListeners();
+  }
+
   @override
   void dispose() {
     _disposed = true;
     super.dispose();
   }
 }
-

@@ -16,6 +16,7 @@ import 'core/platform/biometric_authenticator.dart';
 import 'core/platform/camera_photo_picker.dart';
 import 'core/platform/windows_autostart.dart';
 import 'core/platform/windows_file_drop.dart';
+import 'core/platform/windows_sync_folder.dart';
 import 'core/storage/local_database.dart';
 import 'core/util/local_path.dart';
 import 'features/device/device_setup_controller.dart';
@@ -155,6 +156,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final CameraPhotoPicker _cameraPhotoPicker;
   late final AndroidFileSaver _androidFileSaver;
   late final AndroidSyncFolder _androidSyncFolder;
+  late final WindowsSyncFolder _windowsSyncFolder;
   late final AppLocaleController _localeController;
   late final bool _ownsLocaleController;
   BiometricAuthenticator? _biometricAuthenticator;
@@ -200,6 +202,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         widget.androidFileSaver ?? MethodChannelAndroidFileSaver();
     _androidSyncFolder =
         widget.androidSyncFolder ?? MethodChannelAndroidSyncFolder();
+    _windowsSyncFolder = WindowsSyncFolder();
     _ownsLocaleController = widget.localeController == null;
     _localeController = widget.localeController ?? AppLocaleController();
     if (_ownsLocaleController) unawaited(_localeController.initialize());
@@ -233,6 +236,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     final saved = await _syncFolderStore.load();
     if (!mounted || saved == null) return;
     setState(() => _syncFolder = saved);
+    unawaited(_windowsSyncFolder.setSelectedFolder(saved));
     if (defaultTargetPlatform != TargetPlatform.android &&
         _syncEngine?.isPaused != true) {
       _syncFolderWatcher.start(saved);
@@ -571,6 +575,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       if (!mounted || folder == null) return;
       setState(() => _syncFolder = folder);
       await _syncFolderStore.save(folder);
+      unawaited(_windowsSyncFolder.setSelectedFolder(folder));
       if (defaultTargetPlatform != TargetPlatform.android &&
           _syncEngine?.isPaused != true) {
         _syncFolderWatcher.start(folder);
@@ -589,27 +594,48 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     }
   }
 
+  Future<void> _openSyncFolder() async {
+    if (await _windowsSyncFolder.open() || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('HomeBox could not open the sync folder.')),
+    );
+  }
+
   /// The header's transfer/sync/vault status group, shared by the narrow
-  /// AppBar and the wide desktop header. Kept reactive to [_filesController]
-  /// here (rather than inside [_TransferProgressIndicator] alone) so the
-  /// transfer indicator can be entirely absent from the list — and thus not
-  /// reserve any [spacing] — while idle, instead of rendering as an
-  /// invisible zero-size child.
-  Widget _headerStatusIndicators({required bool dense, required double spacing}) {
+  /// AppBar and the wide desktop header. This wrapper listens to every source
+  /// that can show a transient transfer, so those indicators are absent — and
+  /// reserve no [spacing] — while idle. [_SyncStatusChip] independently also
+  /// listens to the local-folder materializer, because the vault is not up to
+  /// date from the user's perspective until its files reach that folder.
+  Widget _headerStatusIndicators({
+    required bool dense,
+    required double spacing,
+  }) {
     final filesController = _filesController;
-    if (filesController == null) {
+    final materializer = _syncFolderMaterializer;
+    final uploader = _localFolderUploader;
+    final listenables = <Listenable>[
+      ?filesController,
+      ?materializer,
+      ?uploader,
+    ];
+    if (listenables.isEmpty) {
       return _buildHeaderStatusIndicators(
         dense: dense,
         spacing: spacing,
         showTransfer: false,
+        showSyncFolderTransfer: false,
       );
     }
     return AnimatedBuilder(
-      animation: filesController,
+      animation: Listenable.merge(listenables),
       builder: (context, _) => _buildHeaderStatusIndicators(
         dense: dense,
         spacing: spacing,
-        showTransfer: filesController.busy,
+        showTransfer: filesController?.busy ?? false,
+        showSyncFolderTransfer:
+            materializer?.transferProgress != null ||
+            uploader?.transferProgress != null,
       ),
     );
   }
@@ -618,6 +644,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     required bool dense,
     required double spacing,
     required bool showTransfer,
+    required bool showSyncFolderTransfer,
   }) {
     final children = [
       if (showTransfer)
@@ -625,11 +652,25 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
           filesController: _filesController,
           dense: dense,
         ),
-      _SyncStatusChip(syncEngine: _syncEngine, dense: dense),
+      _SyncStatusChip(
+        syncEngine: _syncEngine,
+        syncFolderMaterializer: _syncFolderMaterializer,
+        dense: dense,
+      ),
+      if (showSyncFolderTransfer)
+        _SyncFolderTransferProgressIndicator(
+          materializer: _syncFolderMaterializer,
+          uploader: _localFolderUploader,
+          dense: dense,
+        ),
       _VaultStateChip(controller: _vaultSetupController),
     ];
     return dense
-        ? Row(mainAxisSize: MainAxisSize.min, spacing: spacing, children: children)
+        ? Row(
+            mainAxisSize: MainAxisSize.min,
+            spacing: spacing,
+            children: children,
+          )
         : Wrap(
             alignment: WrapAlignment.end,
             crossAxisAlignment: WrapCrossAlignment.center,
@@ -656,6 +697,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       syncFolder: _syncFolder,
       selectingFolder: _selectingFolder,
       onSelectSyncFolder: _selectSyncFolder,
+      onOpenSyncFolder: defaultTargetPlatform == TargetPlatform.windows
+          ? _openSyncFolder
+          : null,
       deviceSetupController: _deviceSetupController,
       deviceProvisioningController: _deviceProvisioningController,
       serverConnectionController: _serverConnectionController,
@@ -899,9 +943,14 @@ Widget _headerStatusIndicator({
 /// Duplicates the Sync page's status (spec: offline/up to date/syncing/…)
 /// in the header, so it is visible from any section without switching tabs.
 class _SyncStatusChip extends StatelessWidget {
-  const _SyncStatusChip({required this.syncEngine, this.dense = false});
+  const _SyncStatusChip({
+    required this.syncEngine,
+    required this.syncFolderMaterializer,
+    this.dense = false,
+  });
 
   final SyncEngine? syncEngine;
+  final SyncFolderMaterializer? syncFolderMaterializer;
   final bool dense;
 
   @override
@@ -917,18 +966,12 @@ class _SyncStatusChip extends StatelessWidget {
       );
     }
     return AnimatedBuilder(
-      animation: engine,
+      animation: Listenable.merge([engine, ?syncFolderMaterializer]),
       builder: (context, _) {
-        final (icon, label) = _syncStatusPresentation(engine.status);
-        final color = switch (engine.status) {
-          SyncStatus.idle => Colors.green,
-          SyncStatus.error => Colors.red,
-          _ => null,
-        };
-        final tooltip =
-            engine.status == SyncStatus.error && engine.errorMessage != null
-            ? engine.errorMessage!
-            : null;
+        final (icon, label, color, tooltip) = _effectiveSyncStatusPresentation(
+          engine: engine,
+          materializer: syncFolderMaterializer,
+        );
         return _headerStatusIndicator(
           icon: icon,
           label: label,
@@ -990,6 +1033,66 @@ class _TransferProgressIndicator extends StatelessWidget {
       },
     );
   }
+
+}
+
+/// Compact local-folder transfer progress for the global header. Its parent
+/// listens to both sources and creates this widget only while a file is
+/// actually moving, so the idle header stays compact.
+class _SyncFolderTransferProgressIndicator extends StatelessWidget {
+  const _SyncFolderTransferProgressIndicator({
+    required this.materializer,
+    required this.uploader,
+    this.dense = false,
+  });
+
+  final SyncFolderMaterializer? materializer;
+  final LocalFolderUploader? uploader;
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final downloadProgress = materializer?.transferProgress;
+    final uploadProgress = uploader?.transferProgress;
+    final (direction, fileName, progress, icon) = downloadProgress != null
+        ? (
+            'Downloading',
+            materializer?.activeFileName ?? 'file',
+            downloadProgress,
+            Icons.arrow_downward,
+          )
+        : uploadProgress != null
+        ? (
+            'Uploading',
+            uploader?.activeFileName ?? 'file',
+            uploadProgress,
+            Icons.arrow_upward,
+          )
+        : ('Syncing', 'file', 0.0, Icons.sync);
+    final percent = (progress * 100).round().clamp(0, 100);
+    final tooltip = '$direction $fileName — $percent%';
+    final content = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox.square(
+          dimension: dense ? 18 : 20,
+          child: CircularProgressIndicator(strokeWidth: 2, value: progress),
+        ),
+        const SizedBox(width: 4),
+        Icon(icon, size: dense ? 16 : 18),
+        const SizedBox(width: 2),
+        Text('$percent%'),
+      ],
+    );
+    if (dense) return Tooltip(message: tooltip, child: content);
+    return Tooltip(
+      message: tooltip,
+      child: Chip(
+        avatar: Icon(icon, size: 18),
+        label: Text('$percent%'),
+      ),
+    );
+  }
 }
 
 class _SectionContent extends StatelessWidget {
@@ -998,6 +1101,7 @@ class _SectionContent extends StatelessWidget {
     required this.syncFolder,
     required this.selectingFolder,
     required this.onSelectSyncFolder,
+    required this.onOpenSyncFolder,
     required this.deviceSetupController,
     required this.deviceProvisioningController,
     required this.serverConnectionController,
@@ -1020,6 +1124,7 @@ class _SectionContent extends StatelessWidget {
   final String? syncFolder;
   final bool selectingFolder;
   final Future<void> Function() onSelectSyncFolder;
+  final Future<void> Function()? onOpenSyncFolder;
   final DeviceSetupController deviceSetupController;
   final DeviceProvisioningController deviceProvisioningController;
   final ServerConnectionController serverConnectionController;
@@ -1050,6 +1155,7 @@ class _SectionContent extends StatelessWidget {
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,
       onSelectSyncFolder: onSelectSyncFolder,
+      onOpenSyncFolder: onOpenSyncFolder,
       syncEngine: syncEngine,
       syncFolderMaterializer: syncFolderMaterializer,
       localFolderUploader: localFolderUploader,
@@ -1067,9 +1173,8 @@ class _SectionContent extends StatelessWidget {
   };
 }
 
-/// The icon/label a [SyncStatus] should render as — shared by the Sync
-/// page's own status card and the header's duplicate [_SyncStatusChip], so
-/// the two can never drift into showing different text for the same state.
+/// The server-side icon/label used as the baseline by
+/// [_effectiveSyncStatusPresentation].
 (IconData icon, String label) _syncStatusPresentation(SyncStatus status) =>
     switch (status) {
       SyncStatus.idle => (Icons.check_circle_outline, 'Up to date'),
@@ -1078,6 +1183,43 @@ class _SectionContent extends StatelessWidget {
       SyncStatus.offline => (Icons.cloud_off_outlined, 'Offline'),
       SyncStatus.error => (Icons.error_outline, 'Sync error'),
     };
+
+/// Resolves the status the user sees for the whole synchronization flow. A
+/// completed server pull is not "up to date" while its changed files are
+/// still being written into the selected local sync folder.
+(IconData icon, String label, Color? color, String? tooltip)
+_effectiveSyncStatusPresentation({
+  required SyncEngine engine,
+  SyncFolderMaterializer? materializer,
+}) {
+  final base = _syncStatusPresentation(engine.status);
+  return switch ((engine.status, materializer?.status)) {
+    (SyncStatus.error, _) => (
+      Icons.error_outline,
+      'Sync error',
+      Colors.red,
+      engine.errorMessage,
+    ),
+    (_, SyncFolderStatus.error) => (
+      Icons.error_outline,
+      'Folder sync error',
+      Colors.red,
+      materializer?.errorMessage,
+    ),
+    (_, SyncFolderStatus.materializing) => (
+      Icons.download_outlined,
+      'Writing files…',
+      null,
+      null,
+    ),
+    _ => (
+      base.$1,
+      base.$2,
+      engine.status == SyncStatus.idle ? Colors.green : null,
+      null,
+    ),
+  };
+}
 
 /// The rounded 0-100 percent for [FilesController.progress] — shared so the
 /// Files page's own transfer row and the header's [_TransferProgressIndicator]
@@ -1142,6 +1284,22 @@ String _formatRelativeTime(DateTime utc) {
 String _relativeTimeUnit(int value, String unit) =>
     '$value $unit${value == 1 ? '' : 's'} ago';
 
+const double _fileListLeadingSize = 44;
+
+const Widget _defaultFileListIcon = SizedBox.square(
+  dimension: _fileListLeadingSize,
+  child: Icon(Icons.insert_drive_file_outlined, size: _fileListLeadingSize),
+);
+
+const Widget _folderListIcon = SizedBox.square(
+  dimension: _fileListLeadingSize,
+  child: Icon(
+    Icons.folder,
+    size: _fileListLeadingSize,
+    color: Colors.lightBlue,
+  ),
+);
+
 /// Shows a decrypted, downscaled image thumbnail when it is inexpensive to
 /// fetch. All other files, including unsupported image encodings, retain the
 /// regular file icon.
@@ -1154,16 +1312,16 @@ class _FileListLeading extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!controller.canShowImagePreview(entry)) {
-      return const Icon(Icons.insert_drive_file_outlined);
+      return _defaultFileListIcon;
     }
     return SizedBox.square(
-      dimension: 44,
+      dimension: _fileListLeadingSize,
       child: FutureBuilder(
         future: controller.imagePreview(entry),
         builder: (context, snapshot) {
           final bytes = snapshot.data;
           if (bytes == null) {
-            return const Icon(Icons.insert_drive_file_outlined);
+            return _defaultFileListIcon;
           }
           return ClipRRect(
             borderRadius: BorderRadius.circular(6),
@@ -1173,7 +1331,7 @@ class _FileListLeading extends StatelessWidget {
               cacheWidth: 96,
               cacheHeight: 96,
               errorBuilder: (context, error, stackTrace) =>
-                  const Icon(Icons.insert_drive_file_outlined),
+                  _defaultFileListIcon,
             ),
           );
         },
@@ -1612,7 +1770,7 @@ final class _FilesSectionState extends State<_FilesSection> {
               final entry = controller.entries[index];
               return ListTile(
                 leading: entry.isDirectory
-                    ? const Icon(Icons.folder_outlined)
+                    ? _folderListIcon
                     : _FileListLeading(entry: entry, controller: controller),
                 title: Text(entry.name),
                 subtitle: entry.isDirectory
@@ -1696,20 +1854,6 @@ final class _FilesSectionState extends State<_FilesSection> {
                         ),
                       ],
                     ),
-                  if (controller.busy)
-                    SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        value: controller.progress,
-                      ),
-                    ),
-                  if (controller.busy)
-                    Semantics(
-                      label: transferProgressLabel,
-                      excludeSemantics: true,
-                      child: Text('$transferProgressPercent%'),
-                    ),
                   if (defaultTargetPlatform == TargetPlatform.android) ...[
                     IconButton(
                       onPressed: controller.busy
@@ -1757,6 +1901,20 @@ final class _FilesSectionState extends State<_FilesSection> {
                       label: const Text('Upload'),
                     ),
                   ],
+                  if (controller.busy)
+                    SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        value: controller.progress,
+                      ),
+                    ),
+                  if (controller.busy)
+                    Semantics(
+                      label: transferProgressLabel,
+                      excludeSemantics: true,
+                      child: Text('$transferProgressPercent%'),
+                    ),
                 ],
               ),
               if (defaultTargetPlatform == TargetPlatform.windows) ...[
@@ -1809,6 +1967,7 @@ class _SyncSection extends StatelessWidget {
   const _SyncSection({
     required this.syncFolder,
     required this.onSelectSyncFolder,
+    required this.onOpenSyncFolder,
     required this.syncEngine,
     required this.syncFolderMaterializer,
     required this.localFolderUploader,
@@ -1817,6 +1976,7 @@ class _SyncSection extends StatelessWidget {
   });
   final String? syncFolder;
   final Future<void> Function() onSelectSyncFolder;
+  final Future<void> Function()? onOpenSyncFolder;
   final SyncEngine? syncEngine;
   final SyncFolderMaterializer? syncFolderMaterializer;
   final LocalFolderUploader? localFolderUploader;
@@ -1854,17 +2014,20 @@ class _SyncSection extends StatelessWidget {
             )
           else
             AnimatedBuilder(
-              animation: engine,
+              animation: Listenable.merge([engine, ?syncFolderMaterializer]),
               builder: (context, _) {
-                final (icon, label) = _syncStatusPresentation(engine.status);
+                final (icon, label, color, tooltip) =
+                    _effectiveSyncStatusPresentation(
+                      engine: engine,
+                      materializer: syncFolderMaterializer,
+                    );
                 return Card(
                   child: ListTile(
-                    leading: Icon(icon),
+                    leading: Icon(icon, color: color),
                     title: Text(label),
                     subtitle:
-                        engine.status == SyncStatus.error &&
-                            engine.errorMessage != null
-                        ? Text(engine.errorMessage!)
+                        tooltip != null
+                        ? Text(tooltip)
                         : engine.isPaused
                         ? const Text(
                             'No new sync pass starts until you resume.',
@@ -1911,9 +2074,22 @@ class _SyncSection extends StatelessWidget {
                       : '$syncFolder\nFilesystem changes are picked up automatically. New local folders and their files are uploaded; directory deletes remain conservative.',
                 ),
                 isThreeLine: syncFolder != null,
-                trailing: TextButton(
-                  onPressed: onSelectSyncFolder,
-                  child: Text(syncFolder == null ? 'Choose' : 'Change'),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (syncFolder != null && onOpenSyncFolder != null)
+                      OutlinedButton.icon(
+                        onPressed: onOpenSyncFolder,
+                        icon: const Icon(Icons.folder_open_outlined),
+                        label: const Text('Open'),
+                      ),
+                    if (syncFolder != null && onOpenSyncFolder != null)
+                      const SizedBox(width: 8),
+                    TextButton(
+                      onPressed: onSelectSyncFolder,
+                      child: Text(syncFolder == null ? 'Choose' : 'Change'),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -1936,6 +2112,8 @@ class _SyncSection extends StatelessWidget {
                     'Could not update the folder',
                   ),
                 };
+                final progress = materializer.transferProgress;
+                final activeFileName = materializer.activeFileName;
                 return Card(
                   child: ListTile(
                     leading: Icon(icon),
@@ -1944,6 +2122,16 @@ class _SyncSection extends StatelessWidget {
                         materializer.status == SyncFolderStatus.error &&
                             materializer.errorMessage != null
                         ? Text(materializer.errorMessage!)
+                        : materializer.status == SyncFolderStatus.materializing &&
+                              progress != null &&
+                              activeFileName != null
+                        ? _syncFolderTransferProgress(
+                            verb: 'Downloading',
+                            fileName: activeFileName,
+                            progress: progress,
+                          )
+                        : materializer.status == SyncFolderStatus.materializing
+                        ? const Text('Preparing the local folder…')
                         : null,
                   ),
                 );
@@ -1970,6 +2158,8 @@ class _SyncSection extends StatelessWidget {
                     'Could not upload local changes',
                   ),
                 };
+                final progress = uploader.transferProgress;
+                final activeFileName = uploader.activeFileName;
                 return Card(
                   child: ListTile(
                     leading: Icon(icon),
@@ -1978,6 +2168,16 @@ class _SyncSection extends StatelessWidget {
                         uploader.status == LocalUploadStatus.error &&
                             uploader.errorMessage != null
                         ? Text(uploader.errorMessage!)
+                        : uploader.status == LocalUploadStatus.scanning &&
+                              progress != null &&
+                              activeFileName != null
+                        ? _syncFolderTransferProgress(
+                            verb: 'Uploading',
+                            fileName: activeFileName,
+                            progress: progress,
+                          )
+                        : uploader.status == LocalUploadStatus.scanning
+                        ? const Text('Scanning local changes…')
                         : null,
                   ),
                 );
@@ -2022,6 +2222,26 @@ class _SyncSection extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Shared inline progress display for both directions of local-folder sync.
+/// File transfers report byte/chunk progress; scanning and folder creation
+/// remain intentionally indeterminate until a concrete file starts moving.
+Widget _syncFolderTransferProgress({
+  required String verb,
+  required String fileName,
+  required double progress,
+}) {
+  final percent = (progress * 100).round().clamp(0, 100);
+  return Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text('$verb $fileName — $percent%'),
+      const SizedBox(height: 6),
+      LinearProgressIndicator(value: progress),
+    ],
+  );
 }
 
 class _SettingsSection extends StatelessWidget {

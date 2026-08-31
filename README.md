@@ -21,6 +21,7 @@ This repository currently provides the security-first Go server foundation, a Wi
 - Health and metrics endpoints.
 - Atomic ciphertext-only server backup and safe restore commands. A backup contains a consistent SQLite snapshot, immutable ciphertext blobs, the transport identity key, the supplied server config, and a SHA-256 manifest. It never contains a Recovery Secret or client private E2EE key.
 - A manually invoked maintenance command that removes expired sessions, abandoned upload ciphertext, expired idempotency records, and unreachable ciphertext blobs only after a two-pass grace period. It never decrypts content or removes versions/Trash items.
+- Windows users can open the selected local sync folder directly from the Sync page or the HomeBox notification-area menu; the tray action stays disabled until a folder is selected.
 
 ## Run the server foundation
 

@@ -29,6 +29,20 @@ enum FileTransferDirection { upload, download }
 
 enum FileListSort { name, extension, updatedAt }
 
+/// The picker and desktop file APIs only provide a path, so preserve the
+/// common image formats in encrypted metadata ourselves. The filename
+/// fallback also lets previews work for files uploaded before MIME metadata
+/// was introduced.
+String? _imageMimeTypeFromFileName(String fileName) {
+  final dotIndex = fileName.lastIndexOf('.');
+  if (dotIndex <= 0 || dotIndex == fileName.length - 1) return null;
+  return switch (fileName.substring(dotIndex + 1).toLowerCase()) {
+    'jpg' || 'jpeg' => 'image/jpeg',
+    'png' => 'image/png',
+    _ => null,
+  };
+}
+
 /// A decrypted-for-display file or folder entry. The server only ever knows
 /// [node]'s opaque ID and ciphertext; [metadata] is decrypted locally.
 final class FileEntry {
@@ -170,8 +184,8 @@ final class FilesController extends ChangeNotifier {
     final mimeType = entry.metadata.mimeType?.toLowerCase();
     final size = entry.metadata.plaintextSize;
     return !entry.isDirectory &&
-        mimeType != null &&
-        mimeType.startsWith('image/') &&
+        (mimeType?.startsWith('image/') == true ||
+            _imageMimeTypeFromFileName(entry.name) != null) &&
         size != null &&
         size <= _maxImagePreviewSourceSize &&
         entry.node.currentVersionId != null;
@@ -541,6 +555,7 @@ final class FilesController extends ChangeNotifier {
     final metadataEnvelope = await _metadataCipher.encrypt(
       metadata: SensitiveNodeMetadata(
         fileName: fileName,
+        mimeType: _imageMimeTypeFromFileName(fileName),
         plaintextSha256: plaintextHash,
         plaintextSize: plaintextLength,
       ),
@@ -620,6 +635,8 @@ final class FilesController extends ChangeNotifier {
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(
           fileName: entry.name,
+          mimeType:
+              entry.metadata.mimeType ?? _imageMimeTypeFromFileName(entry.name),
           plaintextSha256: plaintextHash,
           plaintextSize: plaintextLength,
         ),

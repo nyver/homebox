@@ -388,6 +388,7 @@ void main() {
     final uploaded = controller.entries.single;
     expect(uploaded.name, 'photo.jpg');
     expect(uploaded.isDirectory, isFalse);
+    expect(uploaded.metadata.mimeType, 'image/jpeg');
     expect(uploaded.metadata.plaintextSha256, isNotNull);
     expect(uploaded.metadata.plaintextSize, originalBytes.length);
 

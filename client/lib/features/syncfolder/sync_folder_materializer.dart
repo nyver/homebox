@@ -57,9 +57,13 @@ final class SyncFolderMaterializer extends ChangeNotifier {
   bool _disposed = false;
   SyncFolderStatus _status = SyncFolderStatus.idle;
   String? _errorMessage;
+  String? _activeFileName;
+  double? _transferProgress;
 
   SyncFolderStatus get status => _status;
   String? get errorMessage => _errorMessage;
+  String? get activeFileName => _activeFileName;
+  double? get transferProgress => _transferProgress;
 
   /// Mirrors the current vault contents into [rootPath]. Safe to call
   /// repeatedly (e.g. after every [SyncEngine] pull); a call already in
@@ -73,6 +77,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     final vaultKey = await _vaultKeyStore.loadVaultKey();
     if (api == null || session == null || vaultKey == null) return;
     _running = true;
+    _clearTransferProgress();
     _setStatus(SyncFolderStatus.materializing);
     try {
       final vaultId = uuidStringToBytes(session.user.id);
@@ -96,6 +101,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       _setStatus(SyncFolderStatus.error);
     } finally {
       _running = false;
+      _clearTransferProgress();
     }
   }
 
@@ -192,6 +198,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       return; // node created but no content uploaded yet.
     }
     try {
+      _setTransferProgress(metadata.fileName, 0);
       final bytes = await downloadAndDecryptFile(
         api: api,
         accessToken: accessToken,
@@ -199,6 +206,8 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         vaultId: vaultId,
         nodeId: node.id,
         expectedPlaintextSha256: metadata.plaintextSha256,
+        onProgress: (progress) =>
+            _setTransferProgress(metadata.fileName, progress),
       );
       await _writeFile(rootPath, relativePath, targetPath, bytes);
       if (existing != null && existing.relativePath != relativePath) {
@@ -312,6 +321,19 @@ final class SyncFolderMaterializer extends ChangeNotifier {
 
   void _setStatus(SyncFolderStatus status) {
     _status = status;
+    if (!_disposed) notifyListeners();
+  }
+
+  void _setTransferProgress(String fileName, double progress) {
+    _activeFileName = fileName;
+    _transferProgress = progress.clamp(0, 1).toDouble();
+    if (!_disposed) notifyListeners();
+  }
+
+  void _clearTransferProgress() {
+    if (_activeFileName == null && _transferProgress == null) return;
+    _activeFileName = null;
+    _transferProgress = null;
     if (!_disposed) notifyListeners();
   }
 
