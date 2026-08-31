@@ -34,10 +34,7 @@ Future<ServerConnectionController> _connectedAndSignedIn(
   return controller;
 }
 
-Future<void> _waitForSyncStatus(
-  SyncEngine engine,
-  SyncStatus status,
-) async {
+Future<void> _waitForSyncStatus(SyncEngine engine, SyncStatus status) async {
   final deadline = DateTime.now().add(const Duration(seconds: 2));
   while (engine.status != status && DateTime.now().isBefore(deadline)) {
     await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -66,30 +63,63 @@ PendingOperation _createOp(
 );
 
 void main() {
-  test('starts a sync pass immediately when session restoration completes', () async {
-    final fakeServer = FakeNodeServer();
-    final httpServer = await fakeServer.start();
-    addTearDown(() => httpServer.close(force: true));
-    final serverConnection = ServerConnectionController(
-      deviceIdentityStore: DeviceIdentityStore(MemoryDevicePrivateKeyStorage()),
-      serverStore: PinnedServerStore(MemoryPinnedServerStorage()),
-      sessionStore: SessionStore(MemorySessionStorage()),
-    );
-    addTearDown(serverConnection.dispose);
-    await serverConnection.discover('127.0.0.1:${httpServer.port}');
-    await serverConnection.confirmTrust();
+  test(
+    'starts a sync pass immediately when session restoration completes',
+    () async {
+      final fakeServer = FakeNodeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = ServerConnectionController(
+        deviceIdentityStore: DeviceIdentityStore(
+          MemoryDevicePrivateKeyStorage(),
+        ),
+        serverStore: PinnedServerStore(MemoryPinnedServerStorage()),
+        sessionStore: SessionStore(MemorySessionStorage()),
+      );
+      addTearDown(serverConnection.dispose);
+      await serverConnection.discover('127.0.0.1:${httpServer.port}');
+      await serverConnection.confirmTrust();
 
-    final engine = SyncEngine(
-      serverConnection: serverConnection,
-      localDatabase: LocalDatabase.openInMemory(),
-    );
-    addTearDown(engine.dispose);
-    engine.start(interval: const Duration(hours: 1));
-    expect(engine.status, SyncStatus.offline);
+      final engine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(engine.dispose);
+      engine.start(interval: const Duration(hours: 1));
+      expect(engine.status, SyncStatus.offline);
 
-    await serverConnection.login('admin', 'correct horse battery staple');
-    await _waitForSyncStatus(engine, SyncStatus.idle);
-  });
+      await serverConnection.login('admin', 'correct horse battery staple');
+      await _waitForSyncStatus(engine, SyncStatus.idle);
+    },
+  );
+
+  test(
+    'a temporary transport failure reports offline and preserves the outbox',
+    () async {
+      final fakeServer = FakeNodeServer();
+      final httpServer = await fakeServer.start();
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      final engine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(engine.dispose);
+      engine.pendingOperations.enqueue(_createOp('offline-node'));
+
+      await httpServer.close(force: true);
+      await engine.runOnce();
+
+      expect(engine.status, SyncStatus.offline);
+      expect(engine.errorMessage, contains('Cannot reach the HomeBox server'));
+      expect(
+        engine.pendingOperations.listReady(
+          DateTime.now().add(const Duration(days: 1)),
+        ),
+        isNotEmpty,
+      );
+    },
+  );
 
   test(
     'pushing a pending CREATE succeeds and the node lands in the local cache',

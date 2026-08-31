@@ -8,6 +8,7 @@ This repository currently provides the security-first Go server foundation, a Wi
 ## Current capabilities
 
 - Windows enforces one HomeBox instance per user session, while the local sync folder propagates deletion of directories that were previously materialized on that device. Temporary refresh failures preserve the saved mobile login for a later retry.
+- Android network timeouts leave sync offline and retain the durable outbox/session for automatic retry; the server must be reachable by its LAN or VPN address on TCP 8787, not Android's own `localhost`.
 
 - Safe YAML configuration with mandatory E2EE and no server decryption mode.
 - Versioned SQLite migrations (WAL, foreign keys) instead of an inline schema dump.

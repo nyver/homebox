@@ -23,7 +23,9 @@ final class ServerIdentityMismatchException implements Exception {
 /// skipped in favor of no check.
 final class PinnedHttpClient {
   PinnedHttpClient(this.pinnedFingerprint) {
-    _client = HttpClient()..badCertificateCallback = _verify;
+    _client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15)
+      ..badCertificateCallback = _verify;
   }
 
   final String pinnedFingerprint;
@@ -74,7 +76,9 @@ final class ServerDiscovery {
     }
     final fingerprint = seen;
     if (fingerprint == null) {
-      throw const ServerDiscoveryException('Server did not present a recognizable P-256 identity certificate.');
+      throw const ServerDiscoveryException(
+        'Server did not present a recognizable P-256 identity certificate.',
+      );
     }
     return fingerprint;
   }

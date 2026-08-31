@@ -4,6 +4,7 @@
 // ignore_for_file: prefer_initializing_formals
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
@@ -183,6 +184,12 @@ final class SyncEngine extends ChangeNotifier {
       await _pullChanges(api, session.accessToken, session.user.id);
       _errorMessage = null;
       if (!_paused) _setStatus(SyncStatus.idle);
+    } on SocketException {
+      // A timeout, offline Wi-Fi, or a temporarily unreachable server is an
+      // expected mobile-network condition. Keep the outbox intact and let the
+      // periodic pass retry rather than presenting it as a sync failure.
+      _errorMessage = 'Cannot reach the HomeBox server. Check the network and server address.';
+      if (!_paused) _setStatus(SyncStatus.offline);
     } catch (e) {
       _errorMessage = '$e';
       if (!_paused) _setStatus(SyncStatus.error);
