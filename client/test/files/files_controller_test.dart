@@ -216,7 +216,8 @@ final class _FakeServer {
       final session = _uploadSessions[uploadId]!;
       final nodeId = session['targetNodeId'] as String;
       final node = _nodes[nodeId]!;
-      if (node['revision'] != body['expectedRevision']) {
+      if (node['revision'] != session['expectedRevision'] ||
+          body['expectedRevision'] != session['expectedRevision']) {
         _writeJson(request, 409, {
           'error': {
             'code': 'REVISION_CONFLICT',
@@ -244,7 +245,10 @@ final class _FakeServer {
         'chunkCount': session['chunkCount'],
       });
       node['currentVersionId'] = fileVersionId;
+      node['metadataCiphertext'] = session['metadataCiphertext'];
+      node['metadataKeyVersion'] = session['metadataKeyVersion'];
       node['revision'] = newRevision;
+      node['updatedAt'] = DateTime.now().toUtc().toIso8601String();
       _writeJson(request, 200, {
         'blobId': session['blobId'],
         'fileVersionId': fileVersionId,
@@ -560,61 +564,61 @@ void main() {
     );
   });
 
-  test('two downloadFile calls started back to back never both proceed', () async {
-    final fakeServer = _FakeServer();
-    final httpServer = await fakeServer.start();
-    addTearDown(() => httpServer.close(force: true));
-    final serverConnection = await _connectedAndSignedIn(httpServer);
-    addTearDown(serverConnection.dispose);
-    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(
-      userId: _FakeServer.userId,
-    );
-    recoverySecret.destroy();
-    final syncEngine = SyncEngine(
-      serverConnection: serverConnection,
-      localDatabase: LocalDatabase.openInMemory(),
-    );
-    addTearDown(syncEngine.dispose);
-    final controller = FilesController(
-      serverConnection: serverConnection,
-      vaultKeyStore: vaultKeyStore,
-      syncEngine: syncEngine,
-    );
-    addTearDown(controller.dispose);
+  test(
+    'two downloadFile calls started back to back never both proceed',
+    () async {
+      final fakeServer = _FakeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final recoverySecret = await vaultKeyStore.createVault(
+        userId: _FakeServer.userId,
+      );
+      recoverySecret.destroy();
+      final syncEngine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(syncEngine.dispose);
+      final controller = FilesController(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(controller.dispose);
 
-    final tempDir = await Directory.systemTemp.createTemp(
-      'homebox_files_test_',
-    );
-    addTearDown(() => tempDir.delete(recursive: true));
-    final sourceFile = File('${tempDir.path}/note.txt');
-    await sourceFile.writeAsBytes(utf8.encode('shared by both calls'));
-    expect(
-      await controller.uploadFile(sourceFile.path),
-      isTrue,
-      reason: controller.errorMessage,
-    );
-    final entry = controller.entries.single;
+      final tempDir = await Directory.systemTemp.createTemp(
+        'homebox_files_test_',
+      );
+      addTearDown(() => tempDir.delete(recursive: true));
+      final sourceFile = File('${tempDir.path}/note.txt');
+      await sourceFile.writeAsBytes(utf8.encode('shared by both calls'));
+      expect(
+        await controller.uploadFile(sourceFile.path),
+        isTrue,
+        reason: controller.errorMessage,
+      );
+      final entry = controller.entries.single;
 
-    // No await between these two calls: the busy claim must happen
-    // synchronously (before either call's first internal await), or both
-    // would observe `busy == false` and both proceed.
-    final first = controller.downloadFile(
-      entry,
-      '${tempDir.path}/first.txt',
-    );
-    final second = controller.downloadFile(
-      entry,
-      '${tempDir.path}/second.txt',
-    );
-    final results = await Future.wait([first, second]);
+      // No await between these two calls: the busy claim must happen
+      // synchronously (before either call's first internal await), or both
+      // would observe `busy == false` and both proceed.
+      final first = controller.downloadFile(entry, '${tempDir.path}/first.txt');
+      final second = controller.downloadFile(
+        entry,
+        '${tempDir.path}/second.txt',
+      );
+      final results = await Future.wait([first, second]);
 
-    expect(
-      results.where((succeeded) => succeeded).length,
-      1,
-      reason: 'exactly one of the two concurrent calls should have run',
-    );
-  });
+      expect(
+        results.where((succeeded) => succeeded).length,
+        1,
+        reason: 'exactly one of the two concurrent calls should have run',
+      );
+    },
+  );
 
   test('uploadFiles keeps a dropped batch in its opening folder and continues after one bad path', () async {
     final fakeServer = _FakeServer();

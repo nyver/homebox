@@ -4,8 +4,11 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.provider.Settings
+import android.webkit.MimeTypeMap
 import android.view.WindowManager
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterFragmentActivity
@@ -13,6 +16,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
+import java.util.Locale
 
 /// Backs [MethodChannelAndroidFileSaver] (lib/core/platform/android_file_saver.dart).
 /// `file_selector_android` never implemented a save dialog, so decrypted
@@ -21,6 +25,7 @@ import java.io.FileInputStream
 /// already-decrypted bytes from a local temp file to the user's chosen
 /// destination — it never touches the E2EE layer.
 class MainActivity : FlutterFragmentActivity() {
+    private val apkMimeType = "application/vnd.android.package-archive"
     private val fileSaveChannel = "homebox/file_save"
     private val fileShareChannel = "homebox/file_share"
     private val syncFolderChannel = "homebox/sync_folder"
@@ -154,7 +159,7 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                     }
                     "openFile" -> {
-                        val mimeType = call.argument<String>("mimeType") ?: "application/octet-stream"
+                        val requestedMimeType = call.argument<String>("mimeType")
                         withTreeAndPath(call, result) { treeUri, relativePath ->
                             Thread {
                                 try {
@@ -164,8 +169,34 @@ class MainActivity : FlutterFragmentActivity() {
                                             result.success(false)
                                             return@runOnUiThread
                                         }
+                                        val mimeType = resolveMimeType(requestedMimeType, relativePath)
+                                        if (mimeType.equals(apkMimeType, ignoreCase = true) &&
+                                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                                            !packageManager.canRequestPackageInstalls()
+                                        ) {
+                                            try {
+                                                startActivity(
+                                                    Intent(
+                                                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                                        Uri.parse("package:$packageName"),
+                                                    ),
+                                                )
+                                                result.error(
+                                                    "install_permission_required",
+                                                    "Allow HomeBox to install unknown apps, then open the APK again.",
+                                                    null,
+                                                )
+                                            } catch (e: Exception) {
+                                                result.error("open_failed", e.message, null)
+                                            }
+                                            return@runOnUiThread
+                                        }
                                         val intent = Intent(Intent.ACTION_VIEW).apply {
                                             setDataAndType(document, mimeType)
+                                            // Some OEM choosers propagate a URI grant only when it
+                                            // is also present in ClipData. Keep the document readable
+                                            // by the app selected from this chooser.
+                                            clipData = ClipData.newRawUri(relativePath.substringAfterLast('/'), document)
                                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                         }
                                         try {
@@ -281,9 +312,30 @@ class MainActivity : FlutterFragmentActivity() {
         return DocumentsContract.createDocument(
             contentResolver,
             parent,
-            "application/octet-stream",
+            resolveMimeType(null, relativePath),
             parts.last(),
         ) ?: throw IllegalStateException("Could not create sync-folder file.")
+    }
+
+    /// Uses the encrypted metadata's MIME type when it is specific, while
+    /// recovering a useful type for files uploaded by older clients (which
+    /// stored only JPG/PNG MIME types). Android uses this type to decide which
+    /// apps are eligible for ACTION_VIEW; application/octet-stream hides image
+    /// viewers and APK installers from the chooser.
+    private fun resolveMimeType(requestedMimeType: String?, relativePath: String): String {
+        val suppliedMimeType = requestedMimeType?.trim()
+        if (!suppliedMimeType.isNullOrEmpty() &&
+            !suppliedMimeType.equals("application/octet-stream", ignoreCase = true)
+        ) {
+            return suppliedMimeType
+        }
+        val fileName = relativePath.substringAfterLast('/')
+        val extension = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        if (extension.isEmpty()) return "application/octet-stream"
+        // MimeTypeMap does not reliably include APK on every Android version.
+        if (extension == "apk") return apkMimeType
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+            ?: "application/octet-stream"
     }
 
     private fun findDocument(treeUri: Uri, relativePath: String): Uri? {

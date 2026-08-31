@@ -25,7 +25,8 @@ func TestCompleteStoresOnlyJoinedCiphertextAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := CreateInput{UserID: userID, DeviceID: deviceID, TargetNodeID: nodeID, FileVersionID: uuid.NewString(), BlobID: uuid.NewString(), ChunkSize: 50, ChunkCount: 2, MetadataCiphertext: []byte("encrypted-metadata"), WrappedFileKey: []byte("wrapped-key"), E2EEHeader: []byte("e2ee-header")}
+	expectedRevision := int64(0)
+	input := CreateInput{UserID: userID, DeviceID: deviceID, TargetNodeID: nodeID, FileVersionID: uuid.NewString(), BlobID: uuid.NewString(), ExpectedRevision: &expectedRevision, ChunkSize: 50, ChunkCount: 2, MetadataKeyVersion: 2, MetadataCiphertext: []byte("encrypted-metadata"), WrappedFileKey: []byte("wrapped-key"), E2EEHeader: []byte("e2ee-header")}
 	session, err := s.Create(ctx, input)
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +52,14 @@ func TestCompleteStoresOnlyJoinedCiphertextAndIsIdempotent(t *testing.T) {
 	if string(stored) != "ciphertext-oneciphertext-two" {
 		t.Fatalf("unexpected stored bytes: %q", stored)
 	}
+	var storedMetadata []byte
+	var storedMetadataVersion int
+	if err := db.QueryRowContext(ctx, "SELECT metadata_ciphertext,metadata_key_version FROM nodes WHERE id=?", nodeID).Scan(&storedMetadata, &storedMetadataVersion); err != nil {
+		t.Fatal(err)
+	}
+	if string(storedMetadata) != "encrypted-metadata" || storedMetadataVersion != 2 {
+		t.Fatalf("metadata was not committed atomically: ciphertext=%q version=%d", storedMetadata, storedMetadataVersion)
+	}
 	again, err := s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: operationID, KeyScopeID: uuid.NewString(), KeyVersion: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +82,8 @@ func TestConflictingRetryCannotReplaceAcceptedChunk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := s.Create(ctx, CreateInput{UserID: userID, DeviceID: deviceID, TargetNodeID: nodeID, FileVersionID: uuid.NewString(), BlobID: uuid.NewString(), ChunkSize: 100, ChunkCount: 1, MetadataCiphertext: []byte("m"), WrappedFileKey: []byte("k"), E2EEHeader: []byte("h")})
+	expectedRevision := int64(0)
+	session, err := s.Create(ctx, CreateInput{UserID: userID, DeviceID: deviceID, TargetNodeID: nodeID, FileVersionID: uuid.NewString(), BlobID: uuid.NewString(), ExpectedRevision: &expectedRevision, ChunkSize: 100, ChunkCount: 1, MetadataKeyVersion: 1, MetadataCiphertext: []byte("m"), WrappedFileKey: []byte("k"), E2EEHeader: []byte("h")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +102,30 @@ func TestConflictingRetryCannotReplaceAcceptedChunk(t *testing.T) {
 	}
 }
 
+func TestCreateRequiresExpectedRevision(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	userID, deviceID, nodeID := seedFileNode(t, ctx, db)
+	s, err := New(db, dir, 100, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Create(ctx, CreateInput{
+		UserID: userID, DeviceID: deviceID, TargetNodeID: nodeID,
+		FileVersionID: uuid.NewString(), BlobID: uuid.NewString(),
+		ChunkSize: 100, ChunkCount: 1, MetadataKeyVersion: 1,
+		MetadataCiphertext: []byte("m"), WrappedFileKey: []byte("k"), E2EEHeader: []byte("h"),
+	})
+	if err == nil {
+		t.Fatal("upload creation without an expected revision was accepted")
+	}
+}
+
 func TestAbortRemovesTempChunksAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -105,8 +139,9 @@ func TestAbortRemovesTempChunksAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := s.Create(ctx, CreateInput{UserID: userID, DeviceID: deviceID, TargetNodeID: nodeID, FileVersionID: uuid.NewString(), BlobID: uuid.NewString(),
-		ChunkSize: 50, ChunkCount: 1, MetadataCiphertext: []byte("m"), WrappedFileKey: []byte("k"), E2EEHeader: []byte("h")})
+	expectedRevision := int64(0)
+	session, err := s.Create(ctx, CreateInput{UserID: userID, DeviceID: deviceID, TargetNodeID: nodeID, FileVersionID: uuid.NewString(), BlobID: uuid.NewString(), ExpectedRevision: &expectedRevision,
+		ChunkSize: 50, ChunkCount: 1, MetadataKeyVersion: 1, MetadataCiphertext: []byte("m"), WrappedFileKey: []byte("k"), E2EEHeader: []byte("h")})
 	if err != nil {
 		t.Fatal(err)
 	}

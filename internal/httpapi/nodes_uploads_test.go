@@ -49,7 +49,7 @@ func TestFullNodeUploadDownloadAndSyncFlow(t *testing.T) {
 	fileVersionID := "40000000-0000-0000-0000-000000000001"
 	resp, uploadSession := s.do(t, http.MethodPost, "/api/v1/uploads", map[string]any{
 		"targetNodeId": fileID, "fileVersionId": fileVersionID, "blobId": blobID,
-		"chunkSize": len(chunk0), "chunkCount": 2,
+		"expectedRevision": fileRevision, "chunkSize": len(chunk0), "chunkCount": 2, "metadataKeyVersion": 2,
 		"metadataCiphertext": base64.StdEncoding.EncodeToString([]byte("m")),
 		"wrappedFileKey":     base64.StdEncoding.EncodeToString([]byte("wrapped-file-key")),
 		"e2eeHeader":         base64.StdEncoding.EncodeToString([]byte("e2ee-header")),
@@ -75,6 +75,10 @@ func TestFullNodeUploadDownloadAndSyncFlow(t *testing.T) {
 	}
 	if completeBody["blobId"] != blobID {
 		t.Fatalf("unexpected blob id: %v", completeBody["blobId"])
+	}
+	resp, updatedFile := s.get(t, "/api/v1/nodes/"+fileID, token)
+	if resp.StatusCode != http.StatusOK || updatedFile["metadataKeyVersion"] != float64(2) || updatedFile["metadataCiphertext"] != base64.StdEncoding.EncodeToString([]byte("m")) {
+		t.Fatalf("upload metadata was not committed with the file version: status=%d body=%v", resp.StatusCode, updatedFile)
 	}
 
 	// The version descriptor must carry back exactly what the client needs

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/homebox/homebox/internal/serveridentity"
 	_ "modernc.org/sqlite"
 )
@@ -334,7 +335,12 @@ func safeManifestPath(path string) bool {
 }
 
 func safeBlobPath(path string) bool {
-	return strings.HasPrefix(path, "blobs/") && strings.Count(path, "/") == 1 && strings.HasSuffix(path, ".hbxblob")
+	if strings.Contains(path, `\`) || !strings.HasPrefix(path, "blobs/") || strings.Count(path, "/") != 1 || !strings.HasSuffix(path, ".hbxblob") {
+		return false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(path, "blobs/"), ".hbxblob")
+	_, err := uuid.Parse(name)
+	return err == nil
 }
 
 func copyRegularFile(source, destination, manifestPath string) (FileInfo, error) {

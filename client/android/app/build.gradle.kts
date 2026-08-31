@@ -8,6 +8,17 @@ dependencies {
     implementation("androidx.core:core:1.16.0")
 }
 
+val releaseStorePath = System.getenv("HOMEBOX_RELEASE_STORE_FILE")
+val releaseStorePassword = System.getenv("HOMEBOX_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = System.getenv("HOMEBOX_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("HOMEBOX_RELEASE_KEY_PASSWORD")
+val releaseSigningConfigured = listOf(
+    releaseStorePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.homebox.homebox_client"
     compileSdk = flutter.compileSdkVersion
@@ -33,12 +44,35 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = rootProject.file(releaseStorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
+    }
+}
+
+// Never produce a distributable artifact with Flutter's template debug key.
+// Debug builds remain available without secrets; release tasks fail closed.
+gradle.taskGraph.whenReady {
+    if (!releaseSigningConfigured && allTasks.any { it.name.contains("Release") }) {
+        throw GradleException(
+            "Android release signing requires HOMEBOX_RELEASE_STORE_FILE, " +
+                "HOMEBOX_RELEASE_STORE_PASSWORD, HOMEBOX_RELEASE_KEY_ALIAS, and " +
+                "HOMEBOX_RELEASE_KEY_PASSWORD.",
+        )
     }
 }
 

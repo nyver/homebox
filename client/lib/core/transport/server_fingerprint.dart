@@ -7,12 +7,12 @@ import 'package:crypto/crypto.dart' show sha256;
 /// matching the server's `serveridentity.Identity.Fingerprint()` /
 /// `FingerprintFromPublicKey` (ADR-008/ADR-009).
 ///
-/// HomeBox certificates carry an ECDSA P-256 SubjectPublicKeyInfo, whose
-/// DER encoding is fixed by RFC 5480: a constant 26-byte prefix
-/// (`3059301306072a8648ce3d020106082a8648ce3d030107034200`) immediately
-/// followed by the 65-byte uncompressed point (`0x04 || X(32) || Y(32)`).
-/// Scanning for that fixed prefix avoids depending on a general ASN.1/X.509
-/// parsing library for a single, well-known field. The identity key is
+/// HomeBox certificates carry an ECDSA P-256 SubjectPublicKeyInfo. This
+/// parser walks the certificate's DER structure to that exact field before
+/// accepting the algorithm, curve, and uncompressed point. Searching the raw
+/// certificate for a byte pattern is not sufficient: an unrelated extension
+/// could contain a copy of the pinned public point while the TLS handshake is
+/// authenticated by a different key. The identity key is
 /// P-256, not Ed25519, because Dart's bundled BoringSSL TLS client was
 /// empirically found to reject an Ed25519 server certificate outright
 /// during the handshake, even though Go's crypto/tls and OpenSSL both
@@ -24,9 +24,9 @@ import 'package:crypto/crypto.dart' show sha256;
 final class ServerFingerprint {
   const ServerFingerprint._();
 
-  static const List<int> _p256SpkiPrefix = [
-    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, //
-    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+  static const List<int> _p256AlgorithmIdentifier = [
+    0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
   ];
   static const int _pointLength = 65; // 0x04 || X(32) || Y(32), uncompressed
 
@@ -40,19 +40,102 @@ final class ServerFingerprint {
   }
 
   static Uint8List? _extractP256Point(Uint8List der) {
-    final prefixLength = _p256SpkiPrefix.length;
-    for (var i = 0; i + prefixLength + _pointLength <= der.length; i++) {
-      var matches = true;
-      for (var j = 0; j < prefixLength; j++) {
-        if (der[i + j] != _p256SpkiPrefix[j]) {
-          matches = false;
-          break;
-        }
+    try {
+      final certificate = _DerReader(der);
+      final certificateSequence = certificate.read(0x30);
+      if (!certificate.isAtEnd) return null;
+
+      final certificateFields = certificateSequence.reader();
+      final tbsCertificate = certificateFields.read(0x30);
+      certificateFields.read(0x30); // signatureAlgorithm
+      certificateFields.read(0x03); // signatureValue
+      if (!certificateFields.isAtEnd) return null;
+
+      final tbs = tbsCertificate.reader();
+      if (tbs.peekTag == 0xa0) tbs.read(0xa0); // optional explicit version
+      tbs.read(0x02); // serialNumber
+      tbs.read(0x30); // signature
+      tbs.read(0x30); // issuer
+      tbs.read(0x30); // validity
+      tbs.read(0x30); // subject
+      final subjectPublicKeyInfo = tbs.read(0x30).reader();
+
+      final algorithm = subjectPublicKeyInfo.read(0x30).content;
+      if (!_constantBytesEqual(algorithm, _p256AlgorithmIdentifier)) return null;
+      final publicKeyBits = subjectPublicKeyInfo.read(0x03).content;
+      if (!subjectPublicKeyInfo.isAtEnd ||
+          publicKeyBits.length != _pointLength + 1 ||
+          publicKeyBits[0] != 0 ||
+          publicKeyBits[1] != 0x04) {
+        return null;
       }
-      if (matches) {
-        return Uint8List.sublistView(der, i + prefixLength, i + prefixLength + _pointLength);
+      return Uint8List.sublistView(publicKeyBits, 1);
+    } on FormatException {
+      return null;
+    } on RangeError {
+      return null;
+    }
+  }
+}
+
+bool _constantBytesEqual(List<int> left, List<int> right) {
+  if (left.length != right.length) return false;
+  var difference = 0;
+  for (var i = 0; i < left.length; i++) {
+    difference |= left[i] ^ right[i];
+  }
+  return difference == 0;
+}
+
+final class _DerValue {
+  const _DerValue(this.content);
+
+  final Uint8List content;
+
+  _DerReader reader() => _DerReader(content);
+}
+
+/// Minimal strict DER reader for the fixed X.509 path needed above. It does
+/// not attempt to interpret arbitrary ASN.1 values.
+final class _DerReader {
+  _DerReader(this._bytes);
+
+  final Uint8List _bytes;
+  int _offset = 0;
+
+  bool get isAtEnd => _offset == _bytes.length;
+  int? get peekTag => isAtEnd ? null : _bytes[_offset];
+
+  _DerValue read(int expectedTag) {
+    if (_offset >= _bytes.length || _bytes[_offset++] != expectedTag) {
+      throw const FormatException('Unexpected DER tag.');
+    }
+    if (_offset >= _bytes.length) {
+      throw const FormatException('Missing DER length.');
+    }
+    var length = _bytes[_offset++];
+    if ((length & 0x80) != 0) {
+      final lengthBytes = length & 0x7f;
+      if (lengthBytes == 0 || lengthBytes > 4 || _offset + lengthBytes > _bytes.length) {
+        throw const FormatException('Invalid DER length.');
+      }
+      if (_bytes[_offset] == 0) {
+        throw const FormatException('Non-minimal DER length.');
+      }
+      length = 0;
+      for (var i = 0; i < lengthBytes; i++) {
+        length = (length << 8) | _bytes[_offset++];
+      }
+      if (length < 128) {
+        throw const FormatException('Non-minimal DER length.');
       }
     }
-    return null;
+    final end = _offset + length;
+    if (end < _offset || end > _bytes.length) {
+      throw const FormatException('DER value exceeds its container.');
+    }
+    final content = Uint8List.sublistView(_bytes, _offset, end);
+    _offset = end;
+    return _DerValue(content);
   }
 }

@@ -17,7 +17,8 @@ final class FakeNodeServer {
   final List<Map<String, dynamic>> _changes = [];
   final Map<String, Map<String, dynamic>> _uploadSessions = {};
   final Map<String, List<Uint8List>> _uploadChunks = {};
-  final Map<String, List<Map<String, dynamic>>> _fileVersions = {}; // by nodeId, newest first
+  final Map<String, List<Map<String, dynamic>>> _fileVersions =
+      {}; // by nodeId, newest first
   final Map<String, Uint8List> _blobs = {}; // by nodeId
   int _revision = 0;
   String? _registeredDeviceId;
@@ -37,7 +38,9 @@ final class FakeNodeServer {
     final path = request.uri.path;
     final method = request.method;
     if (method == 'POST' && path == '/api/v1/auth/login') {
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       final deviceId = (body['device'] as Map<String, dynamic>)['id'] as String;
       _registeredDeviceId = deviceId;
       _writeJson(request, 200, {
@@ -69,12 +72,18 @@ final class FakeNodeServer {
     }
     if (failMutationsWithStatus != null && method != 'GET') {
       _writeJson(request, failMutationsWithStatus!, {
-        'error': {'code': failMutationsWithCode ?? 'INTERNAL_ERROR', 'message': 'forced failure', 'requestId': 'req'},
+        'error': {
+          'code': failMutationsWithCode ?? 'INTERNAL_ERROR',
+          'message': 'forced failure',
+          'requestId': 'req',
+        },
       });
       return;
     }
     if (method == 'POST' && path == '/api/v1/nodes') {
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       final id = body['id'] as String;
       final node = _newNode(
         id: id,
@@ -90,16 +99,24 @@ final class FakeNodeServer {
     }
     if (method == 'GET' && path == '/api/v1/nodes/children') {
       final parentId = request.uri.queryParameters['parentId'];
-      final children = _nodes.values.where((n) => n['parentId'] == parentId && n['deletedAt'] == null).toList();
+      final children = _nodes.values
+          .where((n) => n['parentId'] == parentId && n['deletedAt'] == null)
+          .toList();
       _writeJson(request, 200, children);
       return;
     }
     if (method == 'GET' && path == '/api/v1/sync/changes') {
       if (pullDelay > Duration.zero) await Future<void>.delayed(pullDelay);
       final after = int.parse(request.uri.queryParameters['after'] ?? '0');
-      final pageSize = int.tryParse(request.uri.queryParameters['pageSize'] ?? '') ?? 500;
-      final page = _changes.where((c) => (c['revision'] as int) > after).take(pageSize).toList();
-      final hasMore = _changes.where((c) => (c['revision'] as int) > after).length > page.length;
+      final pageSize =
+          int.tryParse(request.uri.queryParameters['pageSize'] ?? '') ?? 500;
+      final page = _changes
+          .where((c) => (c['revision'] as int) > after)
+          .take(pageSize)
+          .toList();
+      final hasMore =
+          _changes.where((c) => (c['revision'] as int) > after).length >
+          page.length;
       _writeJson(request, 200, {
         'changes': page,
         'nextAfter': page.isEmpty ? after : page.last['revision'],
@@ -112,7 +129,11 @@ final class FakeNodeServer {
       final node = _nodes[id];
       if (node == null) {
         _writeJson(request, 404, {
-          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'not found',
+            'requestId': 'req',
+          },
         });
       } else {
         _writeJson(request, 200, node);
@@ -122,16 +143,26 @@ final class FakeNodeServer {
     if (method == 'PATCH' && path.startsWith('/api/v1/nodes/')) {
       final id = path.substring('/api/v1/nodes/'.length);
       final node = _nodes[id];
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       if (node == null) {
         _writeJson(request, 404, {
-          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'not found',
+            'requestId': 'req',
+          },
         });
         return;
       }
       if (node['revision'] != body['expectedRevision']) {
         _writeJson(request, 409, {
-          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+          'error': {
+            'code': 'REVISION_CONFLICT',
+            'message': 'stale revision',
+            'requestId': 'req',
+          },
         });
         return;
       }
@@ -150,16 +181,26 @@ final class FakeNodeServer {
     if (method == 'DELETE' && path.startsWith('/api/v1/nodes/')) {
       final id = path.substring('/api/v1/nodes/'.length);
       final node = _nodes[id];
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       if (node == null) {
         _writeJson(request, 404, {
-          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'not found',
+            'requestId': 'req',
+          },
         });
         return;
       }
       if (node['revision'] != body['expectedRevision']) {
         _writeJson(request, 409, {
-          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+          'error': {
+            'code': 'REVISION_CONFLICT',
+            'message': 'stale revision',
+            'requestId': 'req',
+          },
         });
         return;
       }
@@ -170,11 +211,20 @@ final class FakeNodeServer {
       return;
     }
     if (method == 'POST' && path == '/api/v1/uploads') {
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       final uploadId = '${_nodes.length}-${_uploadSessions.length}-upload';
       _uploadSessions[uploadId] = body;
-      _uploadChunks[uploadId] = List.filled(body['chunkCount'] as int, Uint8List(0));
-      _writeJson(request, 201, {'id': uploadId, 'chunkCount': body['chunkCount'], 'receivedChunks': <int>[]});
+      _uploadChunks[uploadId] = List.filled(
+        body['chunkCount'] as int,
+        Uint8List(0),
+      );
+      _writeJson(request, 201, {
+        'id': uploadId,
+        'chunkCount': body['chunkCount'],
+        'receivedChunks': <int>[],
+      });
       return;
     }
     if (method == 'PUT' && path.contains('/chunks/')) {
@@ -187,14 +237,22 @@ final class FakeNodeServer {
       return;
     }
     if (method == 'POST' && path.endsWith('/complete')) {
-      final uploadId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
-      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
+      final uploadId =
+          request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       final session = _uploadSessions[uploadId]!;
       final nodeId = session['targetNodeId'] as String;
       final node = _nodes[nodeId]!;
-      if (node['revision'] != body['expectedRevision']) {
+      if (node['revision'] != session['expectedRevision'] ||
+          body['expectedRevision'] != session['expectedRevision']) {
         _writeJson(request, 409, {
-          'error': {'code': 'REVISION_CONFLICT', 'message': 'stale revision', 'requestId': 'req'},
+          'error': {
+            'code': 'REVISION_CONFLICT',
+            'message': 'stale revision',
+            'requestId': 'req',
+          },
         });
         return;
       }
@@ -216,17 +274,26 @@ final class FakeNodeServer {
         'chunkCount': session['chunkCount'],
       });
       node['currentVersionId'] = fileVersionId;
+      node['metadataCiphertext'] = session['metadataCiphertext'];
+      node['metadataKeyVersion'] = session['metadataKeyVersion'];
       node['revision'] = newRevision;
-      _writeJson(request, 200, {'blobId': session['blobId'], 'fileVersionId': fileVersionId, 'revision': newRevision});
+      node['updatedAt'] = DateTime.now().toUtc().toIso8601String();
+      _writeJson(request, 200, {
+        'blobId': session['blobId'],
+        'fileVersionId': fileVersionId,
+        'revision': newRevision,
+      });
       return;
     }
     if (method == 'GET' && path.endsWith('/versions')) {
-      final nodeId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final nodeId =
+          request.uri.pathSegments[request.uri.pathSegments.length - 2];
       _writeJson(request, 200, _fileVersions[nodeId] ?? <dynamic>[]);
       return;
     }
     if (method == 'GET' && path.endsWith('/content')) {
-      final nodeId = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final nodeId =
+          request.uri.pathSegments[request.uri.pathSegments.length - 2];
       final blob = _blobs[nodeId];
       if (blob == null) {
         request.response.statusCode = 404;
@@ -241,11 +308,18 @@ final class FakeNodeServer {
       return;
     }
     if (method == 'POST' && path.endsWith('/restore')) {
-      final id = path.substring('/api/v1/nodes/'.length, path.length - '/restore'.length);
+      final id = path.substring(
+        '/api/v1/nodes/'.length,
+        path.length - '/restore'.length,
+      );
       final node = _nodes[id];
       if (node == null) {
         _writeJson(request, 404, {
-          'error': {'code': 'NOT_FOUND', 'message': 'not found', 'requestId': 'req'},
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'not found',
+            'requestId': 'req',
+          },
         });
         return;
       }
@@ -261,7 +335,13 @@ final class FakeNodeServer {
   /// Simulates a mutation made by a different device (e.g. a phone),
   /// bypassing the fake server's own HTTP layer entirely — the point is to
   /// give SyncEngine's *pull* path something to discover.
-  Map<String, dynamic> remoteCreate({required String id, String? parentId, String nodeType = 'DIRECTORY', String metadataCiphertext = 'bQ==', int metadataKeyVersion = 1}) {
+  Map<String, dynamic> remoteCreate({
+    required String id,
+    String? parentId,
+    String nodeType = 'DIRECTORY',
+    String metadataCiphertext = 'bQ==',
+    int metadataKeyVersion = 1,
+  }) {
     final node = _newNode(
       id: id,
       parentId: parentId,
@@ -305,7 +385,12 @@ final class FakeNodeServer {
 
   int _recordChange(String nodeId, String operation) {
     _revision += 1;
-    _changes.add({'revision': _revision, 'nodeId': nodeId, 'operation': operation, 'createdAt': '2026-01-01T00:00:00Z'});
+    _changes.add({
+      'revision': _revision,
+      'nodeId': nodeId,
+      'operation': operation,
+      'createdAt': '2026-01-01T00:00:00Z',
+    });
     return _revision;
   }
 

@@ -609,6 +609,7 @@ final class HomeBoxApiClient {
     int? expectedRevision,
     required int chunkSize,
     required int chunkCount,
+    required int metadataKeyVersion,
     required Uint8List metadataCiphertext,
     required Uint8List wrappedFileKey,
     required Uint8List e2eeHeader,
@@ -623,6 +624,7 @@ final class HomeBoxApiClient {
         'expectedRevision': ?expectedRevision,
         'chunkSize': chunkSize,
         'chunkCount': chunkCount,
+        'metadataKeyVersion': metadataKeyVersion,
         'metadataCiphertext': base64Encode(metadataCiphertext),
         'wrappedFileKey': base64Encode(wrappedFileKey),
         'e2eeHeader': base64Encode(e2eeHeader),
@@ -690,9 +692,27 @@ final class HomeBoxApiClient {
     String accessToken,
     String nodeId, {
     void Function(double progress)? onProgress,
+    int? maxBytes,
   }) => _sendRaw(
     'GET',
     '/api/v1/files/$nodeId/content',
+    accessToken: accessToken,
+    onResponseProgress: onProgress,
+    maxResponseBytes: maxBytes,
+  );
+
+  /// Streams ciphertext to [destination] with bounded memory. Production
+  /// file downloads use this path; the byte-returning method above remains
+  /// for small previews and transport-level tests.
+  Future<void> downloadFileContentToFile(
+    String accessToken,
+    String nodeId,
+    File destination, {
+    void Function(double progress)? onProgress,
+  }) => _sendRawToFile(
+    'GET',
+    '/api/v1/files/$nodeId/content',
+    destination,
     accessToken: accessToken,
     onResponseProgress: onProgress,
   );
@@ -837,8 +857,48 @@ final class HomeBoxApiClient {
     List<int>? body,
     String contentType = 'application/octet-stream',
     void Function(double progress)? onResponseProgress,
+    int? maxResponseBytes,
   }) async {
-    final HttpClientResponse response;
+    final response = await _openResponse(
+      method,
+      path,
+      accessToken: accessToken,
+      body: body,
+      contentType: contentType,
+    );
+    final builder = BytesBuilder(copy: false);
+    var received = 0;
+    final total = response.contentLength;
+    if (maxResponseBytes != null && total > maxResponseBytes) {
+      final subscription = response.listen((_) {});
+      await subscription.cancel();
+      throw const FormatException('Response exceeds the allowed in-memory size.');
+    }
+    await for (final chunk in response) {
+      received += chunk.length;
+      if (maxResponseBytes != null && received > maxResponseBytes) {
+        throw const FormatException('Response exceeds the allowed in-memory size.');
+      }
+      builder.add(chunk);
+      if (total > 0) onResponseProgress?.call(received / total);
+    }
+    final responseBytes = builder.takeBytes();
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return responseBytes;
+    }
+    throw _errorFrom(
+      response.statusCode,
+      utf8.decode(responseBytes, allowMalformed: true),
+    );
+  }
+
+  Future<HttpClientResponse> _openResponse(
+    String method,
+    String path, {
+    String? accessToken,
+    List<int>? body,
+    String contentType = 'application/octet-stream',
+  }) async {
     try {
       // The TLS handshake happens during openUrl (connection setup), not
       // during close(), so badCertificateCallback rejections surface here —
@@ -857,7 +917,7 @@ final class HomeBoxApiClient {
         request.headers.set(HttpHeaders.contentTypeHeader, contentType);
         request.add(body);
       }
-      response = await request.close();
+      return await request.close();
     } on HandshakeException {
       // badCertificateCallback rejected the server's certificate: either it
       // does not match the pinned fingerprint, or the handshake otherwise
@@ -865,22 +925,62 @@ final class HomeBoxApiClient {
       // error (spec §18 SERVER_IDENTITY_CHANGED).
       throw ServerIdentityMismatchException(_transport.pinnedFingerprint);
     }
-    final builder = BytesBuilder(copy: false);
+  }
+
+  Future<void> _sendRawToFile(
+    String method,
+    String path,
+    File destination, {
+    String? accessToken,
+    void Function(double progress)? onResponseProgress,
+  }) async {
+    const maxCiphertextBytes = 500 * 1024 * 1024 + 125 * 16;
+    final response = await _openResponse(
+      method,
+      path,
+      accessToken: accessToken,
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final errorBytes = BytesBuilder(copy: false);
+      await for (final chunk in response) {
+        if (errorBytes.length + chunk.length > 1024 * 1024) {
+          throw _errorFrom(response.statusCode, '');
+        }
+        errorBytes.add(chunk);
+      }
+      throw _errorFrom(
+        response.statusCode,
+        utf8.decode(errorBytes.takeBytes(), allowMalformed: true),
+      );
+    }
+    if (response.contentLength > maxCiphertextBytes) {
+      final subscription = response.listen((_) {});
+      await subscription.cancel();
+      throw const FormatException('Ciphertext download exceeds the HomeBox file limit.');
+    }
+
+    await destination.parent.create(recursive: true);
+    RandomAccessFile? output;
     var received = 0;
     final total = response.contentLength;
-    await for (final chunk in response) {
-      builder.add(chunk);
-      received += chunk.length;
-      if (total > 0) onResponseProgress?.call(received / total);
+    try {
+      output = await destination.open(mode: FileMode.write);
+      await for (final chunk in response) {
+        received += chunk.length;
+        if (received > maxCiphertextBytes) {
+          throw const FormatException('Ciphertext download exceeds the HomeBox file limit.');
+        }
+        await output.writeFrom(chunk);
+        if (total > 0) onResponseProgress?.call(received / total);
+      }
+      await output.flush();
+      await output.close();
+      output = null;
+    } catch (_) {
+      if (output != null) await output.close();
+      if (await destination.exists()) await destination.delete();
+      rethrow;
     }
-    final responseBytes = builder.takeBytes();
-    if (response.statusCode >= 200 && response.statusCode < 300) {
-      return responseBytes;
-    }
-    throw _errorFrom(
-      response.statusCode,
-      utf8.decode(responseBytes, allowMalformed: true),
-    );
   }
 
   HomeBoxApiException _errorFrom(int statusCode, String responseBody) {

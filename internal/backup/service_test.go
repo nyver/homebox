@@ -135,3 +135,20 @@ func TestCreateRejectsBackupInsideStorage(t *testing.T) {
 		t.Fatal("backup inside storage was accepted")
 	}
 }
+
+func TestSafeBlobPathRejectsWindowsTraversal(t *testing.T) {
+	t.Parallel()
+	valid := "blobs/550e8400-e29b-41d4-a716-446655440000.hbxblob"
+	if !safeBlobPath(valid) {
+		t.Fatalf("valid blob path was rejected: %q", valid)
+	}
+	for _, candidate := range []string{
+		`blobs/..\..\outside.hbxblob`,
+		`blobs/550e8400-e29b-41d4-a716-446655440000\outside.hbxblob`,
+		"blobs/not-a-uuid.hbxblob",
+	} {
+		if safeBlobPath(candidate) {
+			t.Errorf("unsafe blob path was accepted: %q", candidate)
+		}
+	}
+}

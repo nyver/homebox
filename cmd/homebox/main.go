@@ -187,7 +187,14 @@ func serve(args []string) {
 		fatal("initialize upload storage: %v", err)
 	}
 	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService, sharing.New(db))
-	server := &http.Server{Addr: c.Address(), Handler: httpserver.New(api), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	server := &http.Server{
+		Addr:              c.Address(),
+		Handler:           httpserver.New(api),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       c.HTTPReadTimeout(),
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 	log.Printf("HomeBox listening on %s", c.Address())
 
 	if c.Server.TLS.Enabled {

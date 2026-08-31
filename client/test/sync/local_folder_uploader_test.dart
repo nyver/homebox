@@ -226,6 +226,12 @@ void main() {
 
     final updatedNode = syncEngine.nodeCache.getById(uploaded.node.id)!;
     expect(updatedNode.currentVersionId, isNot(uploaded.node.currentVersionId));
+    expect(
+      updatedNode.revision,
+      uploaded.node.revision + 1,
+      reason:
+          'upload completion must publish content and metadata in one mutation',
+    );
 
     final session = serverConnection.session!;
     final versions = await serverConnection.api!.listFileVersions(

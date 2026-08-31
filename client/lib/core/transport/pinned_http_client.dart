@@ -23,7 +23,10 @@ final class ServerIdentityMismatchException implements Exception {
 /// skipped in favor of no check.
 final class PinnedHttpClient {
   PinnedHttpClient(this.pinnedFingerprint) {
-    _client = HttpClient()
+    // With no system roots every server certificate is routed through
+    // _verify. Using the default roots would silently skip the pin whenever
+    // a certificate happened to have a valid public-CA chain.
+    _client = HttpClient(context: SecurityContext(withTrustedRoots: false))
       ..connectionTimeout = const Duration(seconds: 15)
       ..badCertificateCallback = _verify;
   }
@@ -62,14 +65,20 @@ final class ServerDiscovery {
 
   static Future<String> probeFingerprint(Uri healthCheckUrl) async {
     String? seen;
-    final client = HttpClient()
+    final client = HttpClient(
+      context: SecurityContext(withTrustedRoots: false),
+    )
       ..badCertificateCallback = (cert, host, port) {
         seen = ServerFingerprint.fromCertificateDer(cert.der);
-        return true; // Accepted only to inspect the certificate; nothing here is trusted yet.
+        return seen != null; // Accepted only to inspect the certificate; nothing here is trusted yet.
       };
     try {
       final request = await client.getUrl(healthCheckUrl);
       final response = await request.close();
+      final certificate = response.certificate;
+      seen ??= certificate == null
+          ? null
+          : ServerFingerprint.fromCertificateDer(certificate.der);
       await response.drain<void>();
     } finally {
       client.close(force: true);

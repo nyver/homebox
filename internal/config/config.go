@@ -21,9 +21,10 @@ const (
 
 type Config struct {
 	Server struct {
-		Host string `yaml:"host"`
-		Port int    `yaml:"port"`
-		TLS  struct {
+		Host        string `yaml:"host"`
+		Port        int    `yaml:"port"`
+		ReadTimeout string `yaml:"read_timeout"`
+		TLS         struct {
 			Enabled  bool   `yaml:"enabled"`
 			CertFile string `yaml:"cert_file"`
 			KeyFile  string `yaml:"key_file"`
@@ -73,6 +74,7 @@ func Defaults() Config {
 	var c Config
 	c.Server.Host = "0.0.0.0"
 	c.Server.Port = 8787
+	c.Server.ReadTimeout = "2m"
 	c.Storage.Path = "./data"
 	c.Storage.CiphertextOnly = true
 	c.Limits.MaxUsers = 5
@@ -117,6 +119,10 @@ func (c Config) Validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return errors.New("server.port must be between 1 and 65535")
 	}
+	readTimeout, err := time.ParseDuration(c.Server.ReadTimeout)
+	if err != nil || readTimeout <= 0 {
+		return errors.New("server.read_timeout must be a positive duration")
+	}
 	if c.Storage.Path == "" || !c.Storage.CiphertextOnly {
 		return errors.New("storage.ciphertext_only must be true and storage.path must be set")
 	}
@@ -157,6 +163,13 @@ func (c Config) Validate() error {
 }
 
 func (c Config) Address() string { return net.JoinHostPort(c.Server.Host, fmt.Sprint(c.Server.Port)) }
+
+// HTTPReadTimeout bounds the complete request read, including its body.
+// Validate guarantees that the configured duration parses and is positive.
+func (c Config) HTTPReadTimeout() time.Duration {
+	d, _ := time.ParseDuration(c.Server.ReadTimeout)
+	return d
+}
 
 // AccessTokenTTL returns the configured access-token lifetime. Validate
 // already guarantees SessionMaxAge parses, so a config that has passed

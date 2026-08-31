@@ -56,6 +56,7 @@ Future<Uint8List> downloadAndDecryptFile({
   required String nodeId,
   String? expectedPlaintextSha256,
   void Function(double progress)? onProgress,
+  int? maxCiphertextBytes,
 }) async {
   final fileCipher = E2eeFileCipher();
   final keyEnvelopeCipher = KeyEnvelopeCipher();
@@ -84,6 +85,7 @@ Future<Uint8List> downloadAndDecryptFile({
     accessToken,
     nodeId,
     onProgress: (progress) => onProgress?.call(progress * 0.9),
+    maxBytes: maxCiphertextBytes,
   );
   final frames = splitChunkFrames(blob, chunkCount: version.chunkCount);
 
@@ -110,6 +112,139 @@ Future<Uint8List> downloadAndDecryptFile({
   }
 
   return plaintextBytes;
+}
+
+/// Streams a download through temporary ciphertext and plaintext files so a
+/// maximum-size vault item never has to coexist in memory in encrypted and
+/// decrypted form. The destination is replaced only after every AEAD frame
+/// and the encrypted metadata's plaintext hash have been verified.
+Future<void> downloadAndDecryptFileToPath({
+  required transport.HomeBoxApiClient api,
+  required String accessToken,
+  required SecretKey vaultKey,
+  required Uint8List vaultId,
+  required String nodeId,
+  required String destinationPath,
+  String? expectedPlaintextSha256,
+  void Function(double progress)? onProgress,
+}) async {
+  final fileCipher = E2eeFileCipher();
+  final keyEnvelopeCipher = KeyEnvelopeCipher();
+  final versions = await api.listFileVersions(accessToken, nodeId);
+  if (versions.isEmpty) {
+    throw StateError('This file has no uploaded content yet.');
+  }
+  final version = versions.first;
+  final versionIdBytes = uuidStringToBytes(version.id);
+  final fileKey = await keyEnvelopeCipher.unwrapKey(
+    wrappingKey: vaultKey,
+    envelope: KeyEnvelope.decode(version.wrappedFileKey),
+    scopeId: vaultId,
+    subjectId: versionIdBytes,
+  );
+  final header = E2eeFileHeader.decode(version.e2eeHeader);
+
+  final workDirectory = await Directory.systemTemp.createTemp('homebox-download-');
+  final ciphertextFile = File('${workDirectory.path}/ciphertext.hbxblob');
+  final destination = File(destinationPath);
+  final plaintextTemp = File('$destinationPath.homebox-tmp-${generateUuidV4()}');
+  try {
+    onProgress?.call(0);
+    await api.downloadFileContentToFile(
+      accessToken,
+      nodeId,
+      ciphertextFile,
+      onProgress: (progress) => onProgress?.call(progress * 0.9),
+    );
+    final ciphertextLength = await ciphertextFile.length();
+    final fullFrameLength = homeBoxPlaintextChunkSize + homeBoxChunkMacLength;
+    final prefixLength = (version.chunkCount - 1) * fullFrameLength;
+    final lastFrameLength = ciphertextLength - prefixLength;
+    if (version.chunkCount < 1 ||
+        prefixLength < 0 ||
+        lastFrameLength < homeBoxChunkMacLength ||
+        lastFrameLength > fullFrameLength) {
+      throw const FormatException(
+        'Ciphertext blob length does not match its declared chunk count.',
+      );
+    }
+
+    await destination.parent.create(recursive: true);
+    final digestOutput = _DigestCollector();
+    final hashSink = sha256.startChunkedConversion(digestOutput);
+    var hashClosed = false;
+    final ciphertext = await ciphertextFile.open();
+    RandomAccessFile? plaintext;
+    try {
+      plaintext = await plaintextTemp.open(mode: FileMode.write);
+      for (var i = 0; i < version.chunkCount; i++) {
+        final frameLength = i == version.chunkCount - 1
+            ? lastFrameLength
+            : fullFrameLength;
+        final frame = await ciphertext.read(frameLength);
+        if (frame.length != frameLength) {
+          throw const FormatException(
+            'Ciphertext blob ended before its declared chunk count.',
+          );
+        }
+        final cleartext = await fileCipher.decryptChunk(
+          ciphertextFrame: frame,
+          fileKey: fileKey,
+          header: header,
+          fileVersionId: versionIdBytes,
+          chunkNumber: i,
+          totalChunks: version.chunkCount,
+        );
+        hashSink.add(cleartext);
+        await plaintext.writeFrom(cleartext);
+        onProgress?.call(0.9 + 0.1 * (i + 1) / version.chunkCount);
+      }
+      if (await ciphertext.position() != ciphertextLength) {
+        throw const FormatException('Ciphertext blob has unexpected trailing bytes.');
+      }
+      hashSink.close();
+      hashClosed = true;
+      await plaintext.flush();
+      await plaintext.close();
+      plaintext = null;
+    } catch (_) {
+      if (!hashClosed) hashSink.close();
+      if (plaintext != null) await plaintext.close();
+      rethrow;
+    } finally {
+      await ciphertext.close();
+    }
+
+    if (expectedPlaintextSha256 != null &&
+        digestOutput.value.toString().toLowerCase() !=
+            expectedPlaintextSha256.toLowerCase()) {
+      throw StateError(
+        'Downloaded content failed integrity verification; the file was not saved.',
+      );
+    }
+    await _replaceVerifiedFile(plaintextTemp, destination);
+  } finally {
+    if (await plaintextTemp.exists()) await plaintextTemp.delete();
+    if (await workDirectory.exists()) await workDirectory.delete(recursive: true);
+  }
+}
+
+Future<void> _replaceVerifiedFile(File temporary, File destination) async {
+  if (!await destination.exists()) {
+    await temporary.rename(destination.path);
+    return;
+  }
+  final backup = File('${destination.path}.homebox-old-${generateUuidV4()}');
+  await destination.rename(backup.path);
+  try {
+    await temporary.rename(destination.path);
+    await backup.delete();
+  } catch (_) {
+    if (!await destination.exists() && await backup.exists()) {
+      await backup.rename(destination.path);
+    }
+    rethrow;
+  }
 }
 
 /// Encrypts [bytes] with a fresh random File DEK and uploads them as a new
@@ -173,8 +308,10 @@ Future<transport.NodeInfo> uploadFileVersion({
     targetNodeId: targetNodeId,
     fileVersionId: fileVersionId,
     blobId: blobId,
+    expectedRevision: expectedRevision,
     chunkSize: homeBoxPlaintextChunkSize + homeBoxChunkMacLength,
     chunkCount: totalChunks,
+    metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
     metadataCiphertext: metadataCiphertext,
     wrappedFileKey: wrappedFileKey.encode(),
     e2eeHeader: header.encode(),
@@ -245,8 +382,10 @@ Future<transport.NodeInfo> uploadFilePathVersion({
     targetNodeId: targetNodeId,
     fileVersionId: fileVersionId,
     blobId: blobId,
+    expectedRevision: expectedRevision,
     chunkSize: homeBoxPlaintextChunkSize + homeBoxChunkMacLength,
     chunkCount: totalChunks,
+    metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
     metadataCiphertext: metadataCiphertext,
     wrappedFileKey: wrappedFileKey.encode(),
     e2eeHeader: header.encode(),

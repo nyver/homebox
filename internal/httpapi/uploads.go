@@ -24,6 +24,7 @@ type createUploadRequest struct {
 	ExpectedRevision   *int64 `json:"expectedRevision"`
 	ChunkSize          int64  `json:"chunkSize"`
 	ChunkCount         int    `json:"chunkCount"`
+	MetadataKeyVersion int    `json:"metadataKeyVersion"`
 	MetadataCiphertext string `json:"metadataCiphertext"` // base64
 	WrappedFileKey     string `json:"wrappedFileKey"`     // base64
 	E2eeHeader         string `json:"e2eeHeader"`         // base64
@@ -50,7 +51,7 @@ func (a *API) createUpload(w http.ResponseWriter, r *http.Request) {
 	session, err := a.uploads.Create(r.Context(), uploads.CreateInput{
 		UserID: requestUserID(r), DeviceID: requestDeviceID(r), TargetNodeID: req.TargetNodeID,
 		FileVersionID: req.FileVersionID, BlobID: req.BlobID, ExpectedRevision: req.ExpectedRevision,
-		ChunkSize: req.ChunkSize, ChunkCount: req.ChunkCount,
+		ChunkSize: req.ChunkSize, ChunkCount: req.ChunkCount, MetadataKeyVersion: req.MetadataKeyVersion,
 		MetadataCiphertext: metadata, WrappedFileKey: wrappedKey, E2EEHeader: header,
 	})
 	if err != nil {

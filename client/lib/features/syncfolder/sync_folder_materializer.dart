@@ -5,7 +5,6 @@ import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
@@ -81,6 +80,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       final vaultId = uuidStringToBytes(session.user.id);
       final accessToken = session.accessToken;
       final seenNodeIds = <String>{};
+      final fileErrors = <String>[];
       await _materializeDirectory(
         rootPath: rootPath,
         parentId: null,
@@ -90,8 +90,12 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         vaultKey: vaultKey,
         vaultId: vaultId,
         seenNodeIds: seenNodeIds,
+        fileErrors: fileErrors,
       );
       await _pruneUnseen(rootPath, seenNodeIds);
+      if (fileErrors.isNotEmpty) {
+        throw StateError(fileErrors.join('\n'));
+      }
       _errorMessage = null;
       _setStatus(SyncFolderStatus.idle);
     } catch (e) {
@@ -112,6 +116,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     required SecretKey vaultKey,
     required Uint8List vaultId,
     required Set<String> seenNodeIds,
+    required List<String> fileErrors,
   }) async {
     for (final node in _syncEngine.nodeCache.listChildren(parentId)) {
       final SensitiveNodeMetadata metadata;
@@ -144,6 +149,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           vaultKey: vaultKey,
           vaultId: vaultId,
           seenNodeIds: seenNodeIds,
+          fileErrors: fileErrors,
         );
       } else {
         await _materializeFile(
@@ -155,6 +161,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           accessToken: accessToken,
           vaultKey: vaultKey,
           vaultId: vaultId,
+          fileErrors: fileErrors,
         );
       }
     }
@@ -169,6 +176,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     required String accessToken,
     required SecretKey vaultKey,
     required Uint8List vaultId,
+    required List<String> fileErrors,
   }) async {
     final targetPath = '$rootPath/$relativePath';
     final existing = _syncEngine.materializedFiles.getById(node.id);
@@ -203,17 +211,26 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     }
     try {
       _setTransferProgress(metadata.fileName, 0);
-      final bytes = await downloadAndDecryptFile(
-        api: api,
-        accessToken: accessToken,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
-        nodeId: node.id,
-        expectedPlaintextSha256: metadata.plaintextSha256,
-        onProgress: (progress) =>
-            _setTransferProgress(metadata.fileName, progress),
+      final temporaryDirectory = Directory.systemTemp;
+      final source = File(
+        '${temporaryDirectory.path}/homebox_materialize_${node.id}_${generateUuidV4()}.tmp',
       );
-      await _writeFile(rootPath, relativePath, targetPath, bytes);
+      try {
+        await downloadAndDecryptFileToPath(
+          api: api,
+          accessToken: accessToken,
+          vaultKey: vaultKey,
+          vaultId: vaultId,
+          nodeId: node.id,
+          destinationPath: source.path,
+          expectedPlaintextSha256: metadata.plaintextSha256,
+          onProgress: (progress) =>
+              _setTransferProgress(metadata.fileName, progress),
+        );
+        await _writeFile(rootPath, relativePath, targetPath, source);
+      } finally {
+        if (await source.exists()) await source.delete();
+      }
       if (existing != null && existing.relativePath != relativePath) {
         // Content changed and it moved/was renamed in the same pass -
         // clean up the stale copy at its old location.
@@ -226,11 +243,12 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           contentVersionId: node.currentVersionId,
         ),
       );
-    } catch (_) {
+    } catch (error) {
       // Broad on purpose: downloadAndDecryptFile can throw StateError
-      // (e.g. hash mismatch), which does not extend Exception. Leave this
-      // file for the next materialize() call rather than aborting the
-      // whole tree over one bad download.
+      // (e.g. hash mismatch), which does not extend Exception. Continue the
+      // tree, but surface a truthful error state after the pass and retry the
+      // file next time.
+      fileErrors.add('${metadata.fileName}: $error');
     }
   }
 
@@ -274,30 +292,20 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     String rootPath,
     String relativePath,
     String targetPath,
-    Uint8List bytes,
+    File source,
   ) async {
     final android = _androidSyncFolder;
     if (_usesAndroidStorage && android != null) {
-      final temporaryDirectory = await getTemporaryDirectory();
-      final source = File(
-        '${temporaryDirectory.path}/sync_$relativePath.homebox-tmp',
+      await android.writeFile(
+        treeUri: rootPath,
+        relativePath: relativePath,
+        sourcePath: source.path,
       );
-      await source.parent.create(recursive: true);
-      try {
-        await source.writeAsBytes(bytes, flush: true);
-        await android.writeFile(
-          treeUri: rootPath,
-          relativePath: relativePath,
-          sourcePath: source.path,
-        );
-      } finally {
-        if (await source.exists()) await source.delete();
-      }
       return;
     }
     await Directory(File(targetPath).parent.path).create(recursive: true);
     final tempPath = '$targetPath.homebox-tmp';
-    await File(tempPath).writeAsBytes(bytes, flush: true);
+    await source.copy(tempPath);
     await File(tempPath).rename(targetPath); // Atomic on the same volume.
   }
 

@@ -289,22 +289,12 @@ final class LocalFolderUploader extends ChangeNotifier {
         metadataCiphertext: metadataCiphertext,
         onProgress: (progress) => _setTransferProgress(name, progress),
       );
-      // Two separate mutations, same reasoning as FilesController.replaceFileContent:
-      // completing an upload does not itself update the node's own metadata.
-      final finalNode = await api.updateNode(
-        accessToken,
-        node.id,
-        operationId: generateUuidV4(),
-        expectedRevision: uploadedNode.revision,
-        metadataCiphertext: metadataCiphertext,
-        metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
-      );
-      _syncEngine.nodeCache.upsert(localNodeFromServerNode(finalNode));
+      _syncEngine.nodeCache.upsert(localNodeFromServerNode(uploadedNode));
       _syncEngine.materializedFiles.upsert(
         MaterializedFile(
           nodeId: node.id,
           relativePath: relativePath.isEmpty ? name : '$relativePath/$name',
-          contentVersionId: finalNode.currentVersionId,
+          contentVersionId: uploadedNode.currentVersionId,
         ),
       );
     } catch (_) {

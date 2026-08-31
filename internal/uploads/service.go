@@ -43,6 +43,7 @@ type CreateInput struct {
 	ExpectedRevision                                      *int64
 	ChunkSize                                             int64
 	ChunkCount                                            int
+	MetadataKeyVersion                                    int
 	MetadataCiphertext, WrappedFileKey, E2EEHeader        []byte
 }
 
@@ -78,10 +79,10 @@ func New(db *sql.DB, storagePath string, maxCiphertextSize int64, abandonedAfter
 }
 
 func (s *Service) Create(ctx context.Context, in CreateInput) (Session, error) {
-	if !validUUID(in.TargetNodeID) || !validUUID(in.FileVersionID) || !validUUID(in.BlobID) || in.ChunkCount < 1 || in.ChunkSize < 1 || in.ChunkSize > s.maxCiphertextSize {
+	if !validUUID(in.TargetNodeID) || !validUUID(in.FileVersionID) || !validUUID(in.BlobID) || in.ExpectedRevision == nil || *in.ExpectedRevision < 0 || in.ChunkCount < 1 || in.ChunkSize < 1 || in.ChunkSize > s.maxCiphertextSize {
 		return Session{}, apierror.NewValidation("invalid opaque upload framing")
 	}
-	if len(in.WrappedFileKey) == 0 || len(in.E2EEHeader) == 0 || len(in.MetadataCiphertext) == 0 {
+	if len(in.WrappedFileKey) == 0 || len(in.E2EEHeader) == 0 || len(in.MetadataCiphertext) == 0 || in.MetadataKeyVersion < 1 {
 		return Session{}, apierror.NewValidation("encrypted metadata, wrapped file key, and E2EE header are required")
 	}
 	if err := s.validateActorAndTarget(ctx, in.UserID, in.DeviceID, in.TargetNodeID); err != nil {
@@ -93,10 +94,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Session, error) {
 	now := s.now().UTC()
 	session := Session{ID: uuid.NewString(), BlobID: in.BlobID, FileVersionID: in.FileVersionID, Status: "OPEN", ChunkCount: in.ChunkCount, ExpiresAt: now.Add(s.abandonedAfter)}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO upload_sessions
-		(id,user_id,device_id,target_node_id,file_version_id,blob_id,expected_revision,chunk_size,chunk_count,max_ciphertext_size,metadata_ciphertext,wrapped_file_key,e2ee_header,status,created_at,expires_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN',?,?)`,
+		(id,user_id,device_id,target_node_id,file_version_id,blob_id,expected_revision,chunk_size,chunk_count,max_ciphertext_size,metadata_ciphertext,metadata_key_version,wrapped_file_key,e2ee_header,status,created_at,expires_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN',?,?)`,
 		session.ID, in.UserID, in.DeviceID, nullableString(in.TargetNodeID), in.FileVersionID, in.BlobID, nullableInt(in.ExpectedRevision), in.ChunkSize, in.ChunkCount, s.maxCiphertextSize,
-		in.MetadataCiphertext, in.WrappedFileKey, in.E2EEHeader, now.Format(time.RFC3339Nano), session.ExpiresAt.Format(time.RFC3339Nano))
+		in.MetadataCiphertext, in.MetadataKeyVersion, in.WrappedFileKey, in.E2EEHeader, now.Format(time.RFC3339Nano), session.ExpiresAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return Session{}, fmt.Errorf("create upload session: %w", err)
 	}
@@ -276,6 +277,19 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 	if session.Status != "OPEN" || !s.now().Before(session.ExpiresAt) {
 		return CompleteResult{}, ErrInvalidState
 	}
+	var expectedRevision int64
+	if session.expectedRevision.Valid {
+		expectedRevision = session.expectedRevision.Int64
+	} else if in.ExpectedRevision != nil {
+		// Sessions created before migration 0006 can have no stored revision.
+		// Their completion request remains the only safe compatibility source.
+		expectedRevision = *in.ExpectedRevision
+	} else {
+		return CompleteResult{}, apierror.NewValidation("expected revision is required")
+	}
+	if in.ExpectedRevision != nil && *in.ExpectedRevision != expectedRevision {
+		return CompleteResult{}, apierror.NewValidation("completion revision does not match the upload session")
+	}
 	var existingResult []byte
 	err = s.db.QueryRowContext(ctx, "SELECT result_payload FROM processed_operations WHERE operation_id=?", in.OperationID).Scan(&existingResult)
 	if err == nil {
@@ -324,7 +338,7 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 	if ownerID != in.UserID {
 		return CompleteResult{}, ErrForbidden
 	}
-	if in.ExpectedRevision != nil && currentRevision != *in.ExpectedRevision {
+	if currentRevision != expectedRevision {
 		return CompleteResult{}, ErrRevisionConflict
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
@@ -342,8 +356,17 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 	if _, err := tx.ExecContext(ctx, `INSERT INTO file_versions (id,node_id,blob_id,e2ee_header,wrapped_file_key,key_scope_id,key_version,created_at,created_by_device_id,revision) VALUES (?,?,?,?,?,?,?,?,?,?)`, session.FileVersionID, session.targetNodeID, session.BlobID, session.e2eeHeader, session.wrappedFileKey, in.KeyScopeID, in.KeyVersion, now, in.DeviceID, revision); err != nil {
 		return CompleteResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE nodes SET current_version_id=?,revision=?,updated_at=? WHERE id=?", session.FileVersionID, revision, now, session.targetNodeID); err != nil {
+	updateResult, err := tx.ExecContext(ctx, `UPDATE nodes SET current_version_id=?,metadata_ciphertext=?,metadata_key_version=?,revision=?,updated_at=? WHERE id=? AND revision=?`,
+		session.FileVersionID, session.metadataCiphertext, session.metadataKeyVersion, revision, now, session.targetNodeID, expectedRevision)
+	if err != nil {
 		return CompleteResult{}, err
+	}
+	updatedRows, err := updateResult.RowsAffected()
+	if err != nil {
+		return CompleteResult{}, err
+	}
+	if updatedRows != 1 {
+		return CompleteResult{}, ErrRevisionConflict
 	}
 	result := CompleteResult{BlobID: session.BlobID, FileVersionID: session.FileVersionID, Revision: revision}
 	payload := []byte(result.BlobID + ":" + result.FileVersionID + ":" + strconv.FormatInt(result.Revision, 10))
@@ -365,15 +388,18 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 
 type dbSession struct {
 	Session
-	targetNodeID   string
-	e2eeHeader     []byte
-	wrappedFileKey []byte
+	targetNodeID       string
+	e2eeHeader         []byte
+	wrappedFileKey     []byte
+	metadataCiphertext []byte
+	metadataKeyVersion int
+	expectedRevision   sql.NullInt64
 }
 
 func (s *Service) sessionForDevice(ctx context.Context, userID, deviceID, uploadID string) (dbSession, error) {
 	var r dbSession
 	var expires string
-	err := s.db.QueryRowContext(ctx, `SELECT id,blob_id,file_version_id,status,chunk_count,expires_at,target_node_id,e2ee_header,wrapped_file_key FROM upload_sessions WHERE id=? AND user_id=? AND device_id=?`, uploadID, userID, deviceID).Scan(&r.ID, &r.BlobID, &r.FileVersionID, &r.Status, &r.ChunkCount, &expires, &r.targetNodeID, &r.e2eeHeader, &r.wrappedFileKey)
+	err := s.db.QueryRowContext(ctx, `SELECT id,blob_id,file_version_id,status,chunk_count,expires_at,target_node_id,e2ee_header,wrapped_file_key,metadata_ciphertext,metadata_key_version,expected_revision FROM upload_sessions WHERE id=? AND user_id=? AND device_id=?`, uploadID, userID, deviceID).Scan(&r.ID, &r.BlobID, &r.FileVersionID, &r.Status, &r.ChunkCount, &expires, &r.targetNodeID, &r.e2eeHeader, &r.wrappedFileKey, &r.metadataCiphertext, &r.metadataKeyVersion, &r.expectedRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound
 	}

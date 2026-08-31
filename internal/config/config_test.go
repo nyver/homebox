@@ -27,6 +27,14 @@ func TestRejectsInsecureHTTPConfiguration(t *testing.T) {
 	}
 }
 
+func TestRejectsNonPositiveServerReadTimeout(t *testing.T) {
+	c := Defaults()
+	c.Server.ReadTimeout = "0s"
+	if err := c.Validate(); err == nil {
+		t.Fatal("non-positive server read timeout must be rejected")
+	}
+}
+
 func TestRejectsNonPositiveOrphanBlobGracePeriod(t *testing.T) {
 	c := Defaults()
 	c.Maintenance.OrphanBlobGraceHours = 0

@@ -602,16 +602,10 @@ final class FilesController extends ChangeNotifier {
   /// node was concurrently modified elsewhere (`REVISION_CONFLICT`), rather
   /// than silently overwriting someone else's change.
   ///
-  /// This is two separate server mutations (upload-complete, then a
-  /// metadata update carrying over the new plaintext hash — see below), not
-  /// one atomic step. If another device's mutation lands in the narrow
-  /// window between them, the second call can itself hit
-  /// `REVISION_CONFLICT`; the upload has still succeeded at that point, but
-  /// the node's recorded hash is left pointing at the *previous* content
-  /// until this is retried (downloads would fail integrity verification in
-  /// the meantime). Rare in practice at this app's scale, and the error is
-  /// surfaced rather than silently dropped, but a real fix would need a
-  /// combined upload+metadata endpoint server-side.
+  /// Upload completion publishes both the new version and this encrypted
+  /// metadata in one server transaction. A concurrent mutation therefore
+  /// fails before either value changes instead of leaving mismatched content
+  /// and integrity metadata.
   Future<bool> replaceFileContent(FileEntry entry, String localPath) async {
     if (entry.isDirectory) return false;
     if (_busy) {
@@ -662,19 +656,9 @@ final class FilesController extends ChangeNotifier {
         metadataCiphertext: metadataCiphertext,
         onProgress: _setProgress,
       );
-      // Completing an upload only advances the node's current version and
-      // revision (spec §22) — it does not, by itself, update the node's own
-      // encrypted metadata, so the new plaintext hash would otherwise never
-      // reach it. A second, explicit metadata update carries that over.
-      final updatedNode = await ctx.api.updateNode(
-        ctx.accessToken,
-        entry.node.id,
-        operationId: generateUuidV4(),
-        expectedRevision: uploadedNode.revision,
-        metadataCiphertext: metadataCiphertext,
-        metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
-      );
-      _upsertFromServer(updatedNode);
+      // Completion publishes the new version and encrypted metadata in one
+      // server transaction, so the content can never retain the old hash.
+      _upsertFromServer(uploadedNode);
 
       await refresh();
       return true;
@@ -707,16 +691,16 @@ final class FilesController extends ChangeNotifier {
     try {
       final ctx = await _requireContext();
       if (ctx == null) return false;
-      final plaintextBytes = await downloadAndDecryptFile(
+      await downloadAndDecryptFileToPath(
         api: ctx.api,
         accessToken: ctx.accessToken,
         vaultKey: ctx.vaultKey,
         vaultId: ctx.vaultId,
         nodeId: entry.node.id,
+        destinationPath: destinationPath,
         expectedPlaintextSha256: entry.metadata.plaintextSha256,
         onProgress: _setProgress,
       );
-      await File(destinationPath).writeAsBytes(plaintextBytes, flush: true);
       return true;
     } catch (e) {
       // Broad on purpose: StateError/ArgumentError (thrown by this class's
@@ -743,6 +727,9 @@ final class FilesController extends ChangeNotifier {
         vaultId: uuidStringToBytes(session.user.id),
         nodeId: entry.node.id,
         expectedPlaintextSha256: entry.metadata.plaintextSha256,
+        // Thumbnails are cosmetic and decoded in memory. Large images remain
+        // available through the bounded streaming download path instead.
+        maxCiphertextBytes: 25 * 1024 * 1024,
       );
     } catch (_) {
       // A thumbnail is cosmetic. Keep the normal file icon if downloading or

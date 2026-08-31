@@ -16,6 +16,7 @@ var migrations = []migration{
 	{3, "maintenance_gc_candidates", migration0003MaintenanceGCCandidates},
 	{4, "share_device_envelopes", migration0004ShareDeviceEnvelopes},
 	{5, "device_last_sync", migration0005DeviceLastSync},
+	{6, "upload_metadata_version", migration0006UploadMetadataVersion},
 }
 
 const migration0001InitialSchema = `
@@ -145,4 +146,11 @@ CREATE INDEX IF NOT EXISTS idx_share_device_envelopes_recipient
 const migration0005DeviceLastSync = `
 ALTER TABLE devices ADD COLUMN last_sync_at TEXT;
 CREATE INDEX IF NOT EXISTS idx_devices_user_last_sync ON devices(user_id,last_sync_at);
+`
+
+// migration0006UploadMetadataVersion lets upload completion publish the file
+// version and its encrypted metadata in the same transaction. The default
+// keeps already-open sessions from an older server version completable.
+const migration0006UploadMetadataVersion = `
+ALTER TABLE upload_sessions ADD COLUMN metadata_key_version INTEGER NOT NULL DEFAULT 1;
 `
