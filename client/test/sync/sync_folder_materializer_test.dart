@@ -4,8 +4,11 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
+import 'package:homebox_client/core/e2ee/metadata_cipher.dart';
+import 'package:homebox_client/core/e2ee/opaque_id.dart';
 import 'package:homebox_client/core/e2ee/vault_key_store.dart';
 import 'package:homebox_client/core/storage/local_database.dart';
+import 'package:homebox_client/core/storage/node_cache.dart';
 import 'package:homebox_client/core/transport/pinned_server_store.dart';
 import 'package:homebox_client/features/files/files_controller.dart';
 import 'package:homebox_client/features/server/server_connection_controller.dart';
@@ -224,4 +227,85 @@ void main() {
       expect(fakeServer.contentDownloadCount, 1);
     },
   );
+
+  test('materialize does not repeatedly download an immutable version after a hash mismatch', () async {
+    final fakeServer = FakeNodeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: FakeNodeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final filesController = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(filesController.dispose);
+    final materializer = SyncFolderMaterializer(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(materializer.dispose);
+    final rootDir = await Directory.systemTemp.createTemp(
+      'homebox_syncfolder_integrity_root_',
+    );
+    addTearDown(() => rootDir.delete(recursive: true));
+    final sourceDir = await Directory.systemTemp.createTemp(
+      'homebox_syncfolder_integrity_source_',
+    );
+    addTearDown(() => sourceDir.delete(recursive: true));
+    final sourceFile = File('${sourceDir.path}/mismatch.txt');
+    await sourceFile.writeAsString('actual content');
+    expect(await filesController.uploadFile(sourceFile.path), isTrue);
+    final uploaded = filesController.entries.single;
+    final cached = syncEngine.nodeCache.getById(uploaded.node.id)!;
+    final vaultKey = (await vaultKeyStore.loadVaultKey())!;
+    final badMetadata = await MetadataCipher().encrypt(
+      metadata: SensitiveNodeMetadata(
+        fileName: uploaded.name,
+        plaintextSha256: List.filled(64, '0').join(),
+        plaintextSize: uploaded.metadata.plaintextSize,
+      ),
+      metadataKey: vaultKey,
+      keyVersion: homeBoxPersonalVaultKeyVersion,
+      nodeType: MetadataNodeType.file,
+      scopeId: uuidStringToBytes(FakeNodeServer.userId),
+      nodeId: uuidStringToBytes(uploaded.node.id),
+    );
+    syncEngine.nodeCache.upsert(
+      LocalNode(
+        id: cached.id,
+        parentId: cached.parentId,
+        nodeType: cached.nodeType,
+        metadataCiphertext: badMetadata.encode(),
+        metadataKeyVersion: cached.metadataKeyVersion,
+        currentVersionId: cached.currentVersionId,
+        revision: cached.revision,
+        createdAt: cached.createdAt,
+        updatedAt: cached.updatedAt,
+        pendingCreate: cached.pendingCreate,
+      ),
+    );
+
+    await materializer.materialize(rootDir.path);
+    expect(materializer.status, SyncFolderStatus.error);
+    expect(fakeServer.contentDownloadCount, 1);
+    await materializer.materialize(rootDir.path);
+    expect(materializer.status, SyncFolderStatus.error);
+    expect(
+      fakeServer.contentDownloadCount,
+      1,
+      reason: 'the same immutable bad version must not consume bandwidth again',
+    );
+  });
 }

@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../core/storage/local_database.dart';
 import '../../core/storage/materialized_directories_store.dart';
+import '../../core/storage/materialization_failures_store.dart';
 import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/storage/pending_operations_store.dart';
@@ -48,6 +49,7 @@ final class SyncEngine extends ChangeNotifier {
        nodeCache = NodeCache(localDatabase.db),
        pendingOperations = PendingOperationsStore(localDatabase.db),
        materializedDirectories = MaterializedDirectoriesStore(localDatabase.db),
+       materializationFailures = MaterializationFailuresStore(localDatabase.db),
        materializedFiles = MaterializedFilesStore(localDatabase.db),
        _syncState = SyncStateStore(localDatabase.db) {
     _connectionWasAuthenticated =
@@ -60,6 +62,7 @@ final class SyncEngine extends ChangeNotifier {
   final NodeCache nodeCache;
   final PendingOperationsStore pendingOperations;
   final MaterializedDirectoriesStore materializedDirectories;
+  final MaterializationFailuresStore materializationFailures;
   final MaterializedFilesStore materializedFiles;
   final SyncStateStore _syncState;
 
@@ -228,7 +231,7 @@ final class SyncEngine extends ChangeNotifier {
         }
         pendingOperations.markDone(op.id);
       } catch (e) {
-        _recordFailure(op, e);
+        await _recordFailure(api, accessToken, op, e);
       }
     }
   }
@@ -296,10 +299,31 @@ final class SyncEngine extends ChangeNotifier {
     await _refreshNodeFromServer(api, accessToken, op.nodeId);
   }
 
-  void _recordFailure(PendingOperation op, Object error) {
+  Future<void> _recordFailure(
+    transport.HomeBoxApiClient api,
+    String accessToken,
+    PendingOperation op,
+    Object error,
+  ) async {
     final code = error is transport.HomeBoxApiException ? error.code : null;
     if (code != null && _permanentFailureCodes.contains(code)) {
       pendingOperations.markFailed(op.id, errorCode: code);
+      try {
+        // The Files UI applies mutations optimistically. If the server
+        // permanently rejects one (especially a stale-revision delete),
+        // restore the authoritative node instead of leaving it hidden only
+        // in this device's cache while background materialization still sees
+        // it after the next cache rebuild.
+        await _refreshNodeFromServer(
+          api,
+          accessToken,
+          op.nodeId,
+          allowMissing: true,
+        );
+      } catch (_) {
+        // The operation is already durably FAILED. A later pull can still
+        // reconcile the cache if this best-effort refresh cannot run now.
+      }
       return;
     }
     final retryCount = op.retryCount + 1;

@@ -209,6 +209,18 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     if (node.currentVersionId == null) {
       return; // node created but no content uploaded yet.
     }
+    final expectedHash = metadata.plaintextSha256;
+    if (expectedHash != null &&
+        _syncEngine.materializationFailures.contains(
+          nodeId: node.id,
+          contentVersionId: node.currentVersionId!,
+          nodeRevision: node.revision,
+        )) {
+      fileErrors.add(
+        '${metadata.fileName}: integrity verification previously failed for this file version; automatic download is paused until the content or metadata changes.',
+      );
+      return;
+    }
     try {
       if (!_isCurrentDownload(node)) return;
       _setTransferProgress(metadata.fileName, 0);
@@ -250,14 +262,24 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           contentVersionId: node.currentVersionId,
         ),
       );
+      _syncEngine.materializationFailures.remove(node.id);
     } on _MaterializationCancelled {
       // The node was replaced or moved to Trash while bytes were arriving.
       // A later pass will handle the new state; this is not a sync failure.
+    } on FileIntegrityException catch (error) {
+      if (expectedHash != null) {
+        _syncEngine.materializationFailures.record(
+          nodeId: node.id,
+          contentVersionId: node.currentVersionId!,
+          nodeRevision: node.revision,
+        );
+      }
+      fileErrors.add('${metadata.fileName}: $error');
     } catch (error) {
       // Broad on purpose: downloadAndDecryptFile can throw StateError
-      // (e.g. hash mismatch), which does not extend Exception. Continue the
-      // tree, but surface a truthful error state after the pass and retry the
-      // file next time.
+      // and cryptography can throw authentication errors that do not extend
+      // Exception. Continue the tree, but surface a truthful error state
+      // after the pass and retry transient/unknown failures next time.
       fileErrors.add('${metadata.fileName}: $error');
     }
   }
@@ -274,6 +296,12 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       if (seenNodeIds.contains(entry.nodeId)) continue;
       await _deleteFile(rootPath, entry.relativePath);
       _syncEngine.materializedFiles.remove(entry.nodeId);
+      _syncEngine.materializationFailures.remove(entry.nodeId);
+    }
+    for (final nodeId in _syncEngine.materializationFailures.listNodeIds()) {
+      if (!seenNodeIds.contains(nodeId)) {
+        _syncEngine.materializationFailures.remove(nodeId);
+      }
     }
     for (final entry in _syncEngine.materializedDirectories.listAll()) {
       if (seenNodeIds.contains(entry.nodeId)) continue;

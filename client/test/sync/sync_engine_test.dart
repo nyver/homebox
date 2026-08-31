@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
 import 'package:homebox_client/core/storage/local_database.dart';
+import 'package:homebox_client/core/storage/node_cache.dart';
 import 'package:homebox_client/core/storage/pending_operations_store.dart';
 import 'package:homebox_client/core/transport/pinned_server_store.dart';
 import 'package:homebox_client/features/server/server_connection_controller.dart';
@@ -326,6 +327,62 @@ void main() {
     expect(op.status, PendingOperationStatus.failed);
     expect(op.lastErrorCode, 'VALIDATION_ERROR');
   });
+
+  test(
+    'a rejected optimistic delete restores the authoritative server node',
+    () async {
+      final fakeServer = FakeNodeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      fakeServer.remoteCreate(id: 'node-1');
+      final engine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(engine.dispose);
+      await engine.runOnce();
+      final serverSnapshot = engine.nodeCache.getById('node-1')!;
+      final now = DateTime.now().toUtc();
+      engine.nodeCache.upsert(
+        LocalNode(
+          id: serverSnapshot.id,
+          parentId: serverSnapshot.parentId,
+          nodeType: serverSnapshot.nodeType,
+          metadataCiphertext: serverSnapshot.metadataCiphertext,
+          metadataKeyVersion: serverSnapshot.metadataKeyVersion,
+          currentVersionId: serverSnapshot.currentVersionId,
+          revision: serverSnapshot.revision,
+          createdAt: serverSnapshot.createdAt,
+          updatedAt: now,
+          deletedAt: now,
+          pendingCreate: false,
+        ),
+      );
+      engine.pendingOperations.enqueue(
+        PendingOperation(
+          id: 'stale-delete',
+          operationId: 'op-stale-delete',
+          type: PendingOperationType.deleteNode,
+          nodeId: 'node-1',
+          payload: const {},
+          baseRevision: serverSnapshot.revision - 1,
+          createdAt: now,
+          retryCount: 0,
+          status: PendingOperationStatus.pending,
+        ),
+      );
+
+      await engine.runOnce();
+
+      expect(
+        engine.pendingOperations.getById('stale-delete')!.lastErrorCode,
+        'REVISION_CONFLICT',
+      );
+      expect(engine.nodeCache.getById('node-1')!.isDeleted, isFalse);
+    },
+  );
 
   test('a transient failure (server error) schedules a backoff retry instead of failing permanently', () async {
     final fakeServer = FakeNodeServer();

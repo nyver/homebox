@@ -13,6 +13,14 @@ import '../../core/transport/homebox_api_client.dart' as transport;
 
 const int homeBoxMaxPlaintextFileSize = 500 * 1024 * 1024;
 
+final class FileIntegrityException implements Exception {
+  const FileIntegrityException();
+
+  @override
+  String toString() =>
+      'Downloaded content failed integrity verification; the file was not saved.';
+}
+
 /// Hashes a local file incrementally, keeping memory bounded by the stream's
 /// chunk size rather than the file size.
 Future<String> plaintextFileSha256(File file) async {
@@ -110,9 +118,7 @@ Future<Uint8List> downloadAndDecryptFile({
   if (expectedPlaintextSha256 != null) {
     final actualHash = sha256.convert(plaintextBytes).toString();
     if (actualHash.toLowerCase() != expectedPlaintextSha256.toLowerCase()) {
-      throw StateError(
-        'Downloaded content failed integrity verification; the file was not saved.',
-      );
+      throw const FileIntegrityException();
     }
   }
 
@@ -231,9 +237,7 @@ Future<void> downloadAndDecryptFileToPath({
     if (expectedPlaintextSha256 != null &&
         digestOutput.value.toString().toLowerCase() !=
             expectedPlaintextSha256.toLowerCase()) {
-      throw StateError(
-        'Downloaded content failed integrity verification; the file was not saved.',
-      );
+      throw const FileIntegrityException();
     }
     await _replaceVerifiedFile(plaintextTemp, destination);
   } finally {

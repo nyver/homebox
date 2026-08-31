@@ -130,4 +130,11 @@ final List<_Migration> _migrations = [
       relative_path TEXT NOT NULL
     );
   '''),
+  _Migration(4, '''
+    CREATE TABLE IF NOT EXISTS materialization_failures (
+      node_id TEXT PRIMARY KEY,
+      content_version_id TEXT NOT NULL,
+      node_revision INTEGER NOT NULL
+    );
+  '''),
 ];
