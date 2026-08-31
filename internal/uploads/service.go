@@ -196,14 +196,15 @@ func (s *Service) Abort(ctx context.Context, userID, deviceID, uploadID string) 
 	return os.RemoveAll(s.uploadDir(uploadID))
 }
 
-// OpenBlob resolves a FileVersion to the absolute path of its immutable
-// ciphertext blob, for streaming on download (spec §23). Callers must
-// authorize access to the owning node themselves first (see
-// internal/nodes.Service.Get) — this performs no authorization of its own.
-func (s *Service) OpenBlob(ctx context.Context, fileVersionID string) (path string, size int64, err error) {
+// OpenNodeBlob resolves one immutable FileVersion belonging to nodeID to its
+// ciphertext blob. Binding both IDs in the query prevents a caller who can
+// read one node from using a guessed version ID to read another node's blob.
+// Callers must still authorize access to nodeID first.
+func (s *Service) OpenNodeBlob(ctx context.Context, nodeID, fileVersionID string) (path string, size int64, err error) {
 	var relPath string
 	err = s.db.QueryRowContext(ctx, `SELECT b.storage_rel_path, b.ciphertext_size
-		FROM file_versions f JOIN blobs b ON b.id = f.blob_id WHERE f.id = ?`, fileVersionID).Scan(&relPath, &size)
+		FROM file_versions f JOIN blobs b ON b.id = f.blob_id
+		WHERE f.node_id = ? AND f.id = ?`, nodeID, fileVersionID).Scan(&relPath, &size)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, ErrNotFound
 	}

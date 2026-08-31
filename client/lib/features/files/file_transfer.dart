@@ -7,7 +7,8 @@ import 'package:cryptography/cryptography.dart';
 import '../../core/e2ee/file_cipher.dart';
 import '../../core/e2ee/key_envelope.dart';
 import '../../core/e2ee/opaque_id.dart';
-import '../../core/e2ee/vault_key_store.dart' show homeBoxPersonalVaultKeyVersion;
+import '../../core/e2ee/vault_key_store.dart'
+    show homeBoxPersonalVaultKeyVersion;
 import '../../core/transport/homebox_api_client.dart' as transport;
 
 const int homeBoxMaxPlaintextFileSize = 500 * 1024 * 1024;
@@ -54,6 +55,7 @@ Future<Uint8List> downloadAndDecryptFile({
   required SecretKey vaultKey,
   required Uint8List vaultId,
   required String nodeId,
+  String? expectedVersionId,
   String? expectedPlaintextSha256,
   void Function(double progress)? onProgress,
   int? maxCiphertextBytes,
@@ -65,7 +67,7 @@ Future<Uint8List> downloadAndDecryptFile({
   if (versions.isEmpty) {
     throw StateError('This file has no uploaded content yet.');
   }
-  final version = versions.first; // newest first, per the server's ordering.
+  final version = _selectDownloadVersion(versions, expectedVersionId);
   final versionIdBytes = uuidStringToBytes(version.id);
 
   final fileKey = await keyEnvelopeCipher.unwrapKey(
@@ -84,6 +86,7 @@ Future<Uint8List> downloadAndDecryptFile({
   final blob = await api.downloadFileContent(
     accessToken,
     nodeId,
+    versionId: version.id,
     onProgress: (progress) => onProgress?.call(progress * 0.9),
     maxBytes: maxCiphertextBytes,
   );
@@ -107,7 +110,9 @@ Future<Uint8List> downloadAndDecryptFile({
   if (expectedPlaintextSha256 != null) {
     final actualHash = sha256.convert(plaintextBytes).toString();
     if (actualHash.toLowerCase() != expectedPlaintextSha256.toLowerCase()) {
-      throw StateError('Downloaded content failed integrity verification; the file was not saved.');
+      throw StateError(
+        'Downloaded content failed integrity verification; the file was not saved.',
+      );
     }
   }
 
@@ -124,6 +129,7 @@ Future<void> downloadAndDecryptFileToPath({
   required SecretKey vaultKey,
   required Uint8List vaultId,
   required String nodeId,
+  String? expectedVersionId,
   required String destinationPath,
   String? expectedPlaintextSha256,
   void Function(double progress)? onProgress,
@@ -134,7 +140,7 @@ Future<void> downloadAndDecryptFileToPath({
   if (versions.isEmpty) {
     throw StateError('This file has no uploaded content yet.');
   }
-  final version = versions.first;
+  final version = _selectDownloadVersion(versions, expectedVersionId);
   final versionIdBytes = uuidStringToBytes(version.id);
   final fileKey = await keyEnvelopeCipher.unwrapKey(
     wrappingKey: vaultKey,
@@ -144,16 +150,21 @@ Future<void> downloadAndDecryptFileToPath({
   );
   final header = E2eeFileHeader.decode(version.e2eeHeader);
 
-  final workDirectory = await Directory.systemTemp.createTemp('homebox-download-');
+  final workDirectory = await Directory.systemTemp.createTemp(
+    'homebox-download-',
+  );
   final ciphertextFile = File('${workDirectory.path}/ciphertext.hbxblob');
   final destination = File(destinationPath);
-  final plaintextTemp = File('$destinationPath.homebox-tmp-${generateUuidV4()}');
+  final plaintextTemp = File(
+    '$destinationPath.homebox-tmp-${generateUuidV4()}',
+  );
   try {
     onProgress?.call(0);
     await api.downloadFileContentToFile(
       accessToken,
       nodeId,
       ciphertextFile,
+      versionId: version.id,
       onProgress: (progress) => onProgress?.call(progress * 0.9),
     );
     final ciphertextLength = await ciphertextFile.length();
@@ -200,7 +211,9 @@ Future<void> downloadAndDecryptFileToPath({
         onProgress?.call(0.9 + 0.1 * (i + 1) / version.chunkCount);
       }
       if (await ciphertext.position() != ciphertextLength) {
-        throw const FormatException('Ciphertext blob has unexpected trailing bytes.');
+        throw const FormatException(
+          'Ciphertext blob has unexpected trailing bytes.',
+        );
       }
       hashSink.close();
       hashClosed = true;
@@ -225,8 +238,21 @@ Future<void> downloadAndDecryptFileToPath({
     await _replaceVerifiedFile(plaintextTemp, destination);
   } finally {
     if (await plaintextTemp.exists()) await plaintextTemp.delete();
-    if (await workDirectory.exists()) await workDirectory.delete(recursive: true);
+    if (await workDirectory.exists()) {
+      await workDirectory.delete(recursive: true);
+    }
   }
+}
+
+transport.FileVersionInfo _selectDownloadVersion(
+  List<transport.FileVersionInfo> versions,
+  String? expectedVersionId,
+) {
+  if (expectedVersionId == null) return versions.first;
+  for (final version in versions) {
+    if (version.id == expectedVersionId) return version;
+  }
+  throw StateError('The selected file version is no longer available.');
 }
 
 Future<void> _replaceVerifiedFile(File temporary, File destination) async {
@@ -277,11 +303,15 @@ Future<transport.NodeInfo> uploadFileVersion({
 
   final fileKey = await fileCipher.newFileKey();
   final header = fileCipher.newHeader();
-  final totalChunks = bytes.isEmpty ? 1 : (bytes.length / homeBoxPlaintextChunkSize).ceil();
+  final totalChunks = bytes.isEmpty
+      ? 1
+      : (bytes.length / homeBoxPlaintextChunkSize).ceil();
   final frames = <Uint8List>[];
   for (var i = 0; i < totalChunks; i++) {
     final start = i * homeBoxPlaintextChunkSize;
-    final end = start + homeBoxPlaintextChunkSize < bytes.length ? start + homeBoxPlaintextChunkSize : bytes.length;
+    final end = start + homeBoxPlaintextChunkSize < bytes.length
+        ? start + homeBoxPlaintextChunkSize
+        : bytes.length;
     final frame = await fileCipher.encryptChunk(
       plaintext: Uint8List.sublistView(bytes, start, end),
       fileKey: fileKey,
@@ -403,7 +433,9 @@ Future<transport.NodeInfo> uploadFilePathVersion({
           : remaining;
       final plaintext = await source.read(chunkLength);
       if (plaintext.length != chunkLength) {
-        throw StateError('File changed while HomeBox was encrypting it. Try again.');
+        throw StateError(
+          'File changed while HomeBox was encrypting it. Try again.',
+        );
       }
       bytesRead += plaintext.length;
       hashSink.add(plaintext);
@@ -439,7 +471,9 @@ Future<transport.NodeInfo> uploadFilePathVersion({
     } catch (_) {
       // The server expires an unfinished ciphertext-only session safely.
     }
-    throw StateError('File changed while HomeBox was encrypting it. Try again.');
+    throw StateError(
+      'File changed while HomeBox was encrypting it. Try again.',
+    );
   }
   await api.completeUpload(
     accessToken,

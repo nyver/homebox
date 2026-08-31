@@ -691,11 +691,12 @@ final class HomeBoxApiClient {
   Future<Uint8List> downloadFileContent(
     String accessToken,
     String nodeId, {
+    String? versionId,
     void Function(double progress)? onProgress,
     int? maxBytes,
   }) => _sendRaw(
     'GET',
-    '/api/v1/files/$nodeId/content',
+    _fileContentPath(nodeId, versionId),
     accessToken: accessToken,
     onResponseProgress: onProgress,
     maxResponseBytes: maxBytes,
@@ -708,14 +709,21 @@ final class HomeBoxApiClient {
     String accessToken,
     String nodeId,
     File destination, {
+    String? versionId,
     void Function(double progress)? onProgress,
   }) => _sendRawToFile(
     'GET',
-    '/api/v1/files/$nodeId/content',
+    _fileContentPath(nodeId, versionId),
     destination,
     accessToken: accessToken,
     onResponseProgress: onProgress,
   );
+
+  String _fileContentPath(String nodeId, String? versionId) {
+    final path = '/api/v1/files/$nodeId/content';
+    if (versionId == null) return path;
+    return Uri(path: path, queryParameters: {'versionId': versionId}).toString();
+  }
 
   Future<List<FileVersionInfo>> listFileVersions(
     String accessToken,

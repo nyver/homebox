@@ -34,7 +34,7 @@ final class _FakeServer {
   final Map<String, Map<String, dynamic>> _uploadSessions = {};
   final Map<String, List<Map<String, dynamic>>> _fileVersions =
       {}; // by nodeId, newest first
-  final Map<String, Uint8List> _blobs = {}; // by nodeId
+  final Map<String, Uint8List> _blobs = {}; // by immutable fileVersionId
   String? _registeredDeviceId;
 
   Future<HttpServer> start() => startFixtureServer(_handle);
@@ -232,7 +232,7 @@ final class _FakeServer {
       for (final chunk in _uploadChunks[uploadId]!) {
         blobBuilder.add(chunk);
       }
-      _blobs[nodeId] = blobBuilder.takeBytes();
+      _blobs[fileVersionId] = blobBuilder.takeBytes();
       final newRevision = (node['revision'] as int) + 1;
       _fileVersions.putIfAbsent(nodeId, () => []).insert(0, {
         'id': fileVersionId,
@@ -261,7 +261,10 @@ final class _FakeServer {
     } else if (method == 'GET' && path.endsWith('/content')) {
       final nodeId =
           request.uri.pathSegments[request.uri.pathSegments.length - 2];
-      final blob = _blobs[nodeId];
+      final versionId =
+          request.uri.queryParameters['versionId'] ??
+          _nodes[nodeId]?['currentVersionId'] as String?;
+      final blob = _blobs[versionId];
       if (blob == null) {
         request.response.statusCode = 404;
         await request.response.close();
@@ -755,6 +758,17 @@ void main() {
       await File(destinationPath).readAsString(),
       'version two, replacing the first',
     );
+
+    // A download already holding the first snapshot must receive that
+    // immutable version, not combine its old metadata/key with the node's
+    // now-current second blob.
+    final firstDestinationPath = '${tempDir.path}/downloaded-first.txt';
+    expect(
+      await controller.downloadFile(firstVersion, firstDestinationPath),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    expect(await File(firstDestinationPath).readAsString(), 'version one');
   });
 
   test('renameNode and deleteNode apply locally right away and reach the server through the outbox', () async {
@@ -862,7 +876,7 @@ void main() {
     // corruption or tampering event the AEAD tag alone might not catch if
     // it happened to hit only unauthenticated padding — the plaintext hash
     // check is the client's last line of defense either way.
-    fakeServer._blobs[uploaded.node.id]![0] ^= 0xff;
+    fakeServer._blobs[uploaded.node.currentVersionId]![0] ^= 0xff;
 
     final destinationPath = '${tempDir.path}/should-not-exist.txt';
     final result = await controller.downloadFile(uploaded, destinationPath);

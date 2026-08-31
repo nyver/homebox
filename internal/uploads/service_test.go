@@ -52,6 +52,13 @@ func TestCompleteStoresOnlyJoinedCiphertextAndIsIdempotent(t *testing.T) {
 	if string(stored) != "ciphertext-oneciphertext-two" {
 		t.Fatalf("unexpected stored bytes: %q", stored)
 	}
+	openedPath, openedSize, err := s.OpenNodeBlob(ctx, nodeID, input.FileVersionID)
+	if err != nil || openedPath != filepath.Join(dir, "blobs", input.BlobID+".hbxblob") || openedSize != int64(len(stored)) {
+		t.Fatalf("open node blob: path=%q size=%d err=%v", openedPath, openedSize, err)
+	}
+	if _, _, err := s.OpenNodeBlob(ctx, uuid.NewString(), input.FileVersionID); err != ErrNotFound {
+		t.Fatalf("cross-node version lookup error=%v, want %v", err, ErrNotFound)
+	}
 	var storedMetadata []byte
 	var storedMetadataVersion int
 	if err := db.QueryRowContext(ctx, "SELECT metadata_ciphertext,metadata_key_version FROM nodes WHERE id=?", nodeID).Scan(&storedMetadata, &storedMetadataVersion); err != nil {

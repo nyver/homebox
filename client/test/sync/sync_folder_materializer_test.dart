@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -158,4 +159,69 @@ void main() {
     await materializer.materialize(rootDir.path);
     expect(await renamedFile.exists(), isFalse);
   });
+
+  test(
+    'materialize cancels an in-flight download when the file moves to Trash',
+    () async {
+      final fakeServer = FakeNodeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final recoverySecret = await vaultKeyStore.createVault(
+        userId: FakeNodeServer.userId,
+      );
+      recoverySecret.destroy();
+      final syncEngine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(syncEngine.dispose);
+      final filesController = FilesController(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(filesController.dispose);
+      final materializer = SyncFolderMaterializer(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(materializer.dispose);
+      final rootDir = await Directory.systemTemp.createTemp(
+        'homebox_syncfolder_cancel_root_',
+      );
+      addTearDown(() => rootDir.delete(recursive: true));
+      final sourceDir = await Directory.systemTemp.createTemp(
+        'homebox_syncfolder_cancel_source_',
+      );
+      addTearDown(() => sourceDir.delete(recursive: true));
+      final sourceFile = File('${sourceDir.path}/obsolete.txt');
+      await sourceFile.writeAsString('content that should never be published');
+      expect(await filesController.uploadFile(sourceFile.path), isTrue);
+      final uploaded = filesController.entries.single;
+
+      fakeServer.contentRequestStarted = Completer<void>();
+      fakeServer.contentResponseGate = Completer<void>();
+      final materialization = materializer.materialize(rootDir.path);
+      await fakeServer.contentRequestStarted!.future.timeout(
+        const Duration(seconds: 5),
+      );
+
+      expect(await filesController.deleteNode(uploaded), isTrue);
+      fakeServer.contentResponseGate!.complete();
+      await materialization;
+
+      expect(materializer.status, SyncFolderStatus.idle);
+      expect(fakeServer.contentDownloadCount, 1);
+      expect(await File('${rootDir.path}/obsolete.txt').exists(), isFalse);
+
+      // A follow-up pass sees the optimistic Trash state and must not start a
+      // second download while the delete is still being synchronized.
+      await materializer.materialize(rootDir.path);
+      expect(fakeServer.contentDownloadCount, 1);
+    },
+  );
 }

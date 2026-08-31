@@ -114,6 +114,10 @@ func TestFullNodeUploadDownloadAndSyncFlow(t *testing.T) {
 	if string(downloaded) != string(want) {
 		t.Fatalf("downloaded ciphertext mismatch: got %q want %q", downloaded, want)
 	}
+	resp, downloaded = s.doRaw(t, http.MethodGet, "/api/v1/files/"+fileID+"/content?versionId="+fileVersionID, nil, token)
+	if resp.StatusCode != http.StatusOK || string(downloaded) != string(want) {
+		t.Fatalf("version-pinned download status=%d got %q want %q", resp.StatusCode, downloaded, want)
+	}
 
 	// Rename+move the file back to root, then delete and restore it.
 	resp, node := s.get(t, "/api/v1/nodes/"+fileID, token)
@@ -140,6 +144,10 @@ func TestFullNodeUploadDownloadAndSyncFlow(t *testing.T) {
 	}, token)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete node status=%d", resp.StatusCode)
+	}
+	resp, _ = s.doRaw(t, http.MethodGet, "/api/v1/files/"+fileID+"/content?versionId="+fileVersionID, nil, token)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("trashed file download status=%d, want 404", resp.StatusCode)
 	}
 
 	resp, trashBody := s.doRaw(t, http.MethodGet, "/api/v1/trash", nil, token)

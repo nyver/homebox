@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/homebox/homebox/internal/uploads"
 )
 
@@ -166,11 +167,18 @@ func (a *API) downloadFileContent(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	if node.NodeType != "FILE" || node.CurrentVersionID == nil {
+	if node.NodeType != "FILE" || node.CurrentVersionID == nil || node.IsDeleted() {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "node has no file content yet")
 		return
 	}
-	path, size, err := a.uploads.OpenBlob(r.Context(), *node.CurrentVersionID)
+	versionID := r.URL.Query().Get("versionId")
+	if versionID == "" {
+		versionID = *node.CurrentVersionID
+	} else if _, err := uuid.Parse(versionID); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "versionId must be a UUID")
+		return
+	}
+	path, size, err := a.uploads.OpenNodeBlob(r.Context(), id, versionID)
 	if err != nil {
 		writeServiceError(w, err)
 		return

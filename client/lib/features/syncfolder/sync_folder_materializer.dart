@@ -210,6 +210,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       return; // node created but no content uploaded yet.
     }
     try {
+      if (!_isCurrentDownload(node)) return;
       _setTransferProgress(metadata.fileName, 0);
       final temporaryDirectory = Directory.systemTemp;
       final source = File(
@@ -222,11 +223,17 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           vaultKey: vaultKey,
           vaultId: vaultId,
           nodeId: node.id,
+          expectedVersionId: node.currentVersionId,
           destinationPath: source.path,
           expectedPlaintextSha256: metadata.plaintextSha256,
-          onProgress: (progress) =>
-              _setTransferProgress(metadata.fileName, progress),
+          onProgress: (progress) {
+            if (!_isCurrentDownload(node)) {
+              throw const _MaterializationCancelled();
+            }
+            _setTransferProgress(metadata.fileName, progress);
+          },
         );
+        if (!_isCurrentDownload(node)) return;
         await _writeFile(rootPath, relativePath, targetPath, source);
       } finally {
         if (await source.exists()) await source.delete();
@@ -243,6 +250,9 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           contentVersionId: node.currentVersionId,
         ),
       );
+    } on _MaterializationCancelled {
+      // The node was replaced or moved to Trash while bytes were arriving.
+      // A later pass will handle the new state; this is not a sync failure.
     } catch (error) {
       // Broad on purpose: downloadAndDecryptFile can throw StateError
       // (e.g. hash mismatch), which does not extend Exception. Continue the
@@ -250,6 +260,13 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       // file next time.
       fileErrors.add('${metadata.fileName}: $error');
     }
+  }
+
+  bool _isCurrentDownload(LocalNode snapshot) {
+    final current = _syncEngine.nodeCache.getById(snapshot.id);
+    return current != null &&
+        !current.isDeleted &&
+        current.currentVersionId == snapshot.currentVersionId;
   }
 
   Future<void> _pruneUnseen(String rootPath, Set<String> seenNodeIds) async {
@@ -371,4 +388,8 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     _disposed = true;
     super.dispose();
   }
+}
+
+final class _MaterializationCancelled implements Exception {
+  const _MaterializationCancelled();
 }

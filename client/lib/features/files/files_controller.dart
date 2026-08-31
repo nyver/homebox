@@ -199,6 +199,7 @@ final class FilesController extends ChangeNotifier {
     _entries = List<FileEntry>.of(_entries)..sort(_compareEntries);
     notifyListeners();
   }
+
   String? get _currentParentId => _path.isEmpty ? null : _path.last.id;
 
   void _onSyncEngineChanged() {
@@ -697,6 +698,7 @@ final class FilesController extends ChangeNotifier {
         vaultKey: ctx.vaultKey,
         vaultId: ctx.vaultId,
         nodeId: entry.node.id,
+        expectedVersionId: entry.node.currentVersionId,
         destinationPath: destinationPath,
         expectedPlaintextSha256: entry.metadata.plaintextSha256,
         onProgress: _setProgress,
@@ -726,6 +728,7 @@ final class FilesController extends ChangeNotifier {
         vaultKey: vaultKey,
         vaultId: uuidStringToBytes(session.user.id),
         nodeId: entry.node.id,
+        expectedVersionId: entry.node.currentVersionId,
         expectedPlaintextSha256: entry.metadata.plaintextSha256,
         // Thumbnails are cosmetic and decoded in memory. Large images remain
         // available through the bounded streaming download path instead.
@@ -796,9 +799,8 @@ final class FilesController extends ChangeNotifier {
       a.name.toLowerCase().compareTo(b.name.toLowerCase());
 
   int _compareExtensions(FileEntry a, FileEntry b) {
-    final extensionComparison = _extensionOf(a.name).compareTo(
-      _extensionOf(b.name),
-    );
+    final extensionComparison = _extensionOf(a.name)
+        .compareTo(_extensionOf(b.name));
     return extensionComparison == 0 ? _compareNames(a, b) : extensionComparison;
   }
 

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -19,7 +20,7 @@ final class FakeNodeServer {
   final Map<String, List<Uint8List>> _uploadChunks = {};
   final Map<String, List<Map<String, dynamic>>> _fileVersions =
       {}; // by nodeId, newest first
-  final Map<String, Uint8List> _blobs = {}; // by nodeId
+  final Map<String, Uint8List> _blobs = {}; // by immutable fileVersionId
   int _revision = 0;
   String? _registeredDeviceId;
 
@@ -31,6 +32,12 @@ final class FakeNodeServer {
   /// Artificial delay before responding to a sync/changes pull, so a test
   /// can act (e.g. start a second runOnce()) while a pass is still in flight.
   Duration pullDelay = Duration.zero;
+
+  /// Optional gate used to hold an in-flight content response while a test
+  /// replaces or deletes the node in the local cache.
+  Completer<void>? contentResponseGate;
+  Completer<void>? contentRequestStarted;
+  int contentDownloadCount = 0;
 
   Future<HttpServer> start() => startFixtureServer(_handle);
 
@@ -261,7 +268,7 @@ final class FakeNodeServer {
       for (final chunk in _uploadChunks[uploadId]!) {
         blobBuilder.add(chunk);
       }
-      _blobs[nodeId] = blobBuilder.takeBytes();
+      _blobs[fileVersionId] = blobBuilder.takeBytes();
       final newRevision = _recordChange(nodeId, 'UPDATE');
       _fileVersions.putIfAbsent(nodeId, () => []).insert(0, {
         'id': fileVersionId,
@@ -294,7 +301,14 @@ final class FakeNodeServer {
     if (method == 'GET' && path.endsWith('/content')) {
       final nodeId =
           request.uri.pathSegments[request.uri.pathSegments.length - 2];
-      final blob = _blobs[nodeId];
+      contentDownloadCount++;
+      final started = contentRequestStarted;
+      if (started != null && !started.isCompleted) started.complete();
+      await contentResponseGate?.future;
+      final versionId =
+          request.uri.queryParameters['versionId'] ??
+          _nodes[nodeId]?['currentVersionId'] as String?;
+      final blob = _blobs[versionId];
       if (blob == null) {
         request.response.statusCode = 404;
         await request.response.close();
@@ -358,7 +372,8 @@ final class FakeNodeServer {
   /// corruption or tampering — used to prove a caller skips re-downloading
   /// content it already has rather than to test the download path itself.
   void corruptBlob(String nodeId) {
-    _blobs[nodeId]![0] ^= 0xff;
+    final versionId = _nodes[nodeId]!['currentVersionId'] as String;
+    _blobs[versionId]![0] ^= 0xff;
   }
 
   Map<String, dynamic> _newNode({
