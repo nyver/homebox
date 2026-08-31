@@ -52,6 +52,7 @@ final class HomeBoxDevice {
     required this.lastSeenAt,
     this.lastSyncAt,
     this.revokedAt,
+    this.hasVaultKey = false,
   });
 
   final String id;
@@ -63,6 +64,13 @@ final class HomeBoxDevice {
   final DateTime lastSeenAt;
   final DateTime? lastSyncAt;
   final DateTime? revokedAt;
+
+  /// True once a trusted device has delivered this device a vault-key
+  /// envelope that has not since been revoked. This is the only reliable
+  /// approval signal: a device can log in and even read the (still
+  /// undecryptable) sync feed before ever being approved, so login or sync
+  /// activity alone must never be shown as approval.
+  final bool hasVaultKey;
 
   bool get isRevoked => revokedAt != null;
 }
@@ -1074,5 +1082,6 @@ final class HomeBoxApiClient {
     revokedAt: json['revokedAt'] != null
         ? DateTime.parse(json['revokedAt'] as String)
         : null,
+    hasVaultKey: json['hasVaultKey'] as bool? ?? false,
   );
 }

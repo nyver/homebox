@@ -78,3 +78,27 @@ func (s *Service) Latest(ctx context.Context, targetDeviceID string) (Envelope, 
 	e.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
 	return e, err
 }
+
+// ActiveEnvelopeDeviceIDs returns the set of targetUserID's device IDs that
+// currently hold a non-revoked vault-key envelope. This is the only reliable
+// "has this device actually been granted vault access" signal: a device can
+// authenticate and even read the (still-undecryptable) sync feed before ever
+// receiving one, so callers must not infer approval from login or sync
+// activity alone.
+func (s *Service) ActiveEnvelopeDeviceIDs(ctx context.Context, targetUserID string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT target_device_id FROM vault_key_envelopes
+		WHERE target_user_id = ? AND revoked_at IS NULL AND target_device_id IS NOT NULL`, targetUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result[id] = true
+	}
+	return result, rows.Err()
+}

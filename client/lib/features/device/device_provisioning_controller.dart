@@ -37,10 +37,11 @@ final class DeviceProvisioningController extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   bool get busy => _status == DeviceProvisioningStatus.loading;
 
-  /// Lists active devices that have completed at least one authenticated sync
-  /// feed read. A non-null lastSyncAt therefore represents actual server
-  /// synchronization rather than a login or a device-registration event.
-  Future<List<transport.HomeBoxDevice>> approvedDevices() async {
+  /// Lists this account's active (non-revoked) devices, most recently
+  /// created first, so Settings can show every device alongside its real
+  /// approval state (`HomeBoxDevice.hasVaultKey`) rather than only the ones
+  /// already approved.
+  Future<List<transport.HomeBoxDevice>> accountDevices() async {
     final context = await _requireSession();
     if (context == null) return const [];
     _errorMessage = null;
@@ -48,9 +49,9 @@ final class DeviceProvisioningController extends ChangeNotifier {
     try {
       final devices = await context.api.listDevices(context.accessToken);
       _setStatus(DeviceProvisioningStatus.idle);
-      return devices
-          .where((device) => !device.isRevoked && device.lastSyncAt != null)
-          .toList(growable: false);
+      return devices.where((device) => !device.isRevoked).toList(
+        growable: false,
+      )..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     } catch (e) {
       _fail(e);
       return const [];
@@ -126,6 +127,35 @@ final class DeviceProvisioningController extends ChangeNotifier {
       vaultId?.fillRange(0, vaultId.length, 0);
       targetDeviceId?.fillRange(0, targetDeviceId.length, 0);
       vaultKey?.destroy();
+    }
+  }
+
+  /// Revokes [target]'s approval by ending its server session outright: its
+  /// access and refresh tokens stop working immediately, so it must sign in
+  /// and be approved again by a trusted device before it can rejoin the
+  /// vault. This cannot retract a vault key [target] already decrypted and
+  /// stored locally before revocation. Refuses to revoke the calling
+  /// device's own session, which would otherwise lock this device out.
+  Future<bool> revokeDevice(transport.HomeBoxDevice target) async {
+    final context = await _requireSession();
+    if (context == null) return false;
+    if (target.id == context.deviceId) {
+      _fail(
+        const FormatException(
+          'Sign out from this device instead of revoking it here.',
+        ),
+      );
+      return false;
+    }
+    _errorMessage = null;
+    _setStatus(DeviceProvisioningStatus.loading);
+    try {
+      await context.api.revokeDevice(context.accessToken, target.id);
+      _setStatus(DeviceProvisioningStatus.idle);
+      return true;
+    } catch (e) {
+      _fail(e);
+      return false;
     }
   }
 

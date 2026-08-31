@@ -204,6 +204,24 @@ func decodeArray(t *testing.T, raw []byte) []map[string]any {
 	return decoded
 }
 
+// deviceField fetches the caller's device list and returns one field from
+// the entry matching deviceID, so tests can assert on a device's approval
+// state without hardcoding the whole response shape.
+func deviceField(t *testing.T, s testServer, accessToken, deviceID, field string) any {
+	t.Helper()
+	resp, raw := s.doRaw(t, http.MethodGet, "/api/v1/devices", nil, accessToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list devices status=%d", resp.StatusCode)
+	}
+	for _, d := range decodeArray(t, raw) {
+		if d["id"] == deviceID {
+			return d[field]
+		}
+	}
+	t.Fatalf("device %s not found in %s", deviceID, raw)
+	return nil
+}
+
 func loginDevice(t *testing.T, s testServer, username, deviceID string) map[string]any {
 	t.Helper()
 	resp, body := s.do(t, http.MethodPost, "/api/v1/auth/login", map[string]any{
@@ -242,6 +260,16 @@ func TestFullLoginDeviceKeyEnvelopeAndRevokeFlow(t *testing.T) {
 	}
 	_ = devices
 
+	// Merely logging in and reading the sync feed must not be mistaken for
+	// approval: a device only counts as approved once a trusted device has
+	// actually delivered it a vault-key envelope.
+	if resp, _ := s.get(t, "/api/v1/sync/changes", newToken); resp.StatusCode != http.StatusOK {
+		t.Fatalf("new device sync changes status=%d", resp.StatusCode)
+	}
+	if hasVaultKey, ok := deviceField(t, s, trustedToken, newDeviceID, "hasVaultKey").(bool); !ok || hasVaultKey {
+		t.Fatalf("new device should not be marked approved before an envelope is delivered, got %v", hasVaultKey)
+	}
+
 	resp, _ = s.do(t, http.MethodGet, fmt.Sprintf("/api/v1/devices/%s/key-envelope", newDeviceID), nil, newToken)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected no envelope yet, status=%d", resp.StatusCode)
@@ -252,6 +280,9 @@ func TestFullLoginDeviceKeyEnvelopeAndRevokeFlow(t *testing.T) {
 	}, trustedToken)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("upload envelope status=%d body=%v", resp.StatusCode, upload)
+	}
+	if hasVaultKey, ok := deviceField(t, s, trustedToken, newDeviceID, "hasVaultKey").(bool); !ok || !hasVaultKey {
+		t.Fatalf("device should be marked approved once an envelope is delivered, got %v", hasVaultKey)
 	}
 
 	resp, envelope := s.do(t, http.MethodGet, fmt.Sprintf("/api/v1/devices/%s/key-envelope", newDeviceID), nil, newToken)

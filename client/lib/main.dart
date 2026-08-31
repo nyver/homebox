@@ -2525,7 +2525,7 @@ class _SettingsSection extends StatelessWidget {
           vaultSetupController: vaultSetupController,
           onVaultProvisioned: onVaultProvisioned,
         ),
-        _ApprovedDevicesCard(
+        _AccountDevicesCard(
           controller: deviceProvisioningController,
           serverConnectionController: serverConnectionController,
         ),
@@ -2769,8 +2769,8 @@ final class _DeviceProvisioningCard extends StatelessWidget {
 
 String _deviceCode(String deviceId) => deviceId.substring(0, 8).toUpperCase();
 
-final class _ApprovedDevicesCard extends StatefulWidget {
-  const _ApprovedDevicesCard({
+final class _AccountDevicesCard extends StatefulWidget {
+  const _AccountDevicesCard({
     required this.controller,
     required this.serverConnectionController,
   });
@@ -2779,12 +2779,13 @@ final class _ApprovedDevicesCard extends StatefulWidget {
   final ServerConnectionController serverConnectionController;
 
   @override
-  State<_ApprovedDevicesCard> createState() => _ApprovedDevicesCardState();
+  State<_AccountDevicesCard> createState() => _AccountDevicesCardState();
 }
 
-final class _ApprovedDevicesCardState extends State<_ApprovedDevicesCard> {
+final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
   List<transport.HomeBoxDevice> _devices = const [];
   bool _loading = false;
+  bool _revoking = false;
   String? _error;
 
   @override
@@ -2813,7 +2814,7 @@ final class _ApprovedDevicesCardState extends State<_ApprovedDevicesCard> {
       _loading = true;
       _error = null;
     });
-    final devices = await widget.controller.approvedDevices();
+    final devices = await widget.controller.accountDevices();
     if (!mounted) return;
     setState(() {
       _devices = devices;
@@ -2822,11 +2823,55 @@ final class _ApprovedDevicesCardState extends State<_ApprovedDevicesCard> {
     });
   }
 
+  Future<void> _revoke(transport.HomeBoxDevice device) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Revoke this device?'),
+        content: Text(
+          '${device.name} (${_deviceCode(device.id)}) will be signed out '
+          'immediately and must be approved again by a trusted device before '
+          'it can access the vault. This cannot retract a vault key it has '
+          'already received.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Revoke'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _revoking = true);
+    final revoked = await widget.controller.revokeDevice(device);
+    if (!mounted) return;
+    setState(() => _revoking = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          revoked
+              ? '${device.name} has been revoked.'
+              : (widget.controller.errorMessage ??
+                    'Could not revoke this device.'),
+        ),
+      ),
+    );
+    if (revoked) await _load();
+  }
+
   @override
   Widget build(BuildContext context) {
     final signedIn =
         widget.serverConnectionController.status ==
         ServerConnectionStatus.authenticated;
+    final currentDeviceId = signedIn
+        ? widget.serverConnectionController.session?.device.id
+        : null;
     return Card(
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 8),
@@ -2834,12 +2879,13 @@ final class _ApprovedDevicesCardState extends State<_ApprovedDevicesCard> {
           children: [
             ListTile(
               leading: const Icon(Icons.devices_other_outlined),
-              title: const Text('Approved devices'),
+              title: const Text('Account devices'),
               subtitle: const Text(
-                'Devices that have successfully contacted the server sync feed.',
+                'Approved devices hold the vault key; pending devices are '
+                'signed in but still waiting for approval.',
               ),
               trailing: IconButton(
-                tooltip: 'Refresh approved devices',
+                tooltip: 'Refresh devices',
                 onPressed: !signedIn || _loading ? null : _load,
                 icon: _loading
                     ? const SizedBox.square(
@@ -2862,7 +2908,7 @@ final class _ApprovedDevicesCardState extends State<_ApprovedDevicesCard> {
                 padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('No approved device has synchronized yet.'),
+                  child: Text('No other device is signed in yet.'),
                 ),
               )
             else
@@ -2873,11 +2919,45 @@ final class _ApprovedDevicesCardState extends State<_ApprovedDevicesCard> {
                     device.platform == 'ANDROID'
                         ? Icons.phone_android_outlined
                         : Icons.desktop_windows_outlined,
+                    color: device.hasVaultKey
+                        ? Colors.green
+                        : Theme.of(context).colorScheme.outline,
                   ),
-                  title: Text('${device.name} (${_deviceCode(device.id)})'),
-                  subtitle: Text(
-                    'Last synchronization: ${_formatLocalDateTime(device.lastSyncAt!)}',
+                  title: Text(
+                    '${device.name} (${_deviceCode(device.id)})'
+                    '${device.id == currentDeviceId ? ' · this device' : ''}',
                   ),
+                  subtitle: Row(
+                    children: [
+                      Icon(
+                        device.hasVaultKey
+                            ? Icons.check_circle_outline
+                            : Icons.hourglass_empty_outlined,
+                        size: 14,
+                        color: device.hasVaultKey
+                            ? Colors.green
+                            : Colors.orange,
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          device.hasVaultKey
+                              ? (device.lastSyncAt != null
+                                    ? 'Approved · Last sync: ${_formatLocalDateTime(device.lastSyncAt!)}'
+                                    : 'Approved')
+                              : 'Pending approval',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  trailing: device.id == currentDeviceId
+                      ? null
+                      : IconButton(
+                          tooltip: 'Revoke device',
+                          onPressed: _revoking ? null : () => _revoke(device),
+                          icon: const Icon(Icons.block_outlined),
+                        ),
                 ),
           ],
         ),

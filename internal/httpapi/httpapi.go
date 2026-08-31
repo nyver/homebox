@@ -237,15 +237,16 @@ func (a *API) listShareDevices(w http.ResponseWriter, r *http.Request) {
 // --- devices ---
 
 type deviceResponse struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	Platform   string  `json:"platform"`
-	PublicKey  string  `json:"publicKey"`
-	KeyVersion int     `json:"keyVersion"`
-	CreatedAt  string  `json:"createdAt"`
-	LastSeenAt string  `json:"lastSeenAt"`
-	LastSyncAt *string `json:"lastSyncAt,omitempty"`
-	RevokedAt  *string `json:"revokedAt,omitempty"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Platform    string  `json:"platform"`
+	PublicKey   string  `json:"publicKey"`
+	KeyVersion  int     `json:"keyVersion"`
+	CreatedAt   string  `json:"createdAt"`
+	LastSeenAt  string  `json:"lastSeenAt"`
+	LastSyncAt  *string `json:"lastSyncAt,omitempty"`
+	RevokedAt   *string `json:"revokedAt,omitempty"`
+	HasVaultKey bool    `json:"hasVaultKey"`
 }
 
 type shareDeviceResponse struct {
@@ -274,7 +275,14 @@ func toDeviceResponse(d auth.Device) deviceResponse {
 }
 
 func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
-	devices, err := a.auth.ListDevices(r.Context(), requestUserID(r))
+	userID := requestUserID(r)
+	devices, err := a.auth.ListDevices(r.Context(), userID)
+	if err != nil {
+		log.Printf("list devices: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list devices")
+		return
+	}
+	approved, err := a.provisioning.ActiveEnvelopeDeviceIDs(r.Context(), userID)
 	if err != nil {
 		log.Printf("list devices: %v", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list devices")
@@ -282,7 +290,9 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]deviceResponse, 0, len(devices))
 	for _, d := range devices {
-		out = append(out, toDeviceResponse(d))
+		resp := toDeviceResponse(d)
+		resp.HasVaultKey = approved[d.ID]
+		out = append(out, resp)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

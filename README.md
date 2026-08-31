@@ -181,7 +181,7 @@ Use the same HomeBox server and account on both devices. On the new device, sign
 
 The eight-character device code shown on both devices is an out-of-band check to help select the intended device from the account's registered-device list.
 
-Settings also lists approved devices that have successfully contacted the server sync feed, including each device's local date and time of its latest sync. This is tracked separately from login activity: a device that merely signs in is not shown as synchronized.
+Settings also lists every device signed in to the account, each marked **Approved** or **Pending approval**. Approval means a trusted device has actually delivered it a vault-key envelope (`hasVaultKey` in `GET /api/v1/devices`); merely signing in and reading the (still undecryptable) sync feed is deliberately not enough to be shown as approved, since a device can do both before any trusted device has approved it. Approved rows also show the device's local date and time of its latest sync. The owner can **Revoke** any other device from this list at any time: revocation ends that device's session immediately (its access and refresh tokens stop working) and it must sign in and be approved again to rejoin the vault. Revoking cannot retract a vault key a device already decrypted and stored locally before revocation. A device cannot revoke its own session from this screen.
 
 ### Windows drag-and-drop uploads
 
