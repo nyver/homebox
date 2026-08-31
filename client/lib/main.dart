@@ -11,6 +11,7 @@ import 'core/e2ee/device_identity.dart';
 import 'core/e2ee/vault_key_store.dart';
 import 'core/localization/app_locale_controller.dart';
 import 'core/platform/android_file_saver.dart';
+import 'core/platform/android_file_sharer.dart';
 import 'core/platform/android_sync_folder.dart';
 import 'core/platform/biometric_authenticator.dart';
 import 'core/platform/camera_photo_picker.dart';
@@ -43,6 +44,7 @@ class HomeBoxApp extends StatefulWidget {
     this.cameraPhotoPicker,
     this.biometricAuthenticator,
     this.androidFileSaver,
+    this.androidFileSharer,
     this.androidSyncFolder,
     this.localeController,
   });
@@ -54,6 +56,7 @@ class HomeBoxApp extends StatefulWidget {
   final CameraPhotoPicker? cameraPhotoPicker;
   final BiometricAuthenticator? biometricAuthenticator;
   final AndroidFileSaver? androidFileSaver;
+  final AndroidFileSharer? androidFileSharer;
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController? localeController;
 
@@ -98,6 +101,7 @@ class _HomeBoxAppState extends State<HomeBoxApp> {
         cameraPhotoPicker: widget.cameraPhotoPicker,
         biometricAuthenticator: widget.biometricAuthenticator,
         androidFileSaver: widget.androidFileSaver,
+        androidFileSharer: widget.androidFileSharer,
         androidSyncFolder: widget.androidSyncFolder,
         localeController: _localeController,
       ),
@@ -123,6 +127,7 @@ class HomeBoxDesktopPage extends StatefulWidget {
     this.cameraPhotoPicker,
     this.biometricAuthenticator,
     this.androidFileSaver,
+    this.androidFileSharer,
     this.androidSyncFolder,
     this.localeController,
   });
@@ -138,6 +143,7 @@ class HomeBoxDesktopPage extends StatefulWidget {
   final CameraPhotoPicker? cameraPhotoPicker;
   final BiometricAuthenticator? biometricAuthenticator;
   final AndroidFileSaver? androidFileSaver;
+  final AndroidFileSharer? androidFileSharer;
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController? localeController;
 
@@ -156,6 +162,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final SyncFolderWatcher _syncFolderWatcher;
   late final CameraPhotoPicker _cameraPhotoPicker;
   late final AndroidFileSaver _androidFileSaver;
+  late final AndroidFileSharer _androidFileSharer;
   late final AndroidSyncFolder _androidSyncFolder;
   late final WindowsSyncFolder _windowsSyncFolder;
   late final AppLocaleController _localeController;
@@ -204,6 +211,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         widget.cameraPhotoPicker ?? ImagePickerCameraPhotoPicker();
     _androidFileSaver =
         widget.androidFileSaver ?? MethodChannelAndroidFileSaver();
+    _androidFileSharer =
+        widget.androidFileSharer ?? MethodChannelAndroidFileSharer();
     _androidSyncFolder =
         widget.androidSyncFolder ?? MethodChannelAndroidSyncFolder();
     _windowsSyncFolder = WindowsSyncFolder();
@@ -729,6 +738,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       androidFileSaver: supportsAndroidSaveDialog(defaultTargetPlatform)
           ? _androidFileSaver
           : null,
+      androidFileSharer: supportsAndroidFileSharing(defaultTargetPlatform)
+          ? _androidFileSharer
+          : null,
       androidSyncFolder: defaultTargetPlatform == TargetPlatform.android
           ? _androidSyncFolder
           : null,
@@ -1126,6 +1138,7 @@ class _SectionContent extends StatelessWidget {
     required this.onToggleSyncPause,
     required this.onCapturePhoto,
     required this.androidFileSaver,
+    required this.androidFileSharer,
     required this.androidSyncFolder,
     required this.localeController,
     required this.onPullToRefresh,
@@ -1149,6 +1162,7 @@ class _SectionContent extends StatelessWidget {
   final VoidCallback onToggleSyncPause;
   final Future<void> Function()? onCapturePhoto;
   final AndroidFileSaver? androidFileSaver;
+  final AndroidFileSharer? androidFileSharer;
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController localeController;
   final Future<void> Function()? onPullToRefresh;
@@ -1159,6 +1173,7 @@ class _SectionContent extends StatelessWidget {
       controller: filesController,
       onCapturePhoto: onCapturePhoto,
       androidFileSaver: androidFileSaver,
+      androidFileSharer: androidFileSharer,
       syncFolder: syncFolder,
       androidSyncFolder: androidSyncFolder,
       onPullToRefresh: onPullToRefresh,
@@ -1388,6 +1403,7 @@ final class _FilesSection extends StatefulWidget {
     required this.controller,
     required this.onCapturePhoto,
     required this.androidFileSaver,
+    required this.androidFileSharer,
     required this.syncFolder,
     required this.androidSyncFolder,
     required this.onPullToRefresh,
@@ -1396,6 +1412,7 @@ final class _FilesSection extends StatefulWidget {
   final FilesController? controller;
   final Future<void> Function()? onCapturePhoto;
   final AndroidFileSaver? androidFileSaver;
+  final AndroidFileSharer? androidFileSharer;
   final String? syncFolder;
   final AndroidSyncFolder? androidSyncFolder;
   final Future<void> Function()? onPullToRefresh;
@@ -1551,6 +1568,72 @@ final class _FilesSectionState extends State<_FilesSection> {
           ),
         ),
       );
+    }
+  }
+
+  Future<void> _shareFile(BuildContext context, FileEntry entry) async {
+    final controller = widget.controller;
+    final sharer = widget.androidFileSharer;
+    if (controller == null || sharer == null || entry.isDirectory) return;
+
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final shareRoot = Directory('${tempDir.path}/homebox_shared');
+      await _deleteExpiredSharedFiles(shareRoot);
+      final shareDirectory = Directory(
+        '${shareRoot.path}/${entry.node.id}_${DateTime.now().microsecondsSinceEpoch}',
+      );
+      await shareDirectory.create(recursive: true);
+      // SensitiveNodeMetadata validates file names, so this is a single safe
+      // path component. Keeping the original name helps recipient apps infer
+      // the extension in addition to the MIME type supplied below.
+      final sharedFile = File('${shareDirectory.path}/${entry.name}');
+      final downloaded = await controller.downloadFile(entry, sharedFile.path);
+      if (!downloaded) {
+        await shareDirectory.delete(recursive: true);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                controller.errorMessage ??
+                    'Could not prepare the file for sharing.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
+      try {
+        await sharer.shareFile(
+          sourcePath: sharedFile.path,
+          suggestedName: entry.name,
+          mimeType: entry.metadata.mimeType,
+        );
+      } catch (_) {
+        await shareDirectory.delete(recursive: true);
+        rethrow;
+      }
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open the share sheet.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteExpiredSharedFiles(Directory shareRoot) async {
+    if (!await shareRoot.exists()) return;
+    final expiresAt = DateTime.now().subtract(const Duration(hours: 1));
+    await for (final entity in shareRoot.list()) {
+      try {
+        if ((await entity.stat()).modified.isBefore(expiresAt)) {
+          await entity.delete(recursive: true);
+        }
+      } on FileSystemException {
+        // A recipient application can still be reading a shared file. Leave
+        // it for the next cleanup attempt instead of interrupting that read.
+      }
     }
   }
 
@@ -1797,12 +1880,20 @@ final class _FilesSectionState extends State<_FilesSection> {
                   tooltip: 'More actions',
                   onSelected: (value) => switch (value) {
                     'save_as' => _downloadFile(context, entry),
+                    'share' => _shareFile(context, entry),
                     'replace' => _replaceContent(context, entry),
                     'rename' => _renameEntry(context, entry),
                     'delete' => _deleteEntry(context, entry),
                     _ => null,
                   },
                   itemBuilder: (context) => [
+                    if (!entry.isDirectory && widget.androidFileSharer != null)
+                      PopupMenuItem(
+                        value: 'share',
+                        child: Text(
+                          _localized(context, en: 'Share', ru: 'Поделиться'),
+                        ),
+                      ),
                     if (!entry.isDirectory)
                       const PopupMenuItem(
                         value: 'save_as',

@@ -56,6 +56,9 @@ security:
     # Android app-lock biometrics are device-local (`USE_BIOMETRIC`) and do
     # not add a server-side setting or send biometric data to HomeBox.
     # Family Vault envelopes stay opaque ciphertext; per-folder keys are bound to the recipient device only in clients.
+    # Android's Share action decrypts only to the client's private temporary
+    # cache and grants the receiving app read access; this server never sees
+    # the plaintext or participates in that transfer.
     required: true
     server_decryption_enabled: false
     protocol_version: 1

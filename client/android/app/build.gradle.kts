@@ -4,6 +4,10 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+dependencies {
+    implementation("androidx.core:core:1.16.0")
+}
+
 android {
     namespace = "com.homebox.homebox_client"
     compileSdk = flutter.compileSdkVersion

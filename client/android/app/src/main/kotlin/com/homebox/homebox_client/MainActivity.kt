@@ -1,11 +1,13 @@
 package com.homebox.homebox_client
 
 import android.app.Activity
+import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
 import android.view.WindowManager
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -20,6 +22,7 @@ import java.io.FileInputStream
 /// destination — it never touches the E2EE layer.
 class MainActivity : FlutterFragmentActivity() {
     private val fileSaveChannel = "homebox/file_save"
+    private val fileShareChannel = "homebox/file_share"
     private val syncFolderChannel = "homebox/sync_folder"
     private val saveFileRequestCode = 4173
     private val selectSyncFolderRequestCode = 4174
@@ -72,6 +75,43 @@ class MainActivity : FlutterFragmentActivity() {
                     pendingResult = null
                     pendingSourcePath = null
                     result.error("save_failed", e.message, null)
+                }
+            }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, fileShareChannel)
+            .setMethodCallHandler { call, result ->
+                if (call.method != "shareFile") {
+                    result.notImplemented()
+                    return@setMethodCallHandler
+                }
+                val sourcePath = call.argument<String>("sourcePath")
+                val suggestedName = call.argument<String>("suggestedName")
+                val mimeType = call.argument<String>("mimeType") ?: "application/octet-stream"
+                if (sourcePath.isNullOrEmpty() || suggestedName.isNullOrEmpty()) {
+                    result.error("invalid_arguments", "sourcePath and suggestedName are required.", null)
+                    return@setMethodCallHandler
+                }
+                val sourceFile = File(sourcePath)
+                if (!isShareableCacheFile(sourceFile)) {
+                    result.error("invalid_source", "The shared file must be in HomeBox's temporary cache.", null)
+                    return@setMethodCallHandler
+                }
+                try {
+                    val fileUri = FileProvider.getUriForFile(
+                        this,
+                        "$packageName.shared_files",
+                        sourceFile,
+                    )
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = mimeType
+                        putExtra(Intent.EXTRA_STREAM, fileUri)
+                        putExtra(Intent.EXTRA_TITLE, suggestedName)
+                        clipData = ClipData.newRawUri(suggestedName, fileUri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(Intent.createChooser(shareIntent, "Share file"))
+                    result.success(null)
+                } catch (e: Exception) {
+                    result.error("share_failed", e.message, null)
                 }
             }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, syncFolderChannel)
@@ -167,6 +207,17 @@ class MainActivity : FlutterFragmentActivity() {
             pendingSyncFolderResult = null
             result.error("folder_selection_failed", e.message, null)
         }
+    }
+
+    /// A Flutter caller must not be able to turn this channel into a general
+    /// file-read grant. Only files created under the dedicated cache root can
+    /// be exposed to another application.
+    private fun isShareableCacheFile(file: File): Boolean = try {
+        val shareRoot = File(cacheDir, "homebox_shared").canonicalFile
+        val candidate = file.canonicalFile
+        candidate.isFile && candidate.path.startsWith("${shareRoot.path}${File.separator}")
+    } catch (_: Exception) {
+        false
     }
 
     private fun withTreeAndPath(
