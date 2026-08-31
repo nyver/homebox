@@ -2,7 +2,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/storage/local_database.dart';
 import 'package:homebox_client/core/storage/pending_operations_store.dart';
 
-PendingOperation _op(String id, {DateTime? createdAt, DateTime? nextRetryAt, PendingOperationStatus status = PendingOperationStatus.pending}) {
+PendingOperation _op(
+  String id, {
+  DateTime? createdAt,
+  DateTime? nextRetryAt,
+  PendingOperationStatus status = PendingOperationStatus.pending,
+}) {
   return PendingOperation(
     id: id,
     operationId: 'op-$id',
@@ -68,7 +73,12 @@ void main() {
     final store = PendingOperationsStore(db.db);
     store.enqueue(_op('a'));
 
-    store.markRetry('a', retryCount: 1, nextRetryAt: DateTime.utc(2026, 6, 1), errorCode: 'INTERNAL_ERROR');
+    store.markRetry(
+      'a',
+      retryCount: 1,
+      nextRetryAt: DateTime.utc(2026, 6, 1),
+      errorCode: 'INTERNAL_ERROR',
+    );
     expect(store.listReady(DateTime.utc(2026, 1, 2)), isEmpty);
 
     final laterReady = store.listReady(DateTime.utc(2026, 7, 1));
@@ -81,18 +91,22 @@ void main() {
     final db = LocalDatabase.openInMemory();
     addTearDown(db.dispose);
     final store = PendingOperationsStore(db.db);
-    store.enqueue(PendingOperation(
-      id: 'a',
-      operationId: 'op-a',
-      type: PendingOperationType.createNode,
-      nodeId: 'shared-node',
-      payload: const {},
-      createdAt: DateTime.utc(2026, 1, 1),
-      retryCount: 0,
-      status: PendingOperationStatus.pending,
-    ));
+    store.enqueue(
+      PendingOperation(
+        id: 'a',
+        operationId: 'op-a',
+        type: PendingOperationType.createNode,
+        nodeId: 'shared-node',
+        payload: const {},
+        createdAt: DateTime.utc(2026, 1, 1),
+        retryCount: 0,
+        status: PendingOperationStatus.pending,
+      ),
+    );
     expect(store.hasUnfinishedOperationsForNode('shared-node'), isTrue);
+    expect(store.hasUnfinishedOperations, isTrue);
     store.markDone('a');
     expect(store.hasUnfinishedOperationsForNode('shared-node'), isFalse);
+    expect(store.hasUnfinishedOperations, isFalse);
   });
 }

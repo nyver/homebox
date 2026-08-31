@@ -53,4 +53,6 @@ final class MaterializationFailuresStore {
       .select('SELECT node_id FROM materialization_failures')
       .map((row) => row['node_id'] as String)
       .toList(growable: false);
+
+  void clear() => _db.execute('DELETE FROM materialization_failures');
 }

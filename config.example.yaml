@@ -1,5 +1,6 @@
 # HomeBox stores only client-encrypted ciphertext. Do not enable server-side decryption.
 # Android release signing is local to build-mobile-release.bat and is never configured here.
+# Desktop Resync uses the authenticated node/upload APIs and needs no server-side option.
 server:
   host: "0.0.0.0"
   port: 8787

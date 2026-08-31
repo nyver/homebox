@@ -7,6 +7,7 @@ import 'package:homebox_client/core/e2ee/metadata_cipher.dart';
 import 'package:homebox_client/core/e2ee/opaque_id.dart';
 import 'package:homebox_client/core/e2ee/vault_key_store.dart';
 import 'package:homebox_client/core/storage/local_database.dart';
+import 'package:homebox_client/core/storage/materialized_files_store.dart';
 import 'package:homebox_client/core/transport/pinned_server_store.dart';
 import 'package:homebox_client/features/files/file_transfer.dart';
 import 'package:homebox_client/features/files/files_controller.dart';
@@ -55,6 +56,98 @@ Future<void> _awaitBackgroundSync(SyncEngine engine) async {
 }
 
 void main() {
+  test('resync is safe to retry, then trashes the old Vault and uploads the local tree', () async {
+    final fakeServer = FakeNodeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: FakeNodeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final filesController = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(filesController.dispose);
+    final uploader = LocalFolderUploader(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(uploader.dispose);
+
+    final sourceDir = await Directory.systemTemp.createTemp(
+      'homebox_resync_source_',
+    );
+    addTearDown(() => sourceDir.delete(recursive: true));
+    final oldSource = File('${sourceDir.path}/old-server-file.txt');
+    await oldSource.writeAsString('old server state');
+    expect(await filesController.uploadFile(oldSource.path), isTrue);
+    final oldNode = filesController.entries.single.node;
+    syncEngine.materializedFiles.upsert(
+      MaterializedFile(
+        nodeId: oldNode.id,
+        relativePath: 'old-server-file.txt',
+        contentVersionId: oldNode.currentVersionId,
+      ),
+    );
+
+    final rootDir = await Directory.systemTemp.createTemp(
+      'homebox_resync_root_',
+    );
+    addTearDown(() => rootDir.delete(recursive: true));
+    await Directory('${rootDir.path}/Docs').create();
+    await File('${rootDir.path}/Docs/local.txt')
+        .writeAsString('authoritative local state');
+
+    fakeServer
+      ..failMutationsWithStatus = 503
+      ..failMutationsWithCode = 'INTERNAL_ERROR';
+    expect(await uploader.resyncFromLocalFolder(rootDir.path), isFalse);
+    expect(uploader.status, LocalUploadStatus.error);
+    expect(syncEngine.nodeCache.getById(oldNode.id)!.isDeleted, isFalse);
+    expect(syncEngine.materializedFiles.listAll(), isEmpty);
+
+    fakeServer
+      ..failMutationsWithStatus = null
+      ..failMutationsWithCode = null;
+    expect(await uploader.resyncFromLocalFolder(rootDir.path), isTrue);
+    expect(uploader.status, LocalUploadStatus.idle);
+    expect(fakeServer.deleteRequestCount, 1);
+    expect(fakeServer.ownedRootListRequestCount, greaterThanOrEqualTo(2));
+    expect(syncEngine.nodeCache.getById(oldNode.id)!.isDeleted, isTrue);
+
+    final roots = syncEngine.nodeCache.listChildren(null);
+    expect(roots, hasLength(1));
+    expect(roots.single.isDirectory, isTrue);
+    expect(roots.single.id, isNot(oldNode.id));
+    final children = syncEngine.nodeCache.listChildren(roots.single.id);
+    expect(children, hasLength(1));
+    final uploaded = children.single;
+    expect(uploaded.currentVersionId, isNotNull);
+    expect(syncEngine.materializedFiles.listAll().single.nodeId, uploaded.id);
+
+    final session = serverConnection.session!;
+    final vaultKey = (await vaultKeyStore.loadVaultKey())!;
+    final downloaded = await downloadAndDecryptFile(
+      api: serverConnection.api!,
+      accessToken: session.accessToken,
+      vaultKey: vaultKey,
+      vaultId: uuidStringToBytes(session.user.id),
+      nodeId: uploaded.id,
+    );
+    expect(utf8.decode(downloaded), 'authoritative local state');
+  });
+
   test('scan uploads a new local file placed directly into an already-known folder', () async {
     final fakeServer = FakeNodeServer();
     final httpServer = await fakeServer.start();

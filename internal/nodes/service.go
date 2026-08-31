@@ -166,6 +166,27 @@ func (s *Service) ListChildren(ctx context.Context, userID string, parentID *str
 	return nodes, rows.Err()
 }
 
+// ListOwnedRoots returns only the caller's active root nodes. Unlike
+// ListChildren(nil), it deliberately excludes read-only roots shared by
+// another account, which is required by owner-only bulk workflows such as a
+// client-side Vault rebuild.
+func (s *Service) ListOwnedRoots(ctx context.Context, userID string) ([]Node, error) {
+	rows, err := s.db.QueryContext(ctx, selectNodeColumns+" FROM nodes WHERE owner_id = ? AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, n)
+	}
+	return result, rows.Err()
+}
+
 func (s *Service) requireReadableDirectory(ctx context.Context, userID, nodeID string) error {
 	var nodeType string
 	var deleted sql.NullString

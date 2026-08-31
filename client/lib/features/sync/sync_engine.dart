@@ -8,6 +8,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import '../../core/e2ee/opaque_id.dart';
 import '../../core/storage/local_database.dart';
 import '../../core/storage/materialized_directories_store.dart';
 import '../../core/storage/materialization_failures_store.dart';
@@ -297,6 +298,50 @@ final class SyncEngine extends ChangeNotifier {
   ) async {
     await api.restoreNode(accessToken, op.nodeId, operationId: op.operationId);
     await _refreshNodeFromServer(api, accessToken, op.nodeId);
+  }
+
+  /// Optimistically moves an integrity-failed immutable file version to
+  /// Trash and durably queues the server mutation. This is deliberately a
+  /// soft delete: normal server retention remains responsible for eventual
+  /// blob removal, so an operator can still recover the node.
+  Future<bool> trashAfterIntegrityFailure(LocalNode snapshot) async {
+    final current = nodeCache.getById(snapshot.id);
+    if (current == null || current.isDeleted) return true;
+    if (current.revision != snapshot.revision ||
+        current.currentVersionId != snapshot.currentVersionId) {
+      return false;
+    }
+    final now = DateTime.now().toUtc();
+    nodeCache.upsert(
+      LocalNode(
+        id: current.id,
+        parentId: current.parentId,
+        nodeType: current.nodeType,
+        metadataCiphertext: current.metadataCiphertext,
+        metadataKeyVersion: current.metadataKeyVersion,
+        currentVersionId: current.currentVersionId,
+        revision: current.revision,
+        createdAt: current.createdAt,
+        updatedAt: now,
+        deletedAt: now,
+        pendingCreate: current.pendingCreate,
+      ),
+    );
+    final operation = PendingOperation(
+      id: generateUuidV4(),
+      operationId: generateUuidV4(),
+      type: PendingOperationType.deleteNode,
+      nodeId: current.id,
+      payload: const {},
+      baseRevision: current.revision,
+      createdAt: now,
+      retryCount: 0,
+      status: PendingOperationStatus.pending,
+    );
+    pendingOperations.enqueue(operation);
+    await runOnce();
+    return pendingOperations.getById(operation.id)?.status !=
+        PendingOperationStatus.failed;
   }
 
   Future<void> _recordFailure(

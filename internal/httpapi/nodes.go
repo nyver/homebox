@@ -94,7 +94,18 @@ func (a *API) listChildren(w http.ResponseWriter, r *http.Request) {
 		}
 		parentID = &raw
 	}
-	children, err := a.nodes.ListChildren(r.Context(), requestUserID(r), parentID)
+	ownedOnly := r.URL.Query().Get("ownedOnly") == "true"
+	if ownedOnly && parentID != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "ownedOnly is valid only for root nodes")
+		return
+	}
+	var children []nodes.Node
+	var err error
+	if ownedOnly {
+		children, err = a.nodes.ListOwnedRoots(r.Context(), requestUserID(r))
+	} else {
+		children, err = a.nodes.ListChildren(r.Context(), requestUserID(r), parentID)
+	}
 	if err != nil {
 		writeServiceError(w, err)
 		return

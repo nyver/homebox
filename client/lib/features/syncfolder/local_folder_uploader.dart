@@ -17,7 +17,7 @@ import '../files/file_transfer.dart';
 import '../server/server_connection_controller.dart';
 import '../sync/sync_engine.dart';
 
-enum LocalUploadStatus { idle, scanning, error }
+enum LocalUploadStatus { idle, scanning, resyncing, error }
 
 /// Scans a local sync folder for changes made directly on disk and uploads
 /// them (the push direction of Milestone 8; the pull direction is
@@ -63,11 +63,13 @@ final class LocalFolderUploader extends ChangeNotifier {
   String? _errorMessage;
   String? _activeFileName;
   double? _transferProgress;
+  bool _resyncRequiresRecovery = false;
 
   LocalUploadStatus get status => _status;
   String? get errorMessage => _errorMessage;
   String? get activeFileName => _activeFileName;
   double? get transferProgress => _transferProgress;
+  bool get resyncRequiresRecovery => _resyncRequiresRecovery;
 
   /// Scans [rootPath] for local changes and uploads them. Safe to call
   /// repeatedly; a call already in flight is not duplicated. A single
@@ -107,6 +109,100 @@ final class LocalFolderUploader extends ChangeNotifier {
     }
   }
 
+  /// Replaces the active personal Vault with a fresh encrypted snapshot of
+  /// [rootPath]. Existing root nodes are soft-deleted, so each whole subtree
+  /// remains recoverable from Trash. The caller must pause SyncEngine and the
+  /// filesystem watcher first: until this strict upload succeeds, the local
+  /// folder is the only source of truth and must not be materialized from the
+  /// partially rebuilt server tree.
+  Future<bool> resyncFromLocalFolder(String rootPath) async {
+    if (_running) return false;
+    _resyncRequiresRecovery = false;
+    final root = Directory(rootPath);
+    if (!await root.exists()) {
+      _errorMessage = 'The selected local sync folder no longer exists.';
+      _setStatus(LocalUploadStatus.error);
+      return false;
+    }
+    final api = _serverConnection.api;
+    final session = await _serverConnection.ensureFreshSession();
+    final vaultKey = await _vaultKeyStore.loadVaultKey();
+    if (api == null || session == null || vaultKey == null) {
+      _errorMessage =
+          'Connect to the server and unlock the E2EE vault before resyncing.';
+      _setStatus(LocalUploadStatus.error);
+      return false;
+    }
+    if (_syncEngine.pendingOperations.hasUnfinishedOperations) {
+      _errorMessage =
+          'Pending server changes must finish before the Vault can be rebuilt.';
+      _setStatus(LocalUploadStatus.error);
+      return false;
+    }
+
+    _running = true;
+    _clearTransferProgress();
+    _setStatus(LocalUploadStatus.resyncing);
+    try {
+      // Forget old node-to-path associations before the first delete. If a
+      // network failure leaves only part of the old Vault in Trash, a later
+      // pull must never interpret those old IDs as permission to remove the
+      // authoritative local files.
+      _resyncRequiresRecovery = true;
+      _syncEngine.materializedFiles.clear();
+      _syncEngine.materializedDirectories.clear();
+      _syncEngine.materializationFailures.clear();
+
+      var clearPasses = 0;
+      while (true) {
+        final roots = await api.listChildren(
+          session.accessToken,
+          ownedOnly: true,
+        );
+        if (roots.isEmpty) break;
+        if (clearPasses == 10) {
+          throw StateError(
+            'The server Vault kept changing while Resync was clearing it.',
+          );
+        }
+        clearPasses++;
+        for (final node in roots) {
+          await api.deleteNode(
+            session.accessToken,
+            node.id,
+            operationId: generateUuidV4(),
+            expectedRevision: node.revision,
+          );
+          final deleted = await api.getNode(session.accessToken, node.id);
+          _syncEngine.nodeCache.upsert(localNodeFromServerNode(deleted));
+        }
+      }
+
+      await _scanDirectory(
+        rootPath: rootPath,
+        parentId: null,
+        relativePath: '',
+        api: api,
+        accessToken: session.accessToken,
+        keyScopeId: session.user.id,
+        vaultKey: vaultKey,
+        vaultId: uuidStringToBytes(session.user.id),
+        strict: true,
+      );
+      _errorMessage = null;
+      _resyncRequiresRecovery = false;
+      _setStatus(LocalUploadStatus.idle);
+      return true;
+    } catch (error) {
+      _errorMessage = '$error';
+      _setStatus(LocalUploadStatus.error);
+      return false;
+    } finally {
+      _running = false;
+      _clearTransferProgress();
+    }
+  }
+
   Future<void> _scanDirectory({
     required String rootPath,
     required String? parentId,
@@ -116,11 +212,15 @@ final class LocalFolderUploader extends ChangeNotifier {
     required String keyScopeId,
     required SecretKey vaultKey,
     required Uint8List vaultId,
+    bool strict = false,
   }) async {
     final dir = Directory(
       relativePath.isEmpty ? rootPath : '$rootPath/$relativePath',
     );
     if (!await dir.exists()) {
+      if (strict) {
+        throw StateError('The local folder changed while Resync was running.');
+      }
       return; // the whole folder is gone locally; out of scope for this slice.
     }
 
@@ -174,6 +274,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         name: name,
         relativePath: relativePath,
         localFile: localFile,
+        strict: strict,
       );
     }
 
@@ -189,6 +290,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         name: name,
         relativePath: relativePath,
         localFile: localFiles[name]!,
+        strict: strict,
       );
     }
 
@@ -201,6 +303,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         vaultId: vaultId,
         parentId: parentId,
         name: name,
+        strict: strict,
       );
       if (createdDirectory == null) continue;
       await _scanDirectory(
@@ -212,6 +315,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         keyScopeId: keyScopeId,
         vaultKey: vaultKey,
         vaultId: vaultId,
+        strict: strict,
       );
     }
 
@@ -236,6 +340,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         keyScopeId: keyScopeId,
         vaultKey: vaultKey,
         vaultId: vaultId,
+        strict: strict,
       );
     }
   }
@@ -251,10 +356,16 @@ final class LocalFolderUploader extends ChangeNotifier {
     required String name,
     required String relativePath,
     required File localFile,
+    bool strict = false,
   }) async {
     try {
       final plaintextLength = await localFile.length();
-      if (plaintextLength > homeBoxMaxPlaintextFileSize) return;
+      if (plaintextLength > homeBoxMaxPlaintextFileSize) {
+        if (strict) {
+          throw StateError('$name exceeds the HomeBox file size limit.');
+        }
+        return;
+      }
       final hash = await plaintextFileSha256(localFile);
       if (currentMetadata.plaintextSha256?.toLowerCase() ==
           hash.toLowerCase()) {
@@ -297,7 +408,8 @@ final class LocalFolderUploader extends ChangeNotifier {
           contentVersionId: uploadedNode.currentVersionId,
         ),
       );
-    } catch (_) {
+    } catch (error) {
+      if (strict) rethrow;
       // Broad on purpose: this class's own checks and the shared crypto
       // helpers can throw StateError/ArgumentError, which do not extend
       // Exception. Leave this file for the next scan() call rather than
@@ -315,10 +427,16 @@ final class LocalFolderUploader extends ChangeNotifier {
     required String name,
     required String relativePath,
     required File localFile,
+    bool strict = false,
   }) async {
     try {
       final plaintextLength = await localFile.length();
-      if (plaintextLength > homeBoxMaxPlaintextFileSize) return;
+      if (plaintextLength > homeBoxMaxPlaintextFileSize) {
+        if (strict) {
+          throw StateError('$name exceeds the HomeBox file size limit.');
+        }
+        return;
+      }
       final hash = await plaintextFileSha256(localFile);
 
       final nodeId = generateUuidV4();
@@ -373,7 +491,8 @@ final class LocalFolderUploader extends ChangeNotifier {
           contentVersionId: uploadedNode.currentVersionId,
         ),
       );
-    } catch (_) {
+    } catch (error) {
+      if (strict) rethrow;
       // Broad on purpose — see _uploadIfChanged.
     }
   }
@@ -385,6 +504,7 @@ final class LocalFolderUploader extends ChangeNotifier {
     required Uint8List vaultId,
     required String? parentId,
     required String name,
+    bool strict = false,
   }) async {
     try {
       final nodeId = generateUuidV4();
@@ -408,7 +528,8 @@ final class LocalFolderUploader extends ChangeNotifier {
       final local = localNodeFromServerNode(created);
       _syncEngine.nodeCache.upsert(local);
       return local;
-    } catch (_) {
+    } catch (error) {
+      if (strict) rethrow;
       // See _uploadIfChanged: leave this directory for the next scan instead
       // of aborting the entire tree because a single create failed.
       return null;

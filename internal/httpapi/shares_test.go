@@ -45,6 +45,19 @@ func TestReadOnlyFamilyShareAllowsBrowseAndRevokeRemovesAccess(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || receivedFolder["id"] != folderID {
 		t.Fatalf("recipient get folder status=%d body=%v", resp.StatusCode, receivedFolder)
 	}
+	recipientRootID := "90000000-0000-0000-0000-000000000006"
+	resp, _ = s.do(t, http.MethodPost, "/api/v1/nodes", map[string]any{
+		"id": recipientRootID, "operationId": "90000000-0000-0000-0000-000000000007", "nodeType": "DIRECTORY",
+		"metadataCiphertext": base64.StdEncoding.EncodeToString([]byte("encrypted-recipient-folder")), "metadataKeyVersion": 1,
+	}, recipientToken)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create recipient root status=%d", resp.StatusCode)
+	}
+	resp, ownedRootsRaw := s.doRaw(t, http.MethodGet, "/api/v1/nodes/children?ownedOnly=true", nil, recipientToken)
+	ownedRoots := decodeArray(t, ownedRootsRaw)
+	if resp.StatusCode != http.StatusOK || len(ownedRoots) != 1 || ownedRoots[0]["id"] != recipientRootID {
+		t.Fatalf("owned roots status=%d body=%s", resp.StatusCode, ownedRootsRaw)
+	}
 	resp, _ = s.doRaw(t, http.MethodDelete, "/api/v1/shares/"+grant["id"].(string), nil, ownerToken)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("revoke status=%d", resp.StatusCode)

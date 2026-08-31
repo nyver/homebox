@@ -38,6 +38,8 @@ final class FakeNodeServer {
   Completer<void>? contentResponseGate;
   Completer<void>? contentRequestStarted;
   int contentDownloadCount = 0;
+  int deleteRequestCount = 0;
+  int ownedRootListRequestCount = 0;
 
   Future<HttpServer> start() => startFixtureServer(_handle);
 
@@ -105,6 +107,9 @@ final class FakeNodeServer {
       return;
     }
     if (method == 'GET' && path == '/api/v1/nodes/children') {
+      if (request.uri.queryParameters['ownedOnly'] == 'true') {
+        ownedRootListRequestCount++;
+      }
       final parentId = request.uri.queryParameters['parentId'];
       final children = _nodes.values
           .where((n) => n['parentId'] == parentId && n['deletedAt'] == null)
@@ -186,6 +191,7 @@ final class FakeNodeServer {
       return;
     }
     if (method == 'DELETE' && path.startsWith('/api/v1/nodes/')) {
+      deleteRequestCount++;
       final id = path.substring('/api/v1/nodes/'.length);
       final node = _nodes[id];
       final body = jsonDecode(

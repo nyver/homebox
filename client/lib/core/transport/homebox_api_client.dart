@@ -489,9 +489,12 @@ final class HomeBoxApiClient {
   Future<List<NodeInfo>> listChildren(
     String accessToken, {
     String? parentId,
+    bool ownedOnly = false,
   }) async {
     final path = parentId == null
-        ? '/api/v1/nodes/children'
+        ? ownedOnly
+              ? '/api/v1/nodes/children?ownedOnly=true'
+              : '/api/v1/nodes/children'
         : '/api/v1/nodes/children?parentId=$parentId';
     final body = await _send('GET', path, accessToken: accessToken);
     final decoded = jsonDecode(body) as List<dynamic>;
@@ -722,7 +725,10 @@ final class HomeBoxApiClient {
   String _fileContentPath(String nodeId, String? versionId) {
     final path = '/api/v1/files/$nodeId/content';
     if (versionId == null) return path;
-    return Uri(path: path, queryParameters: {'versionId': versionId}).toString();
+    return Uri(
+      path: path,
+      queryParameters: {'versionId': versionId},
+    ).toString();
   }
 
   Future<List<FileVersionInfo>> listFileVersions(
@@ -880,12 +886,16 @@ final class HomeBoxApiClient {
     if (maxResponseBytes != null && total > maxResponseBytes) {
       final subscription = response.listen((_) {});
       await subscription.cancel();
-      throw const FormatException('Response exceeds the allowed in-memory size.');
+      throw const FormatException(
+        'Response exceeds the allowed in-memory size.',
+      );
     }
     await for (final chunk in response) {
       received += chunk.length;
       if (maxResponseBytes != null && received > maxResponseBytes) {
-        throw const FormatException('Response exceeds the allowed in-memory size.');
+        throw const FormatException(
+          'Response exceeds the allowed in-memory size.',
+        );
       }
       builder.add(chunk);
       if (total > 0) onResponseProgress?.call(received / total);
@@ -964,7 +974,9 @@ final class HomeBoxApiClient {
     if (response.contentLength > maxCiphertextBytes) {
       final subscription = response.listen((_) {});
       await subscription.cancel();
-      throw const FormatException('Ciphertext download exceeds the HomeBox file limit.');
+      throw const FormatException(
+        'Ciphertext download exceeds the HomeBox file limit.',
+      );
     }
 
     await destination.parent.create(recursive: true);
@@ -976,7 +988,9 @@ final class HomeBoxApiClient {
       await for (final chunk in response) {
         received += chunk.length;
         if (received > maxCiphertextBytes) {
-          throw const FormatException('Ciphertext download exceeds the HomeBox file limit.');
+          throw const FormatException(
+            'Ciphertext download exceeds the HomeBox file limit.',
+          );
         }
         await output.writeFrom(chunk);
         if (total > 0) onResponseProgress?.call(received / total);

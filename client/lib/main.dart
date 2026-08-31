@@ -176,8 +176,11 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   bool _rebuildingSyncEngine = false;
   bool _pendingRebuildFingerprint = false;
   bool _syncFolderPassRunning = false;
+  Completer<void>? _syncFolderPassDone;
   bool _pendingSyncFolderPass = false;
   bool _pendingLocalSyncFolderChange = false;
+  bool _resyncingVault = false;
+  bool _resyncRecoveryRequired = false;
   AppSection _section = AppSection.files;
   String? _syncFolder;
   bool _selectingFolder = false;
@@ -460,7 +463,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         engine == null ||
         engine.isPaused ||
         materializer == null ||
-        uploader == null) {
+        uploader == null ||
+        _resyncingVault ||
+        _resyncRecoveryRequired) {
       return;
     }
     if (_syncFolderPassRunning) {
@@ -469,6 +474,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       return;
     }
     _syncFolderPassRunning = true;
+    final passDone = Completer<void>();
+    _syncFolderPassDone = passDone;
     try {
       if (localChange && defaultTargetPlatform != TargetPlatform.android) {
         await uploader.scan(folder);
@@ -481,6 +488,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       }
     } finally {
       _syncFolderPassRunning = false;
+      _syncFolderPassDone = null;
+      passDone.complete();
     }
     if (_pendingSyncFolderPass) {
       _pendingSyncFolderPass = false;
@@ -510,6 +519,16 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     final engine = _syncEngine;
     if (engine == null) return;
     if (engine.isPaused) {
+      if (_resyncRecoveryRequired) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Resync did not finish. Retry Resync before resuming normal synchronization.',
+            ),
+          ),
+        );
+        return;
+      }
       engine.resume();
       final folder = _syncFolder;
       if (folder != null && defaultTargetPlatform != TargetPlatform.android) {
@@ -520,6 +539,78 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       _syncFolderWatcher.stop();
       engine.pause();
     }
+  }
+
+  Future<void> _confirmAndResyncVault() async {
+    final folder = _syncFolder;
+    final engine = _syncEngine;
+    final uploader = _localFolderUploader;
+    if (folder == null || engine == null || uploader == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rebuild Vault from local folder?'),
+        content: const Text(
+          'All current files and folders in the server Vault will be moved to Trash. '
+          'The selected local sync folder will then be uploaded as a new Vault.\n\n'
+          'Do not edit the folder or use another HomeBox device until Resync finishes.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const ValueKey('confirm-resync-vault'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Resync'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final wasPaused = engine.isPaused;
+    setState(() {
+      _resyncingVault = true;
+      _resyncRecoveryRequired = false;
+    });
+    _syncFolderWatcher.stop();
+    final activeFolderPass = _syncFolderPassDone;
+    if (activeFolderPass != null) await activeFolderPass.future;
+    await engine.runOnce();
+    if (!mounted) return;
+    engine.pause();
+
+    final succeeded = await uploader.resyncFromLocalFolder(folder);
+    if (!mounted) return;
+    final requiresRecovery = !succeeded && uploader.resyncRequiresRecovery;
+    setState(() {
+      _resyncingVault = false;
+      _resyncRecoveryRequired = requiresRecovery;
+    });
+    if (succeeded || !requiresRecovery) {
+      if (!wasPaused) {
+        engine.resume();
+        if (defaultTargetPlatform != TargetPlatform.android) {
+          _syncFolderWatcher.start(folder);
+        }
+        await engine.runOnce();
+      }
+      if (succeeded) await _filesController?.refresh();
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          succeeded
+              ? 'Resync completed. The local folder is now the active Vault.'
+              : requiresRecovery
+              ? 'Resync stopped safely and normal sync remains paused. Fix the issue and retry Resync: ${uploader.errorMessage ?? 'unknown error'}'
+              : 'Resync could not start: ${uploader.errorMessage ?? 'unknown error'}',
+        ),
+      ),
+    );
   }
 
   /// Runs once, from [initState] — see [BiometricAuthenticator]'s doc
@@ -732,6 +823,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       localFolderUploader: _localFolderUploader,
       syncFolderWatcher: _syncFolderWatcher,
       onToggleSyncPause: _toggleSyncPause,
+      onResyncVault: _confirmAndResyncVault,
+      resyncingVault: _resyncingVault,
       onCapturePhoto: supportsCameraCapture(defaultTargetPlatform)
           ? _capturePhoto
           : null,
@@ -1136,6 +1229,8 @@ class _SectionContent extends StatelessWidget {
     required this.localFolderUploader,
     required this.syncFolderWatcher,
     required this.onToggleSyncPause,
+    required this.onResyncVault,
+    required this.resyncingVault,
     required this.onCapturePhoto,
     required this.androidFileSaver,
     required this.androidFileSharer,
@@ -1160,6 +1255,8 @@ class _SectionContent extends StatelessWidget {
   final LocalFolderUploader? localFolderUploader;
   final SyncFolderWatcher syncFolderWatcher;
   final VoidCallback onToggleSyncPause;
+  final Future<void> Function() onResyncVault;
+  final bool resyncingVault;
   final Future<void> Function()? onCapturePhoto;
   final AndroidFileSaver? androidFileSaver;
   final AndroidFileSharer? androidFileSharer;
@@ -1187,6 +1284,8 @@ class _SectionContent extends StatelessWidget {
       localFolderUploader: localFolderUploader,
       syncFolderWatcher: syncFolderWatcher,
       onToggleSyncPause: onToggleSyncPause,
+      onResyncVault: onResyncVault,
+      resyncingVault: resyncingVault,
     ),
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
@@ -2078,6 +2177,8 @@ class _SyncSection extends StatelessWidget {
     required this.localFolderUploader,
     required this.syncFolderWatcher,
     required this.onToggleSyncPause,
+    required this.onResyncVault,
+    required this.resyncingVault,
   });
   final String? syncFolder;
   final Future<void> Function() onSelectSyncFolder;
@@ -2087,6 +2188,8 @@ class _SyncSection extends StatelessWidget {
   final LocalFolderUploader? localFolderUploader;
   final SyncFolderWatcher syncFolderWatcher;
   final VoidCallback onToggleSyncPause;
+  final Future<void> Function() onResyncVault;
+  final bool resyncingVault;
 
   @override
   Widget build(BuildContext context) {
@@ -2262,6 +2365,10 @@ class _SyncSection extends StatelessWidget {
                     Icons.upload_outlined,
                     'Uploading local changes…',
                   ),
+                  LocalUploadStatus.resyncing => (
+                    Icons.cloud_upload_outlined,
+                    'Rebuilding Vault from local folder…',
+                  ),
                   LocalUploadStatus.error => (
                     Icons.error_outline,
                     'Could not upload local changes',
@@ -2287,10 +2394,38 @@ class _SyncSection extends StatelessWidget {
                           )
                         : uploader.status == LocalUploadStatus.scanning
                         ? const Text('Scanning local changes…')
+                        : uploader.status == LocalUploadStatus.resyncing
+                        ? const Text(
+                            'Moving the old Vault to Trash and uploading a fresh encrypted tree…',
+                          )
                         : null,
                   ),
                 );
               },
+            ),
+          if (syncFolder != null &&
+              engine != null &&
+              localFolderUploader != null &&
+              defaultTargetPlatform != TargetPlatform.android)
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.restart_alt_outlined),
+                title: const Text('Resync from local folder'),
+                subtitle: const Text(
+                  'Move the current server Vault to Trash, then upload this folder again from scratch.',
+                ),
+                trailing: FilledButton.icon(
+                  key: const ValueKey('resync-vault'),
+                  onPressed: resyncingVault ? null : onResyncVault,
+                  icon: resyncingVault
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.restart_alt_outlined),
+                  label: Text(resyncingVault ? 'Resyncing…' : 'Resync'),
+                ),
+              ),
             ),
           if (syncFolder != null &&
               defaultTargetPlatform != TargetPlatform.android)

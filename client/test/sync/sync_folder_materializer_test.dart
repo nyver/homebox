@@ -297,15 +297,29 @@ void main() {
       ),
     );
 
+    fakeServer
+      ..failMutationsWithStatus = 409
+      ..failMutationsWithCode = 'REVISION_CONFLICT';
     await materializer.materialize(rootDir.path);
     expect(materializer.status, SyncFolderStatus.error);
     expect(fakeServer.contentDownloadCount, 1);
+    expect(syncEngine.nodeCache.getById(uploaded.node.id)!.isDeleted, isFalse);
+
+    fakeServer
+      ..failMutationsWithStatus = null
+      ..failMutationsWithCode = null;
     await materializer.materialize(rootDir.path);
-    expect(materializer.status, SyncFolderStatus.error);
+    expect(materializer.status, SyncFolderStatus.idle);
     expect(
       fakeServer.contentDownloadCount,
       1,
       reason: 'the same immutable bad version must not consume bandwidth again',
     );
+    expect(fakeServer.deleteRequestCount, 1);
+    expect(syncEngine.nodeCache.getById(uploaded.node.id)!.isDeleted, isTrue);
+
+    await materializer.materialize(rootDir.path);
+    expect(fakeServer.contentDownloadCount, 1);
+    expect(fakeServer.deleteRequestCount, 1);
   });
 }

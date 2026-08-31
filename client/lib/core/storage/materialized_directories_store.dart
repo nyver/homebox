@@ -48,6 +48,8 @@ final class MaterializedDirectoriesStore {
     [nodeId],
   );
 
+  void clear() => _db.execute('DELETE FROM materialized_directories');
+
   MaterializedDirectory _fromRow(Row row) => MaterializedDirectory(
     nodeId: row['node_id'] as String,
     relativePath: row['relative_path'] as String,

@@ -46,7 +46,7 @@ void main() {
       isFalse,
     );
     expect(reopenedStore.listNodeIds(), ['node-1']);
-    reopenedStore.remove('node-1');
+    reopenedStore.clear();
     expect(reopenedStore.listNodeIds(), isEmpty);
   });
 }

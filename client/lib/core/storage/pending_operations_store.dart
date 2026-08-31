@@ -11,8 +11,10 @@ enum PendingOperationType {
   const PendingOperationType(this.wireValue);
   final String wireValue;
 
-  static PendingOperationType fromWire(String value) =>
-      values.firstWhere((v) => v.wireValue == value, orElse: () => throw FormatException('Unknown operation type: $value'));
+  static PendingOperationType fromWire(String value) => values.firstWhere(
+    (v) => v.wireValue == value,
+    orElse: () => throw FormatException('Unknown operation type: $value'),
+  );
 }
 
 enum PendingOperationStatus {
@@ -25,8 +27,10 @@ enum PendingOperationStatus {
   const PendingOperationStatus(this.wireValue);
   final String wireValue;
 
-  static PendingOperationStatus fromWire(String value) =>
-      values.firstWhere((v) => v.wireValue == value, orElse: () => throw FormatException('Unknown operation status: $value'));
+  static PendingOperationStatus fromWire(String value) => values.firstWhere(
+    (v) => v.wireValue == value,
+    orElse: () => throw FormatException('Unknown operation status: $value'),
+  );
 }
 
 /// One durable outbox entry (spec §13.1): a mutation recorded locally
@@ -91,7 +95,9 @@ final class PendingOperationsStore {
   }
 
   PendingOperation? getById(String id) {
-    final rows = _db.select('SELECT * FROM pending_operations WHERE id = ?', [id]);
+    final rows = _db.select('SELECT * FROM pending_operations WHERE id = ?', [
+      id,
+    ]);
     if (rows.isEmpty) return null;
     return _fromRow(rows.first);
   }
@@ -118,11 +124,21 @@ final class PendingOperationsStore {
     return rows.isNotEmpty;
   }
 
+  bool get hasUnfinishedOperations {
+    final rows = _db.select(
+      "SELECT 1 FROM pending_operations WHERE status IN ('PENDING', 'RUNNING', 'BLOCKED') LIMIT 1",
+    );
+    return rows.isNotEmpty;
+  }
+
   /// True if an older, still-unfinished operation exists for [nodeId]. A
   /// backoff on an earlier operation (e.g. a CREATE) must not let a later
   /// one (e.g. an UPDATE enqueued right after it) jump ahead and run
   /// against a node the server doesn't know about yet — see SyncEngine.
-  bool hasEarlierUnfinishedOperationForNode(String nodeId, DateTime strictlyBefore) {
+  bool hasEarlierUnfinishedOperationForNode(
+    String nodeId,
+    DateTime strictlyBefore,
+  ) {
     final rows = _db.select(
       "SELECT 1 FROM pending_operations WHERE node_id = ? AND created_at < ? AND status IN ('PENDING', 'RUNNING', 'BLOCKED') LIMIT 1",
       [nodeId, strictlyBefore.toUtc().toIso8601String()],
@@ -130,11 +146,22 @@ final class PendingOperationsStore {
     return rows.isNotEmpty;
   }
 
-  void markRunning(String id) => _db.execute("UPDATE pending_operations SET status = 'RUNNING' WHERE id = ?", [id]);
+  void markRunning(String id) => _db.execute(
+    "UPDATE pending_operations SET status = 'RUNNING' WHERE id = ?",
+    [id],
+  );
 
-  void markDone(String id) => _db.execute("UPDATE pending_operations SET status = 'DONE' WHERE id = ?", [id]);
+  void markDone(String id) => _db.execute(
+    "UPDATE pending_operations SET status = 'DONE' WHERE id = ?",
+    [id],
+  );
 
-  void markRetry(String id, {required int retryCount, required DateTime nextRetryAt, String? errorCode}) {
+  void markRetry(
+    String id, {
+    required int retryCount,
+    required DateTime nextRetryAt,
+    String? errorCode,
+  }) {
     _db.execute(
       "UPDATE pending_operations SET status = 'PENDING', retry_count = ?, next_retry_at = ?, last_error_code = ? WHERE id = ?",
       [retryCount, nextRetryAt.toUtc().toIso8601String(), errorCode, id],
@@ -142,20 +169,25 @@ final class PendingOperationsStore {
   }
 
   void markFailed(String id, {String? errorCode}) {
-    _db.execute("UPDATE pending_operations SET status = 'FAILED', last_error_code = ? WHERE id = ?", [errorCode, id]);
+    _db.execute(
+      "UPDATE pending_operations SET status = 'FAILED', last_error_code = ? WHERE id = ?",
+      [errorCode, id],
+    );
   }
 
   PendingOperation _fromRow(Row row) => PendingOperation(
-        id: row['id'] as String,
-        operationId: row['operation_id'] as String,
-        type: PendingOperationType.fromWire(row['type'] as String),
-        nodeId: row['node_id'] as String,
-        payload: jsonDecode(row['payload'] as String) as Map<String, dynamic>,
-        baseRevision: row['base_revision'] as int?,
-        createdAt: DateTime.parse(row['created_at'] as String),
-        retryCount: row['retry_count'] as int,
-        nextRetryAt: row['next_retry_at'] != null ? DateTime.parse(row['next_retry_at'] as String) : null,
-        status: PendingOperationStatus.fromWire(row['status'] as String),
-        lastErrorCode: row['last_error_code'] as String?,
-      );
+    id: row['id'] as String,
+    operationId: row['operation_id'] as String,
+    type: PendingOperationType.fromWire(row['type'] as String),
+    nodeId: row['node_id'] as String,
+    payload: jsonDecode(row['payload'] as String) as Map<String, dynamic>,
+    baseRevision: row['base_revision'] as int?,
+    createdAt: DateTime.parse(row['created_at'] as String),
+    retryCount: row['retry_count'] as int,
+    nextRetryAt: row['next_retry_at'] != null
+        ? DateTime.parse(row['next_retry_at'] as String)
+        : null,
+    status: PendingOperationStatus.fromWire(row['status'] as String),
+    lastErrorCode: row['last_error_code'] as String?,
+  );
 }

@@ -216,9 +216,16 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           contentVersionId: node.currentVersionId!,
           nodeRevision: node.revision,
         )) {
-      fileErrors.add(
-        '${metadata.fileName}: integrity verification previously failed for this file version; automatic download is paused until the content or metadata changes.',
-      );
+      if (!await _trashIntegrityFailedFile(
+        node: node,
+        rootPath: rootPath,
+        relativePath: relativePath,
+        existing: existing,
+      )) {
+        fileErrors.add(
+          '${metadata.fileName}: integrity verification previously failed; automatic download is paused and the file could not be moved to Trash.',
+        );
+      }
       return;
     }
     try {
@@ -274,7 +281,17 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           nodeRevision: node.revision,
         );
       }
-      fileErrors.add('${metadata.fileName}: $error');
+      final trashed = await _trashIntegrityFailedFile(
+        node: node,
+        rootPath: rootPath,
+        relativePath: relativePath,
+        existing: existing,
+      );
+      if (!trashed && _isCurrentDownload(node)) {
+        fileErrors.add(
+          '${metadata.fileName}: $error Automatic move to Trash failed.',
+        );
+      }
     } catch (error) {
       // Broad on purpose: downloadAndDecryptFile can throw StateError
       // and cryptography can throw authentication errors that do not extend
@@ -288,7 +305,23 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     final current = _syncEngine.nodeCache.getById(snapshot.id);
     return current != null &&
         !current.isDeleted &&
+        current.revision == snapshot.revision &&
         current.currentVersionId == snapshot.currentVersionId;
+  }
+
+  Future<bool> _trashIntegrityFailedFile({
+    required LocalNode node,
+    required String rootPath,
+    required String relativePath,
+    required MaterializedFile? existing,
+  }) async {
+    if (!await _syncEngine.trashAfterIntegrityFailure(node)) return false;
+    await _deleteFile(rootPath, relativePath);
+    if (existing != null && existing.relativePath != relativePath) {
+      await _deleteFile(rootPath, existing.relativePath);
+    }
+    _syncEngine.materializedFiles.remove(node.id);
+    return true;
   }
 
   Future<void> _pruneUnseen(String rootPath, Set<String> seenNodeIds) async {

@@ -10,7 +10,11 @@ import 'package:sqlite3/sqlite3.dart';
 /// revision alone cannot tell the two apart), and prune files whose node
 /// was deleted or is no longer reachable from the vault root.
 final class MaterializedFile {
-  const MaterializedFile({required this.nodeId, required this.relativePath, required this.contentVersionId});
+  const MaterializedFile({
+    required this.nodeId,
+    required this.relativePath,
+    required this.contentVersionId,
+  });
 
   final String nodeId;
   final String relativePath;
@@ -26,12 +30,18 @@ final class MaterializedFilesStore {
   final Database _db;
 
   MaterializedFile? getById(String nodeId) {
-    final rows = _db.select('SELECT * FROM materialized_files WHERE node_id = ?', [nodeId]);
+    final rows = _db.select(
+      'SELECT * FROM materialized_files WHERE node_id = ?',
+      [nodeId],
+    );
     if (rows.isEmpty) return null;
     return _fromRow(rows.first);
   }
 
-  List<MaterializedFile> listAll() => _db.select('SELECT * FROM materialized_files').map(_fromRow).toList(growable: false);
+  List<MaterializedFile> listAll() => _db
+      .select('SELECT * FROM materialized_files')
+      .map(_fromRow)
+      .toList(growable: false);
 
   void upsert(MaterializedFile file) {
     _db.execute(
@@ -43,11 +53,14 @@ final class MaterializedFilesStore {
     );
   }
 
-  void remove(String nodeId) => _db.execute('DELETE FROM materialized_files WHERE node_id = ?', [nodeId]);
+  void remove(String nodeId) =>
+      _db.execute('DELETE FROM materialized_files WHERE node_id = ?', [nodeId]);
+
+  void clear() => _db.execute('DELETE FROM materialized_files');
 
   MaterializedFile _fromRow(Row row) => MaterializedFile(
-        nodeId: row['node_id'] as String,
-        relativePath: row['relative_path'] as String,
-        contentVersionId: row['content_version_id'] as String?,
-      );
+    nodeId: row['node_id'] as String,
+    relativePath: row['relative_path'] as String,
+    contentVersionId: row['content_version_id'] as String?,
+  );
 }
