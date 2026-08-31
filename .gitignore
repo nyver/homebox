@@ -10,4 +10,5 @@ openspec/
 .gigacode/
 bin/
 data/
-
+# Local Android release-signing secrets; keystores are ignored under client/android.
+client/android/release-signing.local.bat
