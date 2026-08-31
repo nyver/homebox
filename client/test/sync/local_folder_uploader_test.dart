@@ -147,6 +147,14 @@ void main() {
           'a file uploaded by the local sync folder must carry its size '
           'the same as one uploaded through the Files page',
     );
+
+    // A tracked directory deletion is a user change, not a reason for the
+    // next pull to recreate it from the still-live server node.
+    await Directory('${rootDir.path}/Docs').delete(recursive: true);
+    await uploader.scan(rootDir.path);
+    expect(syncEngine.nodeCache.getById(folder.node.id)!.isDeleted, isTrue);
+    await materializer.materialize(rootDir.path);
+    expect(await Directory('${rootDir.path}/Docs').exists(), isFalse);
   });
 
   test('scan uploads a locally-edited tracked file as a new version', () async {

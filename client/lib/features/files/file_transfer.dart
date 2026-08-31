@@ -75,7 +75,16 @@ Future<Uint8List> downloadAndDecryptFile({
   );
   final header = E2eeFileHeader.decode(version.e2eeHeader);
 
-  final blob = await api.downloadFileContent(accessToken, nodeId);
+  // Reserve the final 10% for frame decryption and integrity verification.
+  // This makes the progress indicator move while ciphertext bytes are still
+  // arriving over the network instead of sitting at 0% until the full file
+  // has already been received into memory.
+  onProgress?.call(0);
+  final blob = await api.downloadFileContent(
+    accessToken,
+    nodeId,
+    onProgress: (progress) => onProgress?.call(progress * 0.9),
+  );
   final frames = splitChunkFrames(blob, chunkCount: version.chunkCount);
 
   final output = BytesBuilder(copy: false);
@@ -89,7 +98,7 @@ Future<Uint8List> downloadAndDecryptFile({
       totalChunks: frames.length,
     );
     output.add(plaintext);
-    onProgress?.call((i + 1) / frames.length);
+    onProgress?.call(0.9 + 0.1 * (i + 1) / frames.length);
   }
   final plaintextBytes = output.takeBytes();
 

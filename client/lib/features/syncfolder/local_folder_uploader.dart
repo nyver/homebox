@@ -38,11 +38,11 @@ enum LocalUploadStatus { idle, scanning, error }
 /// server-side by mistake.
 ///
 /// A brand-new local subfolder is created remotely, then scanned recursively
-/// so its initial tree is uploaded too. Local directory deletes remain
-/// intentionally conservative: no directory-level materialization record
-/// exists yet, so automatically deleting a remote subtree could mistake an
-/// incomplete pull for user intent. A local rename is still seen as a delete
-/// plus a new node rather than recognized as a rename of the existing one.
+/// so its initial tree is uploaded too. A previously materialized directory
+/// that disappears locally is deleted remotely; a directory never written by
+/// this device is left alone to avoid mistaking an incomplete pull for intent.
+/// A local rename is still seen as a delete plus a new node rather than
+/// recognized as a rename of the existing one.
 final class LocalFolderUploader extends ChangeNotifier {
   LocalFolderUploader({
     required ServerConnectionController serverConnection,
@@ -76,7 +76,9 @@ final class LocalFolderUploader extends ChangeNotifier {
   Future<void> scan(String rootPath) async {
     if (_running) return;
     final api = _serverConnection.api;
-    final session = _serverConnection.session;
+    // Not _serverConnection.session directly — see FilesController's
+    // _requireContext for why (mobile OSes suspend background timers).
+    final session = await _serverConnection.ensureFreshSession();
     final vaultKey = await _vaultKeyStore.loadVaultKey();
     if (api == null || session == null || vaultKey == null) return;
     _running = true;
@@ -216,7 +218,13 @@ final class LocalFolderUploader extends ChangeNotifier {
     for (final entry in expectedChildren.entries) {
       final (node, _) = entry.value;
       if (!node.isDirectory) continue;
-      if (!localDirs.contains(entry.key)) continue; // disappeared directories are deliberately not deleted remotely.
+      if (!localDirs.contains(entry.key)) {
+        if (_syncEngine.materializedDirectories.getById(node.id) != null) {
+          await _deleteRemoteNode(api, accessToken, node);
+          _syncEngine.materializedDirectories.remove(node.id);
+        }
+        continue;
+      }
       await _scanDirectory(
         rootPath: rootPath,
         parentId: node.id,

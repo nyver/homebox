@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../core/storage/local_database.dart';
+import '../../core/storage/materialized_directories_store.dart';
 import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/storage/pending_operations_store.dart';
@@ -45,6 +46,7 @@ final class SyncEngine extends ChangeNotifier {
        _localDatabase = localDatabase,
        nodeCache = NodeCache(localDatabase.db),
        pendingOperations = PendingOperationsStore(localDatabase.db),
+       materializedDirectories = MaterializedDirectoriesStore(localDatabase.db),
        materializedFiles = MaterializedFilesStore(localDatabase.db),
        _syncState = SyncStateStore(localDatabase.db) {
     _connectionWasAuthenticated =
@@ -56,6 +58,7 @@ final class SyncEngine extends ChangeNotifier {
   final LocalDatabase _localDatabase;
   final NodeCache nodeCache;
   final PendingOperationsStore pendingOperations;
+  final MaterializedDirectoriesStore materializedDirectories;
   final MaterializedFilesStore materializedFiles;
   final SyncStateStore _syncState;
 
@@ -147,21 +150,35 @@ final class SyncEngine extends ChangeNotifier {
       return Future<void>.value();
     }
     final api = _serverConnection.api;
-    final session = _serverConnection.session;
-    if (api == null || session == null) {
+    if (api == null ||
+        (_serverConnection.session == null &&
+            !_serverConnection.hasSavedRefreshToken)) {
       _setStatus(SyncStatus.offline);
       return Future<void>.value();
     }
-    return _inFlight = _runOnce(api, session);
+    // Assigning _inFlight here, synchronously (invoking an async function
+    // returns its Future immediately, before the function body reaches its
+    // first await), is what lets a concurrent runOnce() call above see it
+    // non-null and share this same pass instead of racing to start a
+    // second one.
+    return _inFlight = _runOnce(api);
   }
 
-  Future<void> _runOnce(
-    transport.HomeBoxApiClient api,
-    transport.HomeBoxSession session,
-  ) async {
+  Future<void> _runOnce(transport.HomeBoxApiClient api) async {
     _runningNow = true;
     _setStatus(SyncStatus.syncing);
     try {
+      // Refreshed here rather than trusting the session read in runOnce():
+      // mobile OSes can suspend a backgrounded app's Dart timers, so the
+      // proactive refresh timer (ServerConnectionController) does not
+      // reliably fire while HomeBox sits in the background — without this,
+      // a sync pass run right after returning from a long background spell
+      // would hit a stale-token 401 (AUTH_TOKEN_EXPIRED) instead.
+      final session = await _serverConnection.ensureFreshSession();
+      if (session == null) {
+        _setStatus(SyncStatus.offline);
+        return;
+      }
       await _pushPending(api, session.accessToken);
       await _pullChanges(api, session.accessToken, session.user.id);
       _errorMessage = null;

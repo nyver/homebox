@@ -35,6 +35,7 @@ final class _FakeServer {
   final Map<String, List<Map<String, dynamic>>> _fileVersions =
       {}; // by nodeId, newest first
   final Map<String, Uint8List> _blobs = {}; // by nodeId
+  String? _registeredDeviceId;
 
   Future<HttpServer> start() => startFixtureServer(_handle);
 
@@ -46,11 +47,29 @@ final class _FakeServer {
         await utf8.decoder.bind(request).join(),
       ) as Map<String, dynamic>;
       final deviceId = (body['device'] as Map<String, dynamic>)['id'] as String;
+      _registeredDeviceId = deviceId;
       _writeJson(request, 200, {
         'user': {'id': userId, 'username': 'admin', 'role': 'ADMIN'},
         'device': {'id': deviceId, 'platform': 'WINDOWS'},
         'accessToken': 'access-token',
-        'accessTokenExpiresAt': '2026-01-01T00:15:00Z',
+        'accessTokenExpiresAt': _accessTokenExpiresAt(),
+        'refreshToken': 'refresh-token',
+        'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
+      });
+    } else if (method == 'POST' && path == '/api/v1/auth/refresh') {
+      // FilesController.ensureFreshSession() (via ServerConnectionController)
+      // calls this whenever the access token looks expired or about to be;
+      // a real value here (rather than nothing at all) keeps that check
+      // from tearing down the session mid-test. Echoes the device actually
+      // registered at login (like the real server would), not a hardcoded
+      // placeholder, so anything keying off session.device.id after a
+      // refresh — e.g. DeviceProvisioningController's self-exclusion check
+      // — still sees the right device.
+      _writeJson(request, 200, {
+        'user': {'id': userId, 'username': 'admin', 'role': 'ADMIN'},
+        'device': {'id': _registeredDeviceId, 'platform': 'WINDOWS'},
+        'accessToken': 'access-token',
+        'accessTokenExpiresAt': _accessTokenExpiresAt(),
         'refreshToken': 'refresh-token',
         'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
       });
@@ -254,6 +273,12 @@ final class _FakeServer {
       await request.response.close();
     }
   }
+
+  /// A real near-future value (rather than a fixed past timestamp) so
+  /// ServerConnectionController.ensureFreshSession() never sees this
+  /// fixture's session as already expired.
+  String _accessTokenExpiresAt() =>
+      DateTime.now().toUtc().add(const Duration(minutes: 15)).toIso8601String();
 
   void _writeJson(HttpRequest request, int status, Object body) {
     request.response

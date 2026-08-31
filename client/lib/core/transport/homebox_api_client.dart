@@ -686,12 +686,16 @@ final class HomeBoxApiClient {
   /// Downloads a node's current-version ciphertext unchanged (spec §23).
   /// The caller must unwrap the File DEK (via [listFileVersions]) and run
   /// it through the E2EE file cipher before this is meaningful plaintext.
-  Future<Uint8List> downloadFileContent(String accessToken, String nodeId) =>
-      _sendRaw(
-        'GET',
-        '/api/v1/files/$nodeId/content',
-        accessToken: accessToken,
-      );
+  Future<Uint8List> downloadFileContent(
+    String accessToken,
+    String nodeId, {
+    void Function(double progress)? onProgress,
+  }) => _sendRaw(
+    'GET',
+    '/api/v1/files/$nodeId/content',
+    accessToken: accessToken,
+    onResponseProgress: onProgress,
+  );
 
   Future<List<FileVersionInfo>> listFileVersions(
     String accessToken,
@@ -832,6 +836,7 @@ final class HomeBoxApiClient {
     String? accessToken,
     List<int>? body,
     String contentType = 'application/octet-stream',
+    void Function(double progress)? onResponseProgress,
   }) async {
     final HttpClientResponse response;
     try {
@@ -861,8 +866,12 @@ final class HomeBoxApiClient {
       throw ServerIdentityMismatchException(_transport.pinnedFingerprint);
     }
     final builder = BytesBuilder(copy: false);
+    var received = 0;
+    final total = response.contentLength;
     await for (final chunk in response) {
       builder.add(chunk);
+      received += chunk.length;
+      if (total > 0) onResponseProgress?.call(received / total);
     }
     final responseBytes = builder.takeBytes();
     if (response.statusCode >= 200 && response.statusCode < 300) {

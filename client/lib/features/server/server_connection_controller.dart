@@ -72,7 +72,10 @@ final class ServerConnectionController extends ChangeNotifier {
   String? _pendingBaseUrl;
   String? _discoveredFingerprint;
   String? _errorMessage;
+  String? _savedRefreshToken;
   Timer? _refreshTimer;
+  Future<HomeBoxSession?>? _sessionRestoreInFlight;
+  Future<bool>? _refreshInFlight;
   bool _disposed = false;
 
   ServerConnectionStatus _status = ServerConnectionStatus.disconnected;
@@ -80,6 +83,7 @@ final class ServerConnectionController extends ChangeNotifier {
   ServerConnectionStatus get status => _status;
   PinnedServer? get server => _server;
   HomeBoxSession? get session => _session;
+  bool get hasSavedRefreshToken => _savedRefreshToken != null;
   String? get discoveredFingerprint => _discoveredFingerprint;
   String? get errorMessage => _errorMessage;
 
@@ -101,20 +105,9 @@ final class ServerConnectionController extends ChangeNotifier {
       _setStatus(ServerConnectionStatus.connectedLoggedOut);
       return;
     }
+    _savedRefreshToken = refreshToken;
     _setStatus(ServerConnectionStatus.authenticating);
-    try {
-      final session = await _api!.refresh(refreshToken);
-      _session = session;
-      await _sessionStore.saveRefreshToken(session.refreshToken);
-      _setStatus(ServerConnectionStatus.authenticated);
-      _scheduleAccessTokenRefresh();
-    } catch (_) {
-      // The refresh token may be expired, revoked, or the device may have
-      // been removed server-side; fall back to requiring a fresh login
-      // rather than surfacing this as a hard error on every startup.
-      await _sessionStore.clearRefreshToken();
-      _setStatus(ServerConnectionStatus.connectedLoggedOut);
-    }
+    await _restoreSavedSession();
   }
 
   /// Contacts [baseUrlText] and reads its identity fingerprint, without
@@ -125,7 +118,9 @@ final class ServerConnectionController extends ChangeNotifier {
     _setStatus(ServerConnectionStatus.discovering);
     try {
       final uri = _normalizeBaseUrl(baseUrlText);
-      final fingerprint = await ServerDiscovery.probeFingerprint(uri.resolve('/health/live'));
+      final fingerprint = await ServerDiscovery.probeFingerprint(
+        uri.resolve('/health/live'),
+      );
       _pendingBaseUrl = uri.toString();
       _discoveredFingerprint = fingerprint;
       _setStatus(ServerConnectionStatus.awaitingTrust);
@@ -152,7 +147,11 @@ final class ServerConnectionController extends ChangeNotifier {
   void cancelTrust() {
     _pendingBaseUrl = null;
     _discoveredFingerprint = null;
-    _setStatus(_server == null ? ServerConnectionStatus.disconnected : ServerConnectionStatus.connectedLoggedOut);
+    _setStatus(
+      _server == null
+          ? ServerConnectionStatus.disconnected
+          : ServerConnectionStatus.connectedLoggedOut,
+    );
   }
 
   Future<void> login(String username, String password) async {
@@ -175,6 +174,7 @@ final class ServerConnectionController extends ChangeNotifier {
         ),
       );
       _session = session;
+      _savedRefreshToken = session.refreshToken;
       await _sessionStore.saveRefreshToken(session.refreshToken);
       _setStatus(ServerConnectionStatus.authenticated);
       _scheduleAccessTokenRefresh();
@@ -203,8 +203,13 @@ final class ServerConnectionController extends ChangeNotifier {
       }
     }
     _session = null;
+    _savedRefreshToken = null;
     await _sessionStore.clearRefreshToken();
-    _setStatus(_server == null ? ServerConnectionStatus.disconnected : ServerConnectionStatus.connectedLoggedOut);
+    _setStatus(
+      _server == null
+          ? ServerConnectionStatus.disconnected
+          : ServerConnectionStatus.connectedLoggedOut,
+    );
   }
 
   /// Renews the access token shortly before it expires (`session_max_age`,
@@ -227,7 +232,51 @@ final class ServerConnectionController extends ChangeNotifier {
     _refreshTimer = Timer(delay, () => unawaited(_refreshAccessToken()));
   }
 
-  Future<void> _refreshAccessToken() async {
+  /// Returns the current session with a not-about-to-expire access token,
+  /// refreshing first if needed — every authenticated caller (SyncEngine,
+  /// FilesController, etc.) should read the session through this instead
+  /// of [session] directly. This is necessary in addition to the proactive
+  /// [_scheduleAccessTokenRefresh] timer above: mobile OSes routinely
+  /// suspend or heavily throttle a backgrounded app's Dart timers, so a
+  /// purely timer-driven refresh does not reliably fire while HomeBox sits
+  /// in the background — the access token can still be stale by the time
+  /// the user returns and the next sync/upload runs, surfacing as a
+  /// stale-token 401 (`AUTH_TOKEN_EXPIRED`). This lazy, at-point-of-use
+  /// check is what actually guarantees freshness regardless of how long
+  /// the app was backgrounded, or of whether its timer fired at all.
+  ///
+  /// Tries at most twice: [_refreshAccessToken] shares one in-flight
+  /// refresh across every concurrent caller, so if the session changed out
+  /// from under an already-in-flight refresh (a logout/login racing with
+  /// it), that shared refresh's result gets discarded for belonging to the
+  /// old session and the still-stale current session is left untouched.
+  /// The second attempt catches that case by actually starting a fresh
+  /// refresh for the session that is current by then, rather than handing
+  /// back a session this method never actually verified was fresh.
+  Future<HomeBoxSession?> ensureFreshSession() async {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final current = _session;
+      if (current == null) return _restoreSavedSession();
+      final expiringSoon = current.accessTokenExpiresAt
+          .subtract(_refreshBuffer)
+          .isBefore(DateTime.now().toUtc());
+      if (!expiringSoon) return current;
+      if (!await _refreshAccessToken()) return null;
+    }
+    return _session;
+  }
+
+  /// Shares one in-flight refresh across concurrent callers (the
+  /// background timer and any number of [ensureFreshSession] callers can
+  /// all land here around the same time) rather than firing several
+  /// redundant `/auth/refresh` requests with the same refresh token.
+  Future<bool> _refreshAccessToken() {
+    final inFlight = _refreshInFlight;
+    if (inFlight != null) return inFlight;
+    return _refreshInFlight = _doRefreshAccessToken();
+  }
+
+  Future<bool> _doRefreshAccessToken() async {
     final api = _api;
     // Captured up front and compared by identity after the await: if the
     // user logs out (or another refresh/login already replaced the
@@ -235,25 +284,80 @@ final class ServerConnectionController extends ChangeNotifier {
     // be this exact object, and the now-stale result below must be
     // discarded rather than resurrecting a session the user just left.
     final startedWithSession = _session;
-    if (_disposed || api == null || startedWithSession == null) return;
+    if (_disposed || api == null || startedWithSession == null) return false;
     try {
       final refreshed = await api.refresh(startedWithSession.refreshToken);
-      if (_disposed || !identical(_session, startedWithSession)) return;
+      if (_disposed || !identical(_session, startedWithSession)) return false;
       _session = refreshed;
+      _savedRefreshToken = refreshed.refreshToken;
       await _sessionStore.saveRefreshToken(refreshed.refreshToken);
       notifyListeners();
       _scheduleAccessTokenRefresh();
-    } catch (_) {
-      // The refresh token may itself now be expired or revoked (e.g. the
-      // device was removed server-side while this session sat idle); fall
-      // back to requiring a fresh login, same as a failed refresh in
-      // [initialize].
-      if (_disposed || !identical(_session, startedWithSession)) return;
-      _session = null;
-      await _sessionStore.clearRefreshToken();
-      _setStatus(ServerConnectionStatus.connectedLoggedOut);
+      return true;
+    } catch (e) {
+      if (_disposed || !identical(_session, startedWithSession)) return false;
+      if (_isInvalidRefreshTokenError(e)) {
+        _session = null;
+        _savedRefreshToken = null;
+        await _sessionStore.clearRefreshToken();
+        _setStatus(ServerConnectionStatus.connectedLoggedOut);
+      } else {
+        // Preserve the durable token and current UI session. The next
+        // authenticated operation retries refresh instead of forcing login.
+        _errorMessage = 'Could not refresh the saved session: $e';
+        notifyListeners();
+      }
+      return false;
+    } finally {
+      _refreshInFlight = null;
     }
   }
+
+  /// Retries a startup refresh with the durable token. Keeping this separate
+  /// from access-token renewal lets a temporary offline launch recover later
+  /// without requiring the user to enter credentials again.
+  Future<HomeBoxSession?> _restoreSavedSession() {
+    final inFlight = _sessionRestoreInFlight;
+    if (inFlight != null) return inFlight;
+    return _sessionRestoreInFlight = _doRestoreSavedSession();
+  }
+
+  Future<HomeBoxSession?> _doRestoreSavedSession() async {
+    final api = _api;
+    final refreshToken = _savedRefreshToken;
+    if (_disposed || api == null || refreshToken == null) return null;
+    try {
+      final restored = await api.refresh(refreshToken);
+      if (_disposed || _savedRefreshToken != refreshToken) return _session;
+      _session = restored;
+      _savedRefreshToken = restored.refreshToken;
+      await _sessionStore.saveRefreshToken(restored.refreshToken);
+      _errorMessage = null;
+      _setStatus(ServerConnectionStatus.authenticated);
+      _scheduleAccessTokenRefresh();
+      return restored;
+    } catch (e) {
+      if (_disposed || _savedRefreshToken != refreshToken) return _session;
+      if (_isInvalidRefreshTokenError(e)) {
+        _savedRefreshToken = null;
+        await _sessionStore.clearRefreshToken();
+        _setStatus(ServerConnectionStatus.connectedLoggedOut);
+      } else {
+        _errorMessage = 'Could not restore the saved session: $e';
+        _setStatus(ServerConnectionStatus.failed);
+      }
+      return null;
+    } finally {
+      _sessionRestoreInFlight = null;
+    }
+  }
+
+  bool _isInvalidRefreshTokenError(Object error) =>
+      error is HomeBoxApiException &&
+      (error.code == 'AUTH_TOKEN_EXPIRED' ||
+          error.code == 'AUTH_INVALID_CREDENTIALS' ||
+          error.code == 'AUTH_DEVICE_REVOKED' ||
+          error.code == 'FORBIDDEN');
 
   Future<void> forgetServer() async {
     await logout();
@@ -269,7 +373,10 @@ final class ServerConnectionController extends ChangeNotifier {
     _transport?.close();
     _server = server;
     _transport = PinnedHttpClient(server.fingerprint);
-    _api = HomeBoxApiClient(baseUrl: Uri.parse(server.baseUrl), transport: _transport!);
+    _api = HomeBoxApiClient(
+      baseUrl: Uri.parse(server.baseUrl),
+      transport: _transport!,
+    );
   }
 
   String _localDeviceName() {
@@ -302,5 +409,9 @@ Uri _normalizeBaseUrl(String text) {
   if (uri.host.isEmpty) {
     throw const FormatException('Enter a server address like host:8787.');
   }
-  return Uri(scheme: 'https', host: uri.host, port: uri.hasPort ? uri.port : 8787);
+  return Uri(
+    scheme: 'https',
+    host: uri.host,
+    port: uri.hasPort ? uri.port : 8787,
+  );
 }

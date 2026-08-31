@@ -773,7 +773,11 @@ final class FilesController extends ChangeNotifier {
 
   Future<_UploadContext?> _requireContext() async {
     final api = _serverConnection.api;
-    final session = _serverConnection.session;
+    // Not _serverConnection.session directly: refreshes first if the
+    // access token has expired or is about to, which the background
+    // refresh timer alone cannot guarantee on a mobile OS that suspended
+    // it while HomeBox was backgrounded (see its doc comment).
+    final session = await _serverConnection.ensureFreshSession();
     final vaultKey = await _vaultKeyStore.loadVaultKey();
     if (api == null || session == null || vaultKey == null) {
       _errorMessage =

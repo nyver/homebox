@@ -11,6 +11,7 @@ import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
 import '../../core/platform/android_sync_folder.dart';
+import '../../core/storage/materialized_directories_store.dart';
 import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
@@ -31,11 +32,6 @@ enum SyncFolderStatus { idle, materializing, error }
 /// desktop coordinator to run this pull pass before the uploader's push pass.
 /// This class remains server -> disk only.
 ///
-/// Known limitation: only files are tracked for pruning/relocation
-/// ([MaterializedFilesStore] has no directory-level equivalent), so an
-/// empty folder left behind by a rename or delete is not removed from
-/// disk. Harmless (no data loss, no security impact — the folder is
-/// simply empty), but worth fixing alongside the watcher slice.
 final class SyncFolderMaterializer extends ChangeNotifier {
   SyncFolderMaterializer({
     required ServerConnectionController serverConnection,
@@ -73,7 +69,9 @@ final class SyncFolderMaterializer extends ChangeNotifier {
   Future<void> materialize(String rootPath) async {
     if (_running) return;
     final api = _serverConnection.api;
-    final session = _serverConnection.session;
+    // Not _serverConnection.session directly — see FilesController's
+    // _requireContext for why (mobile OSes suspend background timers).
+    final session = await _serverConnection.ensureFreshSession();
     final vaultKey = await _vaultKeyStore.loadVaultKey();
     if (api == null || session == null || vaultKey == null) return;
     _running = true;
@@ -131,6 +129,12 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           : '$relativePath/${metadata.fileName}';
       if (node.isDirectory) {
         await _createDirectory(rootPath, childRelativePath);
+        _syncEngine.materializedDirectories.upsert(
+          MaterializedDirectory(
+            nodeId: node.id,
+            relativePath: childRelativePath,
+          ),
+        );
         await _materializeDirectory(
           rootPath: rootPath,
           parentId: node.id,
@@ -236,6 +240,11 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       await _deleteFile(rootPath, entry.relativePath);
       _syncEngine.materializedFiles.remove(entry.nodeId);
     }
+    for (final entry in _syncEngine.materializedDirectories.listAll()) {
+      if (seenNodeIds.contains(entry.nodeId)) continue;
+      await _deleteEmptyDirectory(rootPath, entry.relativePath);
+      _syncEngine.materializedDirectories.remove(entry.nodeId);
+    }
   }
 
   bool get _usesAndroidStorage =>
@@ -300,6 +309,18 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     }
     final file = File('$rootPath/$relativePath');
     if (await file.exists()) await file.delete();
+  }
+
+  /// A remote delete must not recursively erase unsynced local files. Remove
+  /// only an empty folder; any remaining content is preserved for upload.
+  Future<void> _deleteEmptyDirectory(
+    String rootPath,
+    String relativePath,
+  ) async {
+    if (_usesAndroidStorage) return;
+    final directory = Directory('$rootPath/$relativePath');
+    if (!await directory.exists()) return;
+    if (await directory.list().isEmpty) await directory.delete();
   }
 
   Future<SensitiveNodeMetadata> _decryptMetadata(

@@ -25,9 +25,11 @@ final class LocalDatabase {
     return openAtPath('${dbDir.path}/$safeName.sqlite3');
   }
 
-  static LocalDatabase openAtPath(String path) => _openAndMigrate(sqlite3.open(path));
+  static LocalDatabase openAtPath(String path) =>
+      _openAndMigrate(sqlite3.open(path));
 
-  static LocalDatabase openInMemory() => _openAndMigrate(sqlite3.openInMemory());
+  static LocalDatabase openInMemory() =>
+      _openAndMigrate(sqlite3.openInMemory());
 
   static LocalDatabase _openAndMigrate(Database db) {
     db.execute('PRAGMA journal_mode = WAL');
@@ -45,7 +47,8 @@ final class LocalDatabase {
       )
     ''');
     final applied = <int>{
-      for (final row in db.select('SELECT version FROM schema_migrations')) row['version'] as int,
+      for (final row in db.select('SELECT version FROM schema_migrations'))
+        row['version'] as int,
     };
     for (final migration in _migrations) {
       if (applied.contains(migration.version)) continue;
@@ -119,6 +122,12 @@ final List<_Migration> _migrations = [
       node_id TEXT PRIMARY KEY,
       relative_path TEXT NOT NULL,
       content_version_id TEXT
+    );
+  '''),
+  _Migration(3, '''
+    CREATE TABLE IF NOT EXISTS materialized_directories (
+      node_id TEXT PRIMARY KEY,
+      relative_path TEXT NOT NULL
     );
   '''),
 ];

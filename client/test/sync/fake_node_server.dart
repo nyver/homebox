@@ -20,6 +20,7 @@ final class FakeNodeServer {
   final Map<String, List<Map<String, dynamic>>> _fileVersions = {}; // by nodeId, newest first
   final Map<String, Uint8List> _blobs = {}; // by nodeId
   int _revision = 0;
+  String? _registeredDeviceId;
 
   /// When set, every node mutation fails with this HTTP status/code instead
   /// of succeeding — used to exercise SyncEngine's retry/failure handling.
@@ -38,11 +39,29 @@ final class FakeNodeServer {
     if (method == 'POST' && path == '/api/v1/auth/login') {
       final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map<String, dynamic>;
       final deviceId = (body['device'] as Map<String, dynamic>)['id'] as String;
+      _registeredDeviceId = deviceId;
       _writeJson(request, 200, {
         'user': {'id': userId, 'username': 'admin', 'role': 'ADMIN'},
         'device': {'id': deviceId, 'platform': 'WINDOWS'},
         'accessToken': 'access-token',
-        'accessTokenExpiresAt': '2026-01-01T00:15:00Z',
+        'accessTokenExpiresAt': _accessTokenExpiresAt(),
+        'refreshToken': 'refresh-token',
+        'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
+      });
+      return;
+    }
+    if (method == 'POST' && path == '/api/v1/auth/refresh') {
+      // SyncEngine.ensureFreshSession() (via ServerConnectionController)
+      // calls this whenever the access token looks expired or about to be;
+      // a real value here (rather than nothing at all) keeps that check
+      // from tearing down the session mid-test. Echoes the device actually
+      // registered at login (like the real server would), not a hardcoded
+      // placeholder.
+      _writeJson(request, 200, {
+        'user': {'id': userId, 'username': 'admin', 'role': 'ADMIN'},
+        'device': {'id': _registeredDeviceId, 'platform': 'WINDOWS'},
+        'accessToken': 'access-token',
+        'accessTokenExpiresAt': _accessTokenExpiresAt(),
         'refreshToken': 'refresh-token',
         'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
       });
@@ -289,6 +308,12 @@ final class FakeNodeServer {
     _changes.add({'revision': _revision, 'nodeId': nodeId, 'operation': operation, 'createdAt': '2026-01-01T00:00:00Z'});
     return _revision;
   }
+
+  /// A real near-future value (rather than a fixed past timestamp) so
+  /// ServerConnectionController.ensureFreshSession() never sees this
+  /// fixture's session as already expired.
+  String _accessTokenExpiresAt() =>
+      DateTime.now().toUtc().add(const Duration(minutes: 15)).toIso8601String();
 
   void _writeJson(HttpRequest request, int status, Object body) {
     request.response

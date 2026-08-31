@@ -104,6 +104,7 @@ class _HomeBoxAppState extends State<HomeBoxApp> {
     ),
   );
 }
+
 enum AppSection { files, sync, settings }
 
 String _localized(
@@ -169,6 +170,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   bool _pendingRebuildFingerprint = false;
   bool _syncFolderPassRunning = false;
   bool _pendingSyncFolderPass = false;
+  bool _pendingLocalSyncFolderChange = false;
   AppSection _section = AppSection.files;
   String? _syncFolder;
   bool _selectingFolder = false;
@@ -195,7 +197,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       serverConnection: _serverConnectionController,
     );
     _syncFolderStore = widget.syncFolderStore ?? SyncFolderStore();
-    _syncFolderWatcher = SyncFolderWatcher(onChange: _runSyncFolderPass);
+    _syncFolderWatcher = SyncFolderWatcher(
+      onChange: () => _runSyncFolderPass(localChange: true),
+    );
     _cameraPhotoPicker =
         widget.cameraPhotoPicker ?? ImagePickerCameraPhotoPicker();
     _androidFileSaver =
@@ -436,7 +440,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   /// deleted this" (see its class doc comment). A call that arrives while
   /// one is already running is not dropped: it is coalesced into a single
   /// follow-up pass once the current one finishes.
-  Future<void> _runSyncFolderPass() async {
+  /// A local filesystem event must upload first: pulling first would recreate
+  /// a directory the user just deleted before the uploader can observe it.
+  Future<void> _runSyncFolderPass({bool localChange = false}) async {
     final folder = _syncFolder;
     final engine = _syncEngine;
     final materializer = _syncFolderMaterializer;
@@ -450,14 +456,18 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     }
     if (_syncFolderPassRunning) {
       _pendingSyncFolderPass = true;
+      _pendingLocalSyncFolderChange |= localChange;
       return;
     }
     _syncFolderPassRunning = true;
     try {
+      if (localChange && defaultTargetPlatform != TargetPlatform.android) {
+        await uploader.scan(folder);
+      }
       await materializer.materialize(folder);
       // SAF has no reliable recursive filesystem event stream, so Android
       // mirrors server changes to the selected folder but does not watch it.
-      if (defaultTargetPlatform != TargetPlatform.android) {
+      if (!localChange && defaultTargetPlatform != TargetPlatform.android) {
         await uploader.scan(folder);
       }
     } finally {
@@ -465,7 +475,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     }
     if (_pendingSyncFolderPass) {
       _pendingSyncFolderPass = false;
-      await _runSyncFolderPass();
+      final pendingLocalChange = _pendingLocalSyncFolderChange;
+      _pendingLocalSyncFolderChange = false;
+      await _runSyncFolderPass(localChange: pendingLocalChange);
     }
   }
 
@@ -652,17 +664,17 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
           filesController: _filesController,
           dense: dense,
         ),
-      _SyncStatusChip(
-        syncEngine: _syncEngine,
-        syncFolderMaterializer: _syncFolderMaterializer,
-        dense: dense,
-      ),
       if (showSyncFolderTransfer)
         _SyncFolderTransferProgressIndicator(
           materializer: _syncFolderMaterializer,
           uploader: _localFolderUploader,
           dense: dense,
         ),
+      _SyncStatusChip(
+        syncEngine: _syncEngine,
+        syncFolderMaterializer: _syncFolderMaterializer,
+        dense: dense,
+      ),
       _VaultStateChip(controller: _vaultSetupController),
     ];
     return dense
@@ -1028,12 +1040,14 @@ class _TransferProgressIndicator extends StatelessWidget {
         if (dense) return Tooltip(message: label, child: content);
         return Tooltip(
           message: label,
-          child: Chip(avatar: Icon(directionIcon, size: 18), label: Text('$percent%')),
+          child: Chip(
+            avatar: Icon(directionIcon, size: 18),
+            label: Text('$percent%'),
+          ),
         );
       },
     );
   }
-
 }
 
 /// Compact local-folder transfer progress for the global header. Its parent
@@ -1087,10 +1101,7 @@ class _SyncFolderTransferProgressIndicator extends StatelessWidget {
     if (dense) return Tooltip(message: tooltip, child: content);
     return Tooltip(
       message: tooltip,
-      child: Chip(
-        avatar: Icon(icon, size: 18),
-        label: Text('$percent%'),
-      ),
+      child: Chip(avatar: Icon(icon, size: 18), label: Text('$percent%')),
     );
   }
 }
@@ -1505,15 +1516,13 @@ final class _FilesSectionState extends State<_FilesSection> {
 
     if (!context.mounted || (succeeded == 0 && failed == 0)) return;
     final message = switch ((succeeded, failed)) {
-      (0, final f) =>
-        controller.errorMessage ?? 'Could not upload $f file(s).',
+      (0, final f) => controller.errorMessage ?? 'Could not upload $f file(s).',
       (final s, 0) => 'Encrypted and uploaded $s file(s).',
       (final s, final f) =>
         'Uploaded $s file(s); $f file(s) could not be uploaded.',
     };
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _downloadFile(BuildContext context, FileEntry entry) async {
@@ -1521,7 +1530,12 @@ final class _FilesSectionState extends State<_FilesSection> {
     if (controller == null) return;
     final saver = widget.androidFileSaver;
     if (saver != null) {
-      await _downloadFileWithAndroidSaveDialog(context, controller, saver, entry);
+      await _downloadFileWithAndroidSaveDialog(
+        context,
+        controller,
+        saver,
+        entry,
+      );
       return;
     }
     final destination = await getSaveLocation(suggestedName: entry.name);
@@ -1584,7 +1598,9 @@ final class _FilesSectionState extends State<_FilesSection> {
     if (!downloaded) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(controller.errorMessage ?? 'Download failed.')),
+          SnackBar(
+            content: Text(controller.errorMessage ?? 'Download failed.'),
+          ),
         );
       }
       unawaited(tempFile.delete().catchError((_) => tempFile));
@@ -1726,9 +1742,7 @@ final class _FilesSectionState extends State<_FilesSection> {
         Widget scrollableMessage(Widget child) => LayoutBuilder(
           builder: (context, constraints) => ListView(
             physics: const AlwaysScrollableScrollPhysics(),
-            children: [
-              SizedBox(height: constraints.maxHeight, child: child),
-            ],
+            children: [SizedBox(height: constraints.maxHeight, child: child)],
           ),
         );
         final Widget body;
@@ -2016,17 +2030,20 @@ class _SyncSection extends StatelessWidget {
             AnimatedBuilder(
               animation: Listenable.merge([engine, ?syncFolderMaterializer]),
               builder: (context, _) {
-                final (icon, label, color, tooltip) =
-                    _effectiveSyncStatusPresentation(
-                      engine: engine,
-                      materializer: syncFolderMaterializer,
-                    );
+                final (
+                  icon,
+                  label,
+                  color,
+                  tooltip,
+                ) = _effectiveSyncStatusPresentation(
+                  engine: engine,
+                  materializer: syncFolderMaterializer,
+                );
                 return Card(
                   child: ListTile(
                     leading: Icon(icon, color: color),
                     title: Text(label),
-                    subtitle:
-                        tooltip != null
+                    subtitle: tooltip != null
                         ? Text(tooltip)
                         : engine.isPaused
                         ? const Text(
@@ -2122,7 +2139,8 @@ class _SyncSection extends StatelessWidget {
                         materializer.status == SyncFolderStatus.error &&
                             materializer.errorMessage != null
                         ? Text(materializer.errorMessage!)
-                        : materializer.status == SyncFolderStatus.materializing &&
+                        : materializer.status ==
+                                  SyncFolderStatus.materializing &&
                               progress != null &&
                               activeFileName != null
                         ? _syncFolderTransferProgress(
@@ -2319,7 +2337,9 @@ final class _LanguageCard extends StatelessWidget {
             child: DropdownButton<AppLanguage>(
               value: controller.language,
               onChanged: (language) {
-                if (language != null) unawaited(controller.setLanguage(language));
+                if (language != null) {
+                  unawaited(controller.setLanguage(language));
+                }
               },
               items: const [
                 DropdownMenuItem(

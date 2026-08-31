@@ -41,7 +41,7 @@ final class DeviceProvisioningController extends ChangeNotifier {
   /// feed read. A non-null lastSyncAt therefore represents actual server
   /// synchronization rather than a login or a device-registration event.
   Future<List<transport.HomeBoxDevice>> approvedDevices() async {
-    final context = _requireSession();
+    final context = await _requireSession();
     if (context == null) return const [];
     _errorMessage = null;
     _setStatus(DeviceProvisioningStatus.loading);
@@ -60,7 +60,7 @@ final class DeviceProvisioningController extends ChangeNotifier {
   /// Lists active devices that can receive an envelope. The current device
   /// is excluded because a device must never provision a key to itself.
   Future<List<transport.HomeBoxDevice>> availableRecipientDevices() async {
-    final context = _requireSession();
+    final context = await _requireSession();
     if (context == null) return const [];
     _errorMessage = null;
     _setStatus(DeviceProvisioningStatus.loading);
@@ -80,7 +80,7 @@ final class DeviceProvisioningController extends ChangeNotifier {
   /// ciphertext to the server. The target must already have logged in once so
   /// its device-bound X25519 public key is registered there.
   Future<bool> provisionDevice(transport.HomeBoxDevice target) async {
-    final context = _requireSession();
+    final context = await _requireSession();
     if (context == null) return false;
     if (target.isRevoked || target.id == context.deviceId) {
       _fail(
@@ -133,7 +133,7 @@ final class DeviceProvisioningController extends ChangeNotifier {
   /// envelope's vault/device/key-version context, and persists the unwrapped
   /// Vault Key in OS-backed secure storage.
   Future<bool> collectProvisioning() async {
-    final context = _requireSession();
+    final context = await _requireSession();
     if (context == null) return false;
     if (await _vaultKeyStore.exists()) {
       _fail(StateError('A vault already exists on this device.'));
@@ -196,9 +196,11 @@ final class DeviceProvisioningController extends ChangeNotifier {
     }
   }
 
-  _ProvisioningContext? _requireSession() {
+  Future<_ProvisioningContext?> _requireSession() async {
     final api = _serverConnection.api;
-    final session = _serverConnection.session;
+    // Not _serverConnection.session directly — see FilesController's
+    // _requireContext for why (mobile OSes suspend background timers).
+    final session = await _serverConnection.ensureFreshSession();
     if (api == null || session == null) {
       _errorMessage = 'Connect and sign in before provisioning a device.';
       _setStatus(DeviceProvisioningStatus.failed);

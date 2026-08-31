@@ -30,6 +30,7 @@ void main() {
         request.response
           ..statusCode = 200
           ..headers.contentType = ContentType.binary
+          ..headers.contentLength = all.length
           ..add(all);
       } else {
         request.response.statusCode = 404;
@@ -51,8 +52,15 @@ void main() {
     await api.putUploadChunk('token', 'upload-1', 0, chunk0);
     await api.putUploadChunk('token', 'upload-1', 1, chunk1);
 
-    final downloaded = await api.downloadFileContent('token', 'node-1');
+    final progress = <double>[];
+    final downloaded = await api.downloadFileContent(
+      'token',
+      'node-1',
+      onProgress: progress.add,
+    );
     expect(downloaded, [...chunk0, ...chunk1]);
+    expect(progress, isNotEmpty);
+    expect(progress.last, 1);
   });
 
   test('node/version/sync JSON responses parse into the expected model objects', () async {
