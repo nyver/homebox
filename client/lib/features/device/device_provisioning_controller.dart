@@ -130,6 +130,61 @@ final class DeviceProvisioningController extends ChangeNotifier {
     }
   }
 
+  /// Wraps this device's freshly created Vault Key for itself and uploads
+  /// that as this device's own key envelope. Call this immediately after
+  /// [VaultSetupController.createVault] succeeds on this device: the vault's
+  /// creator never goes through [collectProvisioning] (there is no other
+  /// trusted device yet to approve it), so without this it would otherwise
+  /// be indistinguishable from a device still awaiting approval
+  /// (`HomeBoxDevice.hasVaultKey` stays false) even though it is the vault's
+  /// own root of trust.
+  Future<bool> selfApprove() async {
+    final context = await _requireSession();
+    if (context == null) return false;
+    _errorMessage = null;
+    _setStatus(DeviceProvisioningStatus.loading);
+    DeviceIdentity? identity;
+    Uint8List? vaultId;
+    Uint8List? deviceId;
+    SecretKey? vaultKey;
+    try {
+      identity = await _deviceIdentityStore.load();
+      if (identity == null) {
+        throw StateError('Prepare this device before creating a vault.');
+      }
+      vaultKey = await _vaultKeyStore.loadVaultKey();
+      if (vaultKey == null) {
+        throw StateError('This device does not have an unlocked vault key.');
+      }
+      vaultId = uuidStringToBytes(context.userId);
+      deviceId = uuidStringToBytes(context.deviceId);
+      final envelope = await _cipher.create(
+        vaultKey: vaultKey,
+        keyVersion: homeBoxPersonalVaultKeyVersion,
+        vaultId: vaultId,
+        recipientDeviceId: deviceId,
+        recipientPublicKey: identity.publicKey,
+      );
+      await context.api.uploadKeyEnvelope(
+        context.accessToken,
+        targetDeviceId: context.deviceId,
+        vaultId: context.userId,
+        keyVersion: homeBoxPersonalVaultKeyVersion,
+        ciphertext: envelope.encode(),
+      );
+      _setStatus(DeviceProvisioningStatus.ready);
+      return true;
+    } catch (e) {
+      _fail(e);
+      return false;
+    } finally {
+      identity?.destroy();
+      vaultId?.fillRange(0, vaultId.length, 0);
+      deviceId?.fillRange(0, deviceId.length, 0);
+      vaultKey?.destroy();
+    }
+  }
+
   /// Revokes [target]'s approval by ending its server session outright: its
   /// access and refresh tokens stop working immediately, so it must sign in
   /// and be approved again by a trusted device before it can rejoin the

@@ -2528,10 +2528,12 @@ class _SettingsSection extends StatelessWidget {
         _AccountDevicesCard(
           controller: deviceProvisioningController,
           serverConnectionController: serverConnectionController,
+          vaultSetupController: vaultSetupController,
         ),
         _VaultSetupCard(
           controller: vaultSetupController,
           serverConnectionController: serverConnectionController,
+          deviceProvisioningController: deviceProvisioningController,
         ),
         const _AutostartCard(),
       ],
@@ -2773,10 +2775,12 @@ final class _AccountDevicesCard extends StatefulWidget {
   const _AccountDevicesCard({
     required this.controller,
     required this.serverConnectionController,
+    required this.vaultSetupController,
   });
 
   final DeviceProvisioningController controller;
   final ServerConnectionController serverConnectionController;
+  final VaultSetupController vaultSetupController;
 
   @override
   State<_AccountDevicesCard> createState() => _AccountDevicesCardState();
@@ -2814,13 +2818,42 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
       _loading = true;
       _error = null;
     });
-    final devices = await widget.controller.accountDevices();
+    var devices = await widget.controller.accountDevices();
+    if (await _selfHealOwnApproval(devices)) {
+      devices = await widget.controller.accountDevices();
+    }
     if (!mounted) return;
     setState(() {
       _devices = devices;
       _error = widget.controller.errorMessage;
       _loading = false;
     });
+  }
+
+  /// A vault's creator device never goes through the normal approve/collect
+  /// flow (there is no other trusted device yet to approve it), so it can
+  /// show up here as pending even though it already holds the vault key
+  /// locally — including vaults created before this self-approval step
+  /// existed. Silently repairs that the first time this device's own vault
+  /// is ready but the server has no record of it, retrying on every load
+  /// until it succeeds.
+  Future<bool> _selfHealOwnApproval(
+    List<transport.HomeBoxDevice> devices,
+  ) async {
+    final selfId = widget.serverConnectionController.session?.device.id;
+    if (selfId == null ||
+        widget.vaultSetupController.status != VaultSetupStatus.ready) {
+      return false;
+    }
+    transport.HomeBoxDevice? self;
+    for (final device in devices) {
+      if (device.id == selfId) {
+        self = device;
+        break;
+      }
+    }
+    if (self == null || self.hasVaultKey) return false;
+    return widget.controller.selfApprove();
   }
 
   Future<void> _revoke(transport.HomeBoxDevice device) async {
@@ -3331,10 +3364,12 @@ final class _VaultSetupCard extends StatelessWidget {
   const _VaultSetupCard({
     required this.controller,
     required this.serverConnectionController,
+    required this.deviceProvisioningController,
   });
 
   final VaultSetupController controller;
   final ServerConnectionController serverConnectionController;
+  final DeviceProvisioningController deviceProvisioningController;
 
   Future<void> _createVault(BuildContext context) async {
     final userId = serverConnectionController.session?.user.id;
@@ -3380,7 +3415,24 @@ final class _VaultSetupCard extends StatelessWidget {
       }
       return;
     }
-    if (context.mounted) await _showRecoverySecret(context, secret);
+    // This device is the vault's root of trust and never goes through
+    // collectProvisioning, so without this it would show as still pending
+    // approval in Account devices. Best-effort: the vault itself already
+    // exists and its Recovery Secret must still be shown either way.
+    final selfApproved = await deviceProvisioningController.selfApprove();
+    if (!context.mounted) return;
+    await _showRecoverySecret(context, secret);
+    if (!selfApproved && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Vault created, but this device could not record its own approval: '
+            '${deviceProvisioningController.errorMessage ?? 'unknown error'}. '
+            'It may show as pending in Account devices until this is retried.',
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _showRecoverySecret(BuildContext context, String secret) =>

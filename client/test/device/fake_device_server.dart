@@ -14,6 +14,7 @@ final class FakeDeviceServer {
 
   final Map<String, Map<String, dynamic>> _devices = {};
   int revokeRequestCount = 0;
+  final Set<String> uploadedEnvelopeTargetIds = {};
 
   Future<HttpServer> start() => startFixtureServer(_handle);
 
@@ -108,6 +109,27 @@ final class FakeDeviceServer {
       device['revokedAt'] = DateTime.now().toUtc().toIso8601String();
       request.response.statusCode = 204;
       await request.response.close();
+      return;
+    }
+    if (method == 'POST' && path.endsWith('/key-envelope')) {
+      final id = path.substring(
+        '/api/v1/devices/'.length,
+        path.length - '/key-envelope'.length,
+      );
+      final device = _devices[id];
+      if (device == null || device['revokedAt'] != null) {
+        _writeJson(request, 404, {
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'device not found',
+            'requestId': 'req',
+          },
+        });
+        return;
+      }
+      uploadedEnvelopeTargetIds.add(id);
+      device['hasVaultKey'] = true;
+      _writeJson(request, 201, {'id': 'envelope-$id'});
       return;
     }
     _writeJson(request, 404, {
