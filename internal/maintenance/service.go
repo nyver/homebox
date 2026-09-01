@@ -14,33 +14,41 @@ import (
 	"github.com/google/uuid"
 )
 
-// Result reports exactly what a manually invoked maintenance pass removed.
+// Result reports exactly what an automatic or manually invoked pass removed.
 type Result struct {
 	ExpiredUploads       int
 	ExpiredAccessTokens  int64
 	ExpiredRefreshTokens int64
 	ExpiredOperations    int64
+	ExpiredTrashItems    int
 	UnreferencedBlobs    int
 	OrphanBlobFiles      int
 }
 
 type Service struct {
-	db          *sql.DB
-	storagePath string
-	gracePeriod time.Duration
-	now         func() time.Time
+	db             *sql.DB
+	storagePath    string
+	gracePeriod    time.Duration
+	trashRetention time.Duration
+	now            func() time.Time
 }
 
-func New(db *sql.DB, storagePath string, gracePeriod time.Duration) (*Service, error) {
-	if db == nil || storagePath == "" || gracePeriod <= 0 {
-		return nil, errors.New("database, storage path, and positive grace period are required")
+func New(db *sql.DB, storagePath string, gracePeriod, trashRetention time.Duration) (*Service, error) {
+	if db == nil || storagePath == "" || gracePeriod <= 0 || trashRetention <= 0 {
+		return nil, errors.New("database, storage path, positive grace period, and positive Trash retention are required")
 	}
-	return &Service{db: db, storagePath: storagePath, gracePeriod: gracePeriod, now: time.Now}, nil
+	return &Service{
+		db:             db,
+		storagePath:    storagePath,
+		gracePeriod:    gracePeriod,
+		trashRetention: trashRetention,
+		now:            time.Now,
+	}, nil
 }
 
-// Run safely reclaims only expired control-plane records and ciphertext that
-// has been unreachable for the whole configured grace period. It never
-// deletes a file version, Trash node, or any blob referenced by a version.
+// Run safely reclaims expired control-plane records and Trash subtrees, then
+// removes ciphertext that has been unreachable for the configured grace
+// period. It never decrypts content or removes a blob referenced by a version.
 func (s *Service) Run(ctx context.Context) (Result, error) {
 	now := s.now().UTC()
 	result, err := s.cleanupExpired(ctx, now)
@@ -52,6 +60,11 @@ func (s *Service) Run(ctx context.Context) (Result, error) {
 		return Result{}, err
 	}
 	result.ExpiredUploads = uploads
+	trashItems, err := s.cleanupExpiredTrash(ctx, now)
+	if err != nil {
+		return Result{}, err
+	}
+	result.ExpiredTrashItems = trashItems
 	unreferenced, err := s.collectUnreferencedBlobs(ctx, now)
 	if err != nil {
 		return Result{}, err
@@ -63,6 +76,124 @@ func (s *Service) Run(ctx context.Context) (Result, error) {
 	}
 	result.OrphanBlobFiles = orphanFiles
 	return result, nil
+}
+
+const trashSubtreeCTE = `WITH RECURSIVE subtree(id,owner_id) AS (
+	SELECT id,owner_id FROM nodes WHERE id=? AND deleted_at <= ?
+	UNION
+	SELECT n.id,n.owner_id FROM nodes n JOIN subtree s ON n.parent_id=s.id AND n.owner_id=s.owner_id
+) `
+
+// cleanupExpiredTrash permanently removes each expired Trash entry and its
+// complete subtree in one transaction. Blob rows deliberately remain: once
+// their file versions are gone, the existing two-pass GC safely reclaims them.
+func (s *Service) cleanupExpiredTrash(ctx context.Context, now time.Time) (int, error) {
+	cutoff := now.Add(-s.trashRetention).Format(time.RFC3339Nano)
+	rows, err := s.db.QueryContext(ctx, "SELECT id FROM nodes WHERE deleted_at <= ? ORDER BY deleted_at", cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("list expired Trash entries: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+
+	deleted := 0
+	for _, id := range ids {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		uploadRows, err := tx.QueryContext(ctx, trashSubtreeCTE+`SELECT u.id FROM upload_sessions u
+			WHERE u.target_node_id IN (SELECT id FROM subtree)`, id, cutoff)
+		if err != nil {
+			tx.Rollback()
+			return 0, fmt.Errorf("list expired Trash uploads: %w", err)
+		}
+		var uploadIDs []string
+		for uploadRows.Next() {
+			var uploadID string
+			if err := uploadRows.Scan(&uploadID); err != nil {
+				uploadRows.Close()
+				tx.Rollback()
+				return 0, err
+			}
+			if _, err := uuid.Parse(uploadID); err != nil {
+				uploadRows.Close()
+				tx.Rollback()
+				return 0, fmt.Errorf("invalid upload ID in expired Trash subtree: %w", err)
+			}
+			uploadIDs = append(uploadIDs, uploadID)
+		}
+		if err := uploadRows.Err(); err != nil {
+			uploadRows.Close()
+			tx.Rollback()
+			return 0, err
+		}
+		if err := uploadRows.Close(); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, trashSubtreeCTE+`INSERT INTO sync_changes
+			(user_scope_id,node_id,operation,created_at)
+			SELECT owner_id,id,'PURGE',? FROM subtree`, id, cutoff, now.Format(time.RFC3339Nano)); err != nil {
+			tx.Rollback()
+			return 0, fmt.Errorf("record expired Trash sync changes: %w", err)
+		}
+		queries := []struct {
+			name string
+			sql  string
+		}{
+			{"share device envelopes", trashSubtreeCTE + `DELETE FROM share_device_envelopes
+				WHERE share_id IN (SELECT id FROM shares WHERE node_id IN (SELECT id FROM subtree))`},
+			{"shares", trashSubtreeCTE + "DELETE FROM shares WHERE node_id IN (SELECT id FROM subtree)"},
+			{"favorites", trashSubtreeCTE + "DELETE FROM favorites WHERE node_id IN (SELECT id FROM subtree)"},
+			{"upload chunks", trashSubtreeCTE + `DELETE FROM upload_chunks WHERE upload_id IN
+				(SELECT id FROM upload_sessions WHERE target_node_id IN (SELECT id FROM subtree))`},
+			{"upload sessions", trashSubtreeCTE + "DELETE FROM upload_sessions WHERE target_node_id IN (SELECT id FROM subtree)"},
+			{"file versions", trashSubtreeCTE + "DELETE FROM file_versions WHERE node_id IN (SELECT id FROM subtree)"},
+		}
+		for _, query := range queries {
+			if _, err := tx.ExecContext(ctx, query.sql, id, cutoff); err != nil {
+				tx.Rollback()
+				return 0, fmt.Errorf("delete expired Trash %s: %w", query.name, err)
+			}
+		}
+		for _, uploadID := range uploadIDs {
+			if err := os.RemoveAll(s.uploadDir(uploadID)); err != nil {
+				tx.Rollback()
+				return 0, fmt.Errorf("remove expired Trash upload ciphertext: %w", err)
+			}
+		}
+		result, err := tx.ExecContext(ctx, trashSubtreeCTE+"DELETE FROM nodes WHERE id IN (SELECT id FROM subtree)", id, cutoff)
+		if err != nil {
+			tx.Rollback()
+			return 0, fmt.Errorf("delete expired Trash nodes: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if count > 0 {
+			deleted++
+		}
+	}
+	return deleted, nil
 }
 
 func (s *Service) cleanupExpired(ctx context.Context, now time.Time) (Result, error) {

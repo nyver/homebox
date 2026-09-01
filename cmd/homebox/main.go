@@ -126,7 +126,12 @@ func runMaintenance(args []string) {
 		fatal("open database: %v", err)
 	}
 	defer db.Close()
-	service, err := maintenance.New(db, c.Storage.Path, time.Duration(c.Maintenance.OrphanBlobGraceHours)*time.Hour)
+	service, err := maintenance.New(
+		db,
+		c.Storage.Path,
+		time.Duration(c.Maintenance.OrphanBlobGraceHours)*time.Hour,
+		time.Duration(c.Maintenance.TrashRetentionDays)*24*time.Hour,
+	)
 	if err != nil {
 		fatal("initialize maintenance: %v", err)
 	}
@@ -134,8 +139,8 @@ func runMaintenance(args []string) {
 	if err != nil {
 		fatal("run maintenance: %v", err)
 	}
-	fmt.Printf("Maintenance complete: expired uploads=%d, access tokens=%d, refresh tokens=%d, idempotency operations=%d, unreferenced blobs=%d, orphan blob files=%d.\n",
-		result.ExpiredUploads, result.ExpiredAccessTokens, result.ExpiredRefreshTokens, result.ExpiredOperations, result.UnreferencedBlobs, result.OrphanBlobFiles)
+	fmt.Printf("Maintenance complete: expired uploads=%d, access tokens=%d, refresh tokens=%d, idempotency operations=%d, expired Trash items=%d, unreferenced blobs=%d, orphan blob files=%d.\n",
+		result.ExpiredUploads, result.ExpiredAccessTokens, result.ExpiredRefreshTokens, result.ExpiredOperations, result.ExpiredTrashItems, result.UnreferencedBlobs, result.OrphanBlobFiles)
 }
 
 func serve(args []string) {
@@ -186,6 +191,18 @@ func serve(args []string) {
 	if err != nil {
 		fatal("initialize upload storage: %v", err)
 	}
+	maintenanceService, err := maintenance.New(
+		db,
+		c.Storage.Path,
+		time.Duration(c.Maintenance.OrphanBlobGraceHours)*time.Hour,
+		time.Duration(c.Maintenance.TrashRetentionDays)*24*time.Hour,
+	)
+	if err != nil {
+		fatal("initialize automatic maintenance: %v", err)
+	}
+	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
+	defer stopMaintenance()
+	go runAutomaticMaintenance(maintenanceCtx, maintenanceService, time.Duration(c.Maintenance.IntervalHours)*time.Hour)
 	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService, sharing.New(db))
 	server := &http.Server{
 		Addr:              c.Address(),
@@ -215,6 +232,31 @@ func serve(args []string) {
 	}
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatal("serve: %v", err)
+	}
+}
+
+func runAutomaticMaintenance(ctx context.Context, service *maintenance.Service, interval time.Duration) {
+	run := func() {
+		result, err := service.Run(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("Automatic maintenance failed: %v", err)
+			}
+			return
+		}
+		log.Printf("Automatic maintenance complete: expired uploads=%d, access tokens=%d, refresh tokens=%d, idempotency operations=%d, expired Trash items=%d, unreferenced blobs=%d, orphan blob files=%d",
+			result.ExpiredUploads, result.ExpiredAccessTokens, result.ExpiredRefreshTokens, result.ExpiredOperations, result.ExpiredTrashItems, result.UnreferencedBlobs, result.OrphanBlobFiles)
+	}
+	run()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
 	}
 }
 

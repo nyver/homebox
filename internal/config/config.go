@@ -67,6 +67,8 @@ type Config struct {
 	} `yaml:"sync"`
 	Maintenance struct {
 		OrphanBlobGraceHours int `yaml:"orphan_blob_grace_hours"`
+		TrashRetentionDays   int `yaml:"trash_retention_days"`
+		IntervalHours        int `yaml:"interval_hours"`
 	} `yaml:"maintenance"`
 }
 
@@ -91,6 +93,8 @@ func Defaults() Config {
 	c.Sync.PageSize = 500
 	c.Sync.MaxPageSize = 2000
 	c.Maintenance.OrphanBlobGraceHours = 168
+	c.Maintenance.TrashRetentionDays = 3
+	c.Maintenance.IntervalHours = 1
 	return c
 }
 
@@ -158,6 +162,12 @@ func (c Config) Validate() error {
 	}
 	if c.Maintenance.OrphanBlobGraceHours < 1 {
 		return errors.New("maintenance.orphan_blob_grace_hours must be positive")
+	}
+	if c.Maintenance.TrashRetentionDays < 1 {
+		return errors.New("maintenance.trash_retention_days must be positive")
+	}
+	if c.Maintenance.IntervalHours < 1 {
+		return errors.New("maintenance.interval_hours must be positive")
 	}
 	return nil
 }

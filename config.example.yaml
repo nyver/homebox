@@ -83,6 +83,11 @@ sync:
   max_page_size: 2000
 
 maintenance:
+  # The server permanently removes Trash entries and their complete subtrees
+  # after this many days. Associated ciphertext then enters the GC below.
+  trash_retention_days: 3
+  # Run maintenance once at server startup and then at this interval.
+  interval_hours: 1
   # A blob must remain unreachable for this entire period before a second
   # maintenance pass can remove it. This protects against transient divergence.
   orphan_blob_grace_hours: 168

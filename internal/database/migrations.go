@@ -17,6 +17,7 @@ var migrations = []migration{
 	{4, "share_device_envelopes", migration0004ShareDeviceEnvelopes},
 	{5, "device_last_sync", migration0005DeviceLastSync},
 	{6, "upload_metadata_version", migration0006UploadMetadataVersion},
+	{7, "trash_retention_index", migration0007TrashRetentionIndex},
 }
 
 const migration0001InitialSchema = `
@@ -153,4 +154,10 @@ CREATE INDEX IF NOT EXISTS idx_devices_user_last_sync ON devices(user_id,last_sy
 // keeps already-open sessions from an older server version completable.
 const migration0006UploadMetadataVersion = `
 ALTER TABLE upload_sessions ADD COLUMN metadata_key_version INTEGER NOT NULL DEFAULT 1;
+`
+
+// migration0007TrashRetentionIndex keeps the hourly retention scan bounded to
+// deleted nodes instead of walking every active node in a large vault.
+const migration0007TrashRetentionIndex = `
+CREATE INDEX IF NOT EXISTS idx_nodes_deleted_at ON nodes(deleted_at) WHERE deleted_at IS NOT NULL;
 `

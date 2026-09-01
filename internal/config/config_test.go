@@ -42,3 +42,22 @@ func TestRejectsNonPositiveOrphanBlobGracePeriod(t *testing.T) {
 		t.Fatal("non-positive orphan blob grace period must be rejected")
 	}
 }
+
+func TestMaintenanceDefaultsAndValidation(t *testing.T) {
+	c := Defaults()
+	if c.Maintenance.TrashRetentionDays != 3 {
+		t.Fatalf("trash retention = %d days, want 3", c.Maintenance.TrashRetentionDays)
+	}
+	if c.Maintenance.IntervalHours != 1 {
+		t.Fatalf("maintenance interval = %d hours, want 1", c.Maintenance.IntervalHours)
+	}
+	c.Maintenance.TrashRetentionDays = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("non-positive Trash retention must be rejected")
+	}
+	c = Defaults()
+	c.Maintenance.IntervalHours = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("non-positive maintenance interval must be rejected")
+	}
+}
