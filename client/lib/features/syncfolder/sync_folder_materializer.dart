@@ -37,15 +37,20 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     required VaultKeyStore vaultKeyStore,
     required SyncEngine syncEngine,
     AndroidSyncFolder? androidSyncFolder,
+    void Function({required String fileName, required String location})?
+    onFileMaterialized,
   }) : _serverConnection = serverConnection,
        _vaultKeyStore = vaultKeyStore,
        _syncEngine = syncEngine,
-       _androidSyncFolder = androidSyncFolder;
+       _androidSyncFolder = androidSyncFolder,
+       _onFileMaterialized = onFileMaterialized;
 
   final ServerConnectionController _serverConnection;
   final VaultKeyStore _vaultKeyStore;
   final SyncEngine _syncEngine;
   final AndroidSyncFolder? _androidSyncFolder;
+  final void Function({required String fileName, required String location})?
+  _onFileMaterialized;
   final MetadataCipher _metadataCipher = MetadataCipher();
 
   bool _running = false;
@@ -210,6 +215,27 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       return; // node created but no content uploaded yet.
     }
     final expectedHash = metadata.plaintextSha256;
+    // A Windows Files-page upload can copy its original plaintext straight
+    // into the matching sync-folder location. Verify that local copy before
+    // downloading ciphertext back from the server. A hash mismatch still
+    // takes the normal encrypted-download path below, so a changed source
+    // file can never be recorded as the uploaded version.
+    if (!_usesAndroidStorage &&
+        expectedHash != null &&
+        await File(targetPath).exists()) {
+      final localHash = await plaintextFileSha256(File(targetPath));
+      if (localHash.toLowerCase() == expectedHash.toLowerCase()) {
+        _syncEngine.materializedFiles.upsert(
+          MaterializedFile(
+            nodeId: node.id,
+            relativePath: relativePath,
+            contentVersionId: node.currentVersionId,
+          ),
+        );
+        _syncEngine.materializationFailures.remove(node.id);
+        return;
+      }
+    }
     if (expectedHash != null &&
         _syncEngine.materializationFailures.contains(
           nodeId: node.id,
@@ -270,6 +296,13 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         ),
       );
       _syncEngine.materializationFailures.remove(node.id);
+      // Only this path receives bytes from the server. Renames, moves, and
+      // verified direct local copies use existing local bytes above, so they
+      // must not look like a new download to the user.
+      _onFileMaterialized?.call(
+        fileName: metadata.fileName,
+        location: _materializedLocation(relativePath, targetPath),
+      );
     } on _MaterializationCancelled {
       // The node was replaced or moved to Trash while bytes were arriving.
       // A later pass will handle the new state; this is not a sync failure.
@@ -308,6 +341,9 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         current.revision == snapshot.revision &&
         current.currentVersionId == snapshot.currentVersionId;
   }
+
+  String _materializedLocation(String relativePath, String targetPath) =>
+      _usesAndroidStorage ? 'Selected sync folder/$relativePath' : targetPath;
 
   Future<bool> _trashIntegrityFailedFile({
     required LocalNode node,

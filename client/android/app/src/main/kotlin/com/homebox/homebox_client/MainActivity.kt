@@ -424,10 +424,33 @@ class MainActivity : FlutterFragmentActivity() {
                 output.use { destination ->
                     FileInputStream(File(sourcePath)).use { source -> source.copyTo(destination) }
                 }
-                runOnUiThread { result.success(destinationUri.toString()) }
+                runOnUiThread { result.success(displayDestinationLocation(destinationUri)) }
             } catch (e: Exception) {
                 runOnUiThread { result.error("save_failed", e.message, null) }
             }
         }.start()
+    }
+
+    /// Android's Storage Access Framework intentionally does not expose a
+    /// filesystem path. Convert its document ID into a user-readable location
+    /// for the completed-download notification, retaining the URI only when
+    /// an external document provider has no document ID in that form.
+    private fun displayDestinationLocation(destinationUri: Uri): String = try {
+        val documentId = DocumentsContract.getDocumentId(destinationUri)
+        val separator = documentId.indexOf(':')
+        if (separator == -1) {
+            documentId
+        } else {
+            val volume = documentId.substring(0, separator)
+            val relativePath = documentId.substring(separator + 1)
+            val volumeLabel = if (volume.equals("primary", ignoreCase = true)) {
+                "Internal storage"
+            } else {
+                volume
+            }
+            if (relativePath.isEmpty()) volumeLabel else "$volumeLabel/$relativePath"
+        }
+    } catch (_: Exception) {
+        destinationUri.toString()
     }
 }

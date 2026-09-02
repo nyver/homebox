@@ -79,10 +79,14 @@ void main() {
       syncEngine: syncEngine,
     );
     addTearDown(filesController.dispose);
+    final materializedFiles = <(String fileName, String location)>[];
     final materializer = SyncFolderMaterializer(
       serverConnection: serverConnection,
       vaultKeyStore: vaultKeyStore,
       syncEngine: syncEngine,
+      onFileMaterialized: ({required fileName, required location}) {
+        materializedFiles.add((fileName, location));
+      },
     );
     addTearDown(materializer.dispose);
 
@@ -115,6 +119,7 @@ void main() {
     final uploaded = filesController.entries.single;
 
     await materializer.materialize(rootDir.path);
+    expect(materializedFiles, [('note.txt', '${rootDir.path}/Docs/note.txt')]);
     expect(
       materializer.status,
       SyncFolderStatus.idle,
@@ -162,6 +167,73 @@ void main() {
     await materializer.materialize(rootDir.path);
     expect(await renamedFile.exists(), isFalse);
   });
+
+  test(
+    'materialize accepts a verified local copy without downloading it again',
+    () async {
+      final fakeServer = FakeNodeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+
+      final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final recoverySecret = await vaultKeyStore.createVault(
+        userId: FakeNodeServer.userId,
+      );
+      recoverySecret.destroy();
+      final syncEngine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(syncEngine.dispose);
+      final filesController = FilesController(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(filesController.dispose);
+      final materializer = SyncFolderMaterializer(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(materializer.dispose);
+
+      final rootDir = await Directory.systemTemp.createTemp(
+        'homebox_verified_local_copy_',
+      );
+      addTearDown(() => rootDir.delete(recursive: true));
+      final sourceDir = await Directory.systemTemp.createTemp(
+        'homebox_verified_local_source_',
+      );
+      addTearDown(() => sourceDir.delete(recursive: true));
+      final sourceFile = File('${sourceDir.path}/note.txt');
+      await sourceFile.writeAsString('already available locally');
+
+      expect(
+        await filesController.uploadFile(sourceFile.path),
+        isTrue,
+        reason: filesController.errorMessage,
+      );
+      final uploaded = filesController.entries.single;
+      await sourceFile.copy('${rootDir.path}/note.txt');
+
+      await materializer.materialize(rootDir.path);
+
+      expect(fakeServer.contentDownloadCount, 0);
+      expect(
+        syncEngine.materializedFiles
+            .getById(uploaded.node.id)
+            ?.contentVersionId,
+        uploaded.node.currentVersionId,
+      );
+      expect(
+        await File('${rootDir.path}/note.txt').readAsString(),
+        'already available locally',
+      );
+    },
+  );
 
   test(
     'materialize cancels an in-flight download when the file moves to Trash',

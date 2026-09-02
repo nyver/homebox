@@ -71,6 +71,13 @@ security:
     protocol_version: 1
 
 uploads:
+  # Mobile clients can select several files in one Upload files action. They
+  # encrypt and transfer those files sequentially; this needs no server-side
+  # batch-upload setting.
+  # Completed client downloads are shown in-app with their file name and
+  # local destination. Notifications are client-only and need no setting.
+  # Windows Files-page uploads are copied into the matching local sync folder
+  # and hash-verified there, avoiding a redundant server download.
   abandoned_after_hours: 24
 
 sync:

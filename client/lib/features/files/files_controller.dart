@@ -57,10 +57,15 @@ final class FileEntry {
 
 /// The outcome of one user-initiated batch of file uploads.
 final class FileUploadBatchResult {
-  const FileUploadBatchResult({required this.succeeded, required this.failed});
+  const FileUploadBatchResult({
+    required this.succeeded,
+    required this.failed,
+    this.successfulPaths = const [],
+  });
 
   final int succeeded;
   final int failed;
+  final List<String> successfulPaths;
   int get total => succeeded + failed;
 }
 
@@ -498,6 +503,7 @@ final class FilesController extends ChangeNotifier {
     _errorMessage = null;
     var succeeded = 0;
     var failed = 0;
+    final successfulPaths = <String>[];
     try {
       final ctx = await _requireContext();
       if (ctx == null) {
@@ -517,6 +523,7 @@ final class FilesController extends ChangeNotifier {
                 _setProgress((index + progress) / uniquePaths.length),
           );
           succeeded++;
+          successfulPaths.add(uniquePaths[index]);
         } catch (e) {
           // Continue so a single unreadable or oversized dropped file does
           // not prevent the rest of the selection from being backed up.
@@ -526,7 +533,11 @@ final class FilesController extends ChangeNotifier {
         }
       }
       await refresh();
-      return FileUploadBatchResult(succeeded: succeeded, failed: failed);
+      return FileUploadBatchResult(
+        succeeded: succeeded,
+        failed: failed,
+        successfulPaths: List.unmodifiable(successfulPaths),
+      );
     } finally {
       _setBusy(false);
     }

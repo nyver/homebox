@@ -11,8 +11,9 @@ bool supportsAndroidSaveDialog(TargetPlatform platform) =>
 abstract interface class AndroidFileSaver {
   /// Prompts the user with the OS "Save As" dialog (defaulting to the
   /// Downloads folder) to choose a destination for the already-decrypted
-  /// file at [sourcePath], suggesting [suggestedName]. Returns the display
-  /// name of where it was saved, or null if the user cancelled.
+  /// file at [sourcePath], suggesting [suggestedName]. Returns a
+  /// human-readable destination location when available, or null if the user
+  /// cancelled.
   Future<String?> saveFile({
     required String sourcePath,
     required String suggestedName,

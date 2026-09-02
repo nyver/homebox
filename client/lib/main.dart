@@ -22,6 +22,7 @@ import 'core/storage/local_database.dart';
 import 'core/util/local_path.dart';
 import 'features/device/device_setup_controller.dart';
 import 'features/device/device_provisioning_controller.dart';
+import 'features/files/download_notification_controller.dart';
 import 'features/files/files_controller.dart';
 import 'features/server/server_connection_controller.dart';
 import 'features/sync/sync_engine.dart';
@@ -165,6 +166,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final AndroidFileSharer _androidFileSharer;
   late final AndroidSyncFolder _androidSyncFolder;
   late final WindowsSyncFolder _windowsSyncFolder;
+  late final DownloadNotificationController _downloadNotifications;
   late final AppLocaleController _localeController;
   late final bool _ownsLocaleController;
   BiometricAuthenticator? _biometricAuthenticator;
@@ -218,6 +220,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         widget.androidFileSharer ?? MethodChannelAndroidFileSharer();
     _androidSyncFolder =
         widget.androidSyncFolder ?? MethodChannelAndroidSyncFolder();
+    _downloadNotifications = DownloadNotificationController();
     _windowsSyncFolder = WindowsSyncFolder();
     _ownsLocaleController = widget.localeController == null;
     _localeController = widget.localeController ?? AppLocaleController();
@@ -322,6 +325,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
           vaultKeyStore: _vaultKeyStore,
           syncEngine: engine,
           androidSyncFolder: _androidSyncFolder,
+          onFileMaterialized: _showDownloadCompletionNotification,
         );
         final uploader = LocalFolderUploader(
           serverConnection: _serverConnectionController,
@@ -668,6 +672,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _filesController?.dispose();
     _syncFolderMaterializer?.dispose();
     _localFolderUploader?.dispose();
+    _downloadNotifications.dispose();
     _syncFolderWatcher.dispose();
     _syncEngine?.dispose();
     _vaultSetupController.dispose();
@@ -841,113 +846,248 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       onPullToRefresh: defaultTargetPlatform == TargetPlatform.android
           ? _refreshFromServer
           : null,
+      onDownloadCompleted: _showDownloadCompletionNotification,
     );
     if (!wideLayout) {
-      return Scaffold(
-        appBar: AppBar(
-          title: const Text('HomeBox'),
-          actions: [
-            // Scrolls instead of overflowing: three status indicators can
-            // together be wider than a narrow phone's AppBar leaves room
-            // for once a long sync-error tooltip or the full vault chip is
-            // in the mix.
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: _headerStatusIndicators(dense: true, spacing: 8),
+      return _withDownloadNotifications(
+        Scaffold(
+          appBar: AppBar(
+            title: const Text('HomeBox'),
+            actions: [
+              // Scrolls instead of overflowing: three status indicators can
+              // together be wider than a narrow phone's AppBar leaves room
+              // for once a long sync-error tooltip or the full vault chip is
+              // in the mix.
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: _headerStatusIndicators(dense: true, spacing: 8),
+                ),
               ),
-            ),
-          ],
-        ),
-        body: content,
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: _section.index,
-          onDestinationSelected: (index) =>
-              setState(() => _section = AppSection.values[index]),
-          destinations: [
-            NavigationDestination(
-              icon: Icon(Icons.folder_outlined),
-              selectedIcon: Icon(Icons.folder),
-              label: _localized(context, en: 'Files', ru: 'Файлы'),
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.sync_outlined),
-              selectedIcon: Icon(Icons.sync),
-              label: _localized(context, en: 'Sync', ru: 'Синхронизация'),
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.settings_outlined),
-              selectedIcon: Icon(Icons.settings),
-              label: _localized(context, en: 'Settings', ru: 'Настройки'),
-            ),
-          ],
+            ],
+          ),
+          body: content,
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: _section.index,
+            onDestinationSelected: (index) =>
+                setState(() => _section = AppSection.values[index]),
+            destinations: [
+              NavigationDestination(
+                icon: Icon(Icons.folder_outlined),
+                selectedIcon: Icon(Icons.folder),
+                label: _localized(context, en: 'Files', ru: 'Файлы'),
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.sync_outlined),
+                selectedIcon: Icon(Icons.sync),
+                label: _localized(context, en: 'Sync', ru: 'Синхронизация'),
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.settings_outlined),
+                selectedIcon: Icon(Icons.settings),
+                label: _localized(context, en: 'Settings', ru: 'Настройки'),
+              ),
+            ],
+          ),
         ),
       );
     }
-    return Scaffold(
-      body: SafeArea(
-        child: Row(
-          children: [
-            NavigationRail(
-              selectedIndex: _section.index,
-              labelType: NavigationRailLabelType.all,
-              onDestinationSelected: (index) =>
-                  setState(() => _section = AppSection.values[index]),
-              leading: const Padding(
-                padding: EdgeInsets.symmetric(vertical: 20),
-                child: Icon(Icons.inventory_2_outlined, size: 32),
-              ),
-              destinations: [
-                NavigationRailDestination(
-                  icon: Icon(Icons.folder_outlined),
-                  selectedIcon: Icon(Icons.folder),
-                  label: Text(_localized(context, en: 'Files', ru: 'Файлы')),
+    return _withDownloadNotifications(
+      Scaffold(
+        body: SafeArea(
+          child: Row(
+            children: [
+              NavigationRail(
+                selectedIndex: _section.index,
+                labelType: NavigationRailLabelType.all,
+                onDestinationSelected: (index) =>
+                    setState(() => _section = AppSection.values[index]),
+                leading: const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 20),
+                  child: Icon(Icons.inventory_2_outlined, size: 32),
                 ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.sync_outlined),
-                  selectedIcon: Icon(Icons.sync),
-                  label: Text(
-                    _localized(context, en: 'Sync', ru: 'Синхронизация'),
+                destinations: [
+                  NavigationRailDestination(
+                    icon: Icon(Icons.folder_outlined),
+                    selectedIcon: Icon(Icons.folder),
+                    label: Text(_localized(context, en: 'Files', ru: 'Файлы')),
                   ),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.settings_outlined),
-                  selectedIcon: Icon(Icons.settings),
-                  label: Text(
-                    _localized(context, en: 'Settings', ru: 'Настройки'),
-                  ),
-                ),
-              ],
-            ),
-            const VerticalDivider(width: 1),
-            Expanded(
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(32, 20, 32, 8),
-                    child: Row(
-                      children: [
-                        Text(
-                          'HomeBox',
-                          style: Theme.of(context).textTheme.headlineSmall,
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: _headerStatusIndicators(
-                            dense: false,
-                            spacing: 12,
-                          ),
-                        ),
-                      ],
+                  NavigationRailDestination(
+                    icon: Icon(Icons.sync_outlined),
+                    selectedIcon: Icon(Icons.sync),
+                    label: Text(
+                      _localized(context, en: 'Sync', ru: 'Синхронизация'),
                     ),
                   ),
-                  const Divider(height: 1),
-                  Expanded(child: content),
+                  NavigationRailDestination(
+                    icon: Icon(Icons.settings_outlined),
+                    selectedIcon: Icon(Icons.settings),
+                    label: Text(
+                      _localized(context, en: 'Settings', ru: 'Настройки'),
+                    ),
+                  ),
                 ],
               ),
+              const VerticalDivider(width: 1),
+              Expanded(
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(32, 20, 32, 8),
+                      child: Row(
+                        children: [
+                          Text(
+                            'HomeBox',
+                            style: Theme.of(context).textTheme.headlineSmall,
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: _headerStatusIndicators(
+                              dense: false,
+                              spacing: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(child: content),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showDownloadCompletionNotification({
+    required String fileName,
+    required String location,
+  }) {
+    _downloadNotifications.show(fileName: fileName, location: location);
+  }
+
+  Widget _withDownloadNotifications(Widget child) => Stack(
+    fit: StackFit.expand,
+    children: [
+      child,
+      _DownloadNotificationStack(controller: _downloadNotifications),
+    ],
+  );
+}
+
+/// An overlay rather than a [SnackBar] queue, so separate completed
+/// downloads remain visible together and each can be dismissed on its own.
+final class _DownloadNotificationStack extends StatelessWidget {
+  const _DownloadNotificationStack({required this.controller});
+
+  final DownloadNotificationController controller;
+
+  @override
+  Widget build(BuildContext context) => Positioned.fill(
+    child: AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final notifications = controller.notifications;
+        if (notifications.isEmpty) return const SizedBox.shrink();
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 560),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: notifications
+                      .map(
+                        (notification) => Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: _DownloadCompletionCard(
+                            notification: notification,
+                            onDismiss: () =>
+                                controller.dismiss(notification.id),
+                          ),
+                        ),
+                      )
+                      .toList(growable: false),
+                ),
+              ),
             ),
-          ],
+          ),
+        );
+      },
+    ),
+  );
+}
+
+final class _DownloadCompletionCard extends StatelessWidget {
+  const _DownloadCompletionCard({
+    required this.notification,
+    required this.onDismiss,
+  });
+
+  final DownloadCompletionNotification notification;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final completedLabel = _localized(
+      context,
+      en: 'Download complete',
+      ru: 'Загрузка завершена',
+    );
+    final savedToLabel = _localized(context, en: 'Saved to', ru: 'Сохранено в');
+    final dismissLabel = _localized(
+      context,
+      en: 'Dismiss download notification',
+      ru: 'Закрыть уведомление о загрузке',
+    );
+    return Semantics(
+      container: true,
+      label:
+          '$completedLabel: ${notification.fileName}. '
+          '$savedToLabel ${notification.location}.',
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+          child: Row(
+            children: [
+              const Icon(Icons.download_done_outlined),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(completedLabel, style: textTheme.titleSmall),
+                    Text(
+                      notification.fileName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: textTheme.bodyMedium,
+                    ),
+                    Text(
+                      '$savedToLabel ${notification.location}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: onDismiss,
+                icon: const Icon(Icons.close),
+                tooltip: dismissLabel,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1237,6 +1377,7 @@ class _SectionContent extends StatelessWidget {
     required this.androidSyncFolder,
     required this.localeController,
     required this.onPullToRefresh,
+    required this.onDownloadCompleted,
   });
 
   final AppSection section;
@@ -1263,6 +1404,8 @@ class _SectionContent extends StatelessWidget {
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController localeController;
   final Future<void> Function()? onPullToRefresh;
+  final void Function({required String fileName, required String location})
+  onDownloadCompleted;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -1274,6 +1417,7 @@ class _SectionContent extends StatelessWidget {
       syncFolder: syncFolder,
       androidSyncFolder: androidSyncFolder,
       onPullToRefresh: onPullToRefresh,
+      onDownloadCompleted: onDownloadCompleted,
     ),
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,
@@ -1506,6 +1650,7 @@ final class _FilesSection extends StatefulWidget {
     required this.syncFolder,
     required this.androidSyncFolder,
     required this.onPullToRefresh,
+    required this.onDownloadCompleted,
   });
 
   final FilesController? controller;
@@ -1515,6 +1660,8 @@ final class _FilesSection extends StatefulWidget {
   final String? syncFolder;
   final AndroidSyncFolder? androidSyncFolder;
   final Future<void> Function()? onPullToRefresh;
+  final void Function({required String fileName, required String location})
+  onDownloadCompleted;
 
   @override
   State<_FilesSection> createState() => _FilesSectionState();
@@ -1572,12 +1719,15 @@ final class _FilesSectionState extends State<_FilesSection> {
     }
   }
 
-  Future<void> _uploadFile(BuildContext context) async {
+  Future<void> _uploadFiles(BuildContext context) async {
     final controller = widget.controller;
     if (controller == null) return;
-    final file = await openFile();
-    if (file == null || !context.mounted) return;
-    await _uploadPathsWithOverwritePrompt(context, [file.path]);
+    final files = await openFiles();
+    if (files.isEmpty || !context.mounted) return;
+    await _uploadPathsWithOverwritePrompt(
+      context,
+      files.map((file) => file.path).toList(growable: false),
+    );
   }
 
   /// Uploads [paths] into the currently open folder, asking before silently
@@ -1591,6 +1741,10 @@ final class _FilesSectionState extends State<_FilesSection> {
   ) async {
     final controller = widget.controller;
     if (controller == null || paths.isEmpty) return;
+    // uploadFiles captures this same folder before awaiting work. Preserve
+    // the readable path now too, so a completed upload is copied into the
+    // equivalent sync-folder location even if the user navigates meanwhile.
+    final syncFolderRelativePath = controller.breadcrumbNames.join('/');
     final toCreate = <String>[];
     final toReplace = <(FileEntry, String)>[];
     for (final path in paths) {
@@ -1617,28 +1771,77 @@ final class _FilesSectionState extends State<_FilesSection> {
 
     var succeeded = 0;
     var failed = 0;
+    var syncFolderCopyFailures = 0;
     if (toCreate.isNotEmpty) {
       final result = await controller.uploadFiles(toCreate);
       succeeded += result.succeeded;
       failed += result.failed;
+      for (final path in result.successfulPaths) {
+        if (!await _copyUploadedFileToSyncFolder(
+          path,
+          syncFolderRelativePath,
+        )) {
+          syncFolderCopyFailures++;
+        }
+      }
     }
     for (final (entry, path) in toReplace) {
       if (await controller.replaceFileContent(entry, path)) {
         succeeded++;
+        if (!await _copyUploadedFileToSyncFolder(
+          path,
+          syncFolderRelativePath,
+        )) {
+          syncFolderCopyFailures++;
+        }
       } else {
         failed++;
       }
     }
 
     if (!context.mounted || (succeeded == 0 && failed == 0)) return;
-    final message = switch ((succeeded, failed)) {
+    var message = switch ((succeeded, failed)) {
       (0, final f) => controller.errorMessage ?? 'Could not upload $f file(s).',
       (final s, 0) => 'Encrypted and uploaded $s file(s).',
       (final s, final f) =>
         'Uploaded $s file(s); $f file(s) could not be uploaded.',
     };
+    if (syncFolderCopyFailures > 0) {
+      message +=
+          ' The sync folder could not be updated for $syncFolderCopyFailures file(s); HomeBox will download them from the server instead.';
+    }
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Copies a freshly uploaded Windows file into the matching sync-folder
+  /// location. The materializer later verifies its hash before recognizing
+  /// the copy, preserving the server as the authoritative source on changes.
+  Future<bool> _copyUploadedFileToSyncFolder(
+    String sourcePath,
+    String relativeParentPath,
+  ) async {
+    final syncFolder = widget.syncFolder;
+    if (defaultTargetPlatform != TargetPlatform.windows || syncFolder == null) {
+      return true;
+    }
+    final source = File(sourcePath);
+    final destination = File(
+      relativeParentPath.isEmpty
+          ? '$syncFolder/${basenameOfLocalPath(sourcePath)}'
+          : '$syncFolder/$relativeParentPath/${basenameOfLocalPath(sourcePath)}',
+    );
+    if (source.absolute.path.toLowerCase() ==
+        destination.absolute.path.toLowerCase()) {
+      return true;
+    }
+    try {
+      await destination.parent.create(recursive: true);
+      await source.copy(destination.path);
+      return true;
+    } on FileSystemException {
+      return false;
+    }
   }
 
   Future<void> _downloadFile(BuildContext context, FileEntry entry) async {
@@ -1657,15 +1860,14 @@ final class _FilesSectionState extends State<_FilesSection> {
     final destination = await getSaveLocation(suggestedName: entry.name);
     if (destination == null) return;
     final ok = await controller.downloadFile(entry, destination.path);
-    if (context.mounted) {
+    if (ok) {
+      widget.onDownloadCompleted(
+        fileName: entry.name,
+        location: destination.path,
+      );
+    } else if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            ok
-                ? 'Saved to ${destination.path}'
-                : (controller.errorMessage ?? 'Download failed.'),
-          ),
-        ),
+        SnackBar(content: Text(controller.errorMessage ?? 'Download failed.')),
       );
     }
   }
@@ -1788,25 +1990,28 @@ final class _FilesSectionState extends State<_FilesSection> {
       unawaited(tempFile.delete().catchError((_) => tempFile));
       return;
     }
-    String? message;
     try {
       final destination = await saver.saveFile(
         sourcePath: tempFile.path,
         suggestedName: entry.name,
         mimeType: entry.metadata.mimeType,
       );
-      message = destination == null ? null : 'Saved to Downloads.';
+      if (destination != null) {
+        widget.onDownloadCompleted(fileName: entry.name, location: destination);
+      }
     } catch (_) {
       // The file was already decrypted successfully at this point — only
       // handing it to the chosen destination failed (e.g. the device ran
       // out of storage), distinct from a decrypt/download failure above.
-      message = 'Could not save to the selected location.';
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not save to the selected location.'),
+          ),
+        );
+      }
     } finally {
       unawaited(tempFile.delete().catchError((_) => tempFile));
-    }
-    if (context.mounted && message != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -2077,9 +2282,9 @@ final class _FilesSectionState extends State<_FilesSection> {
                     IconButton(
                       onPressed: controller.busy
                           ? null
-                          : () => _uploadFile(context),
+                          : () => _uploadFiles(context),
                       icon: const Icon(Icons.upload_outlined),
-                      tooltip: 'Upload',
+                      tooltip: 'Upload files',
                     ),
                   ] else ...[
                     OutlinedButton.icon(
@@ -2100,9 +2305,9 @@ final class _FilesSectionState extends State<_FilesSection> {
                     FilledButton.icon(
                       onPressed: controller.busy
                           ? null
-                          : () => _uploadFile(context),
+                          : () => _uploadFiles(context),
                       icon: const Icon(Icons.upload_outlined),
-                      label: const Text('Upload'),
+                      label: const Text('Upload files'),
                     ),
                   ],
                   if (controller.busy)
