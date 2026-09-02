@@ -83,7 +83,8 @@ uploads:
 sync:
   # Windows clients can start an immediate local reconciliation from a native
   # filesystem event and pause new passes without cancelling in-flight writes;
-  # notification-area show/hide and opt-in Windows autostart are client-local.
+  # notification-area show/hide, opt-in Windows autostart, and Explorer's
+  # "Open file location" action for materialized files are client-local.
   # this server feed remains the authoritative remote source.
   # Default and maximum number of changes returned per GET /api/v1/sync/changes page.
   page_size: 500

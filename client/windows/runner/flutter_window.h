@@ -31,6 +31,7 @@ class FlutterWindow : public Win32Window {
   void ShowFromTray();
   bool HasOpenableSyncFolder() const;
   bool OpenSyncFolder();
+  bool OpenFileLocation(const std::wstring& file_path);
   void ConfigurePlatformChannel();
   void HandleFileDrop(HDROP drop);
   bool IsAutostartEnabled() const;

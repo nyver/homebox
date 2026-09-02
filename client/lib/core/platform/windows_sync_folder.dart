@@ -23,4 +23,21 @@ final class WindowsSyncFolder {
       return false;
     }
   }
+
+  /// Opens Explorer with the materialized [filePath] selected.
+  ///
+  /// The native runner verifies that the path still names a regular file, as
+  /// the sync folder can change between rendering the Files menu and tapping
+  /// this action.
+  Future<bool> openFileLocation(String filePath) async {
+    if (defaultTargetPlatform != TargetPlatform.windows || filePath.isEmpty) {
+      return false;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('openFileLocation', filePath) ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
 }

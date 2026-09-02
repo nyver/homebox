@@ -1668,6 +1668,8 @@ final class _FilesSection extends StatefulWidget {
 }
 
 final class _FilesSectionState extends State<_FilesSection> {
+  final WindowsSyncFolder _windowsSyncFolder = WindowsSyncFolder();
+
   @override
   void initState() {
     super.initState();
@@ -1965,6 +1967,34 @@ final class _FilesSectionState extends State<_FilesSection> {
     await _downloadFile(context, entry);
   }
 
+  Future<void> _openFileLocation(BuildContext context, FileEntry entry) async {
+    final controller = widget.controller;
+    final syncFolder = widget.syncFolder;
+    final relativePath = controller?.materializedRelativePath(entry.node.id);
+    if (defaultTargetPlatform != TargetPlatform.windows ||
+        syncFolder == null ||
+        relativePath == null) {
+      return;
+    }
+
+    final opened = await _windowsSyncFolder.openFileLocation(
+      '$syncFolder/$relativePath',
+    );
+    if (!opened && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _localized(
+              context,
+              en: 'HomeBox could not open the file location.',
+              ru: 'HomeBox не удалось открыть расположение файла.',
+            ),
+          ),
+        ),
+      );
+    }
+  }
+
   /// Android's `file_selector` has no save-dialog implementation, so this
   /// decrypts to a private temp file first, then hands that off to the OS
   /// "Save As" picker (defaulting to Downloads) via [AndroidFileSaver] —
@@ -2164,6 +2194,11 @@ final class _FilesSectionState extends State<_FilesSection> {
             separatorBuilder: (context, _) => const Divider(height: 1),
             itemBuilder: (context, index) {
               final entry = controller.entries[index];
+              final canOpenFileLocation =
+                  !entry.isDirectory &&
+                  defaultTargetPlatform == TargetPlatform.windows &&
+                  widget.syncFolder != null &&
+                  controller.materializedRelativePath(entry.node.id) != null;
               return ListTile(
                 leading: entry.isDirectory
                     ? _folderListIcon
@@ -2179,6 +2214,7 @@ final class _FilesSectionState extends State<_FilesSection> {
                   tooltip: 'More actions',
                   onSelected: (value) => switch (value) {
                     'save_as' => _downloadFile(context, entry),
+                    'open_file_location' => _openFileLocation(context, entry),
                     'share' => _shareFile(context, entry),
                     'replace' => _replaceContent(context, entry),
                     'rename' => _renameEntry(context, entry),
@@ -2197,6 +2233,17 @@ final class _FilesSectionState extends State<_FilesSection> {
                       const PopupMenuItem(
                         value: 'save_as',
                         child: Text('Save as…'),
+                      ),
+                    if (canOpenFileLocation)
+                      PopupMenuItem(
+                        value: 'open_file_location',
+                        child: Text(
+                          _localized(
+                            context,
+                            en: 'Open file location',
+                            ru: 'Открыть расположение',
+                          ),
+                        ),
                       ),
                     if (!entry.isDirectory)
                       const PopupMenuItem(

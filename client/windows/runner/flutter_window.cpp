@@ -228,6 +228,21 @@ bool FlutterWindow::OpenSyncFolder() {
          32;
 }
 
+bool FlutterWindow::OpenFileLocation(const std::wstring& file_path) {
+  if (file_path.empty()) return false;
+  const DWORD attributes = GetFileAttributes(file_path.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+    return false;
+  }
+
+  const std::wstring arguments = L"/select,\"" + file_path + L"\"";
+  return reinterpret_cast<intptr_t>(
+             ShellExecute(GetHandle(), L"open", L"explorer.exe",
+                          arguments.c_str(), nullptr, SW_SHOWNORMAL)) >
+         32;
+}
+
 void FlutterWindow::ConfigurePlatformChannel() {
   platform_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       flutter_controller_->engine()->messenger(), "homebox/windows",
@@ -273,6 +288,22 @@ void FlutterWindow::ConfigurePlatformChannel() {
         }
         if (call.method_name() == "openSyncFolder") {
           result->Success(flutter::EncodableValue(OpenSyncFolder()));
+          return;
+        }
+        if (call.method_name() == "openFileLocation") {
+          const auto* path = call.arguments() == nullptr
+                                 ? nullptr
+                                 : std::get_if<std::string>(call.arguments());
+          if (path == nullptr) {
+            result->Error("invalid-argument", "Expected a UTF-8 file path.");
+            return;
+          }
+          const std::wstring wide_path = WideFromUtf8(*path);
+          if (path->empty() || wide_path.empty()) {
+            result->Error("invalid-argument", "File path is not valid UTF-8.");
+            return;
+          }
+          result->Success(flutter::EncodableValue(OpenFileLocation(wide_path)));
           return;
         }
         result->NotImplemented();
