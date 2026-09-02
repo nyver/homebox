@@ -2305,14 +2305,6 @@ final class _FilesSectionState extends State<_FilesSection> {
                       label: const Text('Upload files'),
                     ),
                   ],
-                  if (controller.busy)
-                    SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        value: controller.progress,
-                      ),
-                    ),
                 ],
               ),
               if (defaultTargetPlatform == TargetPlatform.windows) ...[
