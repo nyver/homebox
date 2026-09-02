@@ -2116,11 +2116,6 @@ final class _FilesSectionState extends State<_FilesSection> {
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) {
-        final transferProgressPercent = _transferProgressPercent(controller);
-        final transferProgressLabel = _transferProgressLabel(
-          controller.transferDirection,
-          transferProgressPercent,
-        );
         // Whichever message/spinner widget a non-list state below renders,
         // it has no Scrollable of its own, so pull-to-refresh (below) would
         // have nothing to detect the drag gesture against — wrapping it in
@@ -2317,12 +2312,6 @@ final class _FilesSectionState extends State<_FilesSection> {
                         strokeWidth: 2,
                         value: controller.progress,
                       ),
-                    ),
-                  if (controller.busy)
-                    Semantics(
-                      label: transferProgressLabel,
-                      excludeSemantics: true,
-                      child: Text('$transferProgressPercent%'),
                     ),
                 ],
               ),
