@@ -2,7 +2,6 @@
 
 #include <optional>
 #include <shellapi.h>
-#include <shlobj.h>
 #include <string>
 #include <vector>
 
@@ -237,22 +236,17 @@ bool FlutterWindow::OpenFileLocation(const std::wstring& file_path) {
     return false;
   }
 
-  // The Explorer command-line parser does not reliably preserve /select
-  // arguments supplied through ShellExecute. A full file PIDL with cidl=0
-  // makes the Shell API open the item's parent folder and select it directly.
-  const HRESULT initialize_result =
-      CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  const bool uninitialize = SUCCEEDED(initialize_result);
-  PIDLIST_ABSOLUTE file_pidl = ILCreateFromPath(file_path.c_str());
-  if (file_pidl == nullptr) {
-    if (uninitialize) CoUninitialize();
-    return false;
-  }
-  const HRESULT open_result =
-      SHOpenFolderAndSelectItems(file_pidl, 0, nullptr, 0);
-  ILFree(file_pidl);
-  if (uninitialize) CoUninitialize();
-  return SUCCEEDED(open_result);
+  const std::wstring::size_type separator = file_path.find_last_of(L"\\/");
+  if (separator == std::wstring::npos) return false;
+  const std::wstring folder_path =
+      separator == 2 && file_path.size() > 2 && file_path[1] == L':'
+          ? file_path.substr(0, 3)
+          : file_path.substr(0, separator);
+  if (folder_path.empty()) return false;
+  return reinterpret_cast<intptr_t>(
+             ShellExecute(GetHandle(), L"open", folder_path.c_str(), nullptr,
+                          nullptr, SW_SHOWNORMAL)) >
+         32;
 }
 
 void FlutterWindow::ConfigurePlatformChannel() {

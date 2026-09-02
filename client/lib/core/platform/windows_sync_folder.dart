@@ -24,7 +24,7 @@ final class WindowsSyncFolder {
     }
   }
 
-  /// Opens Explorer with the materialized [filePath] selected.
+  /// Opens Explorer at the directory containing the materialized [filePath].
   ///
   /// The native runner verifies that the path still names a regular file, as
   /// the sync folder can change between rendering the Files menu and tapping

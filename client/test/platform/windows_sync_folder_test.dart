@@ -14,7 +14,7 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  test('opens Explorer with the requested materialized file selected', () async {
+  test('opens the requested materialized file location', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     String? requestedPath;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
