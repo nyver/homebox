@@ -15,6 +15,17 @@ abstract interface class AndroidFileSharer {
     required String suggestedName,
     String? mimeType,
   });
+
+  /// Opens [sourcePath] with an installed viewer app via `ACTION_VIEW`,
+  /// showing the system chooser when more than one app can handle it. Same
+  /// cache-directory boundary as [shareFile]. Throws [PlatformException]
+  /// (`open_failed`) when no app can open it, so callers can fall back to
+  /// "Save as".
+  Future<bool> openFile({
+    required String sourcePath,
+    required String suggestedName,
+    String? mimeType,
+  });
 }
 
 final class MethodChannelAndroidFileSharer implements AndroidFileSharer {
@@ -33,4 +44,17 @@ final class MethodChannelAndroidFileSharer implements AndroidFileSharer {
     'suggestedName': suggestedName,
     'mimeType': mimeType ?? 'application/octet-stream',
   });
+
+  @override
+  Future<bool> openFile({
+    required String sourcePath,
+    required String suggestedName,
+    String? mimeType,
+  }) async =>
+      await _channel.invokeMethod<bool>('openFile', {
+        'sourcePath': sourcePath,
+        'suggestedName': suggestedName,
+        'mimeType': mimeType ?? 'application/octet-stream',
+      }) ??
+      false;
 }

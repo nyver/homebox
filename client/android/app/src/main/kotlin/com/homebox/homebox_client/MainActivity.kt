@@ -84,7 +84,7 @@ class MainActivity : FlutterFragmentActivity() {
             }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, fileShareChannel)
             .setMethodCallHandler { call, result ->
-                if (call.method != "shareFile") {
+                if (call.method != "shareFile" && call.method != "openFile") {
                     result.notImplemented()
                     return@setMethodCallHandler
                 }
@@ -97,26 +97,49 @@ class MainActivity : FlutterFragmentActivity() {
                 }
                 val sourceFile = File(sourcePath)
                 if (!isShareableCacheFile(sourceFile)) {
-                    result.error("invalid_source", "The shared file must be in HomeBox's temporary cache.", null)
+                    result.error("invalid_source", "The file must be in HomeBox's temporary cache.", null)
                     return@setMethodCallHandler
                 }
-                try {
-                    val fileUri = FileProvider.getUriForFile(
-                        this,
-                        "$packageName.shared_files",
-                        sourceFile,
-                    )
-                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                        type = mimeType
-                        putExtra(Intent.EXTRA_STREAM, fileUri)
-                        putExtra(Intent.EXTRA_TITLE, suggestedName)
-                        clipData = ClipData.newRawUri(suggestedName, fileUri)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                if (call.method == "shareFile") {
+                    try {
+                        val fileUri = FileProvider.getUriForFile(
+                            this,
+                            "$packageName.shared_files",
+                            sourceFile,
+                        )
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = mimeType
+                            putExtra(Intent.EXTRA_STREAM, fileUri)
+                            putExtra(Intent.EXTRA_TITLE, suggestedName)
+                            clipData = ClipData.newRawUri(suggestedName, fileUri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(Intent.createChooser(shareIntent, "Share file"))
+                        result.success(null)
+                    } catch (e: Exception) {
+                        result.error("share_failed", e.message, null)
                     }
-                    startActivity(Intent.createChooser(shareIntent, "Share file"))
-                    result.success(null)
-                } catch (e: Exception) {
-                    result.error("share_failed", e.message, null)
+                } else {
+                    // Lets a not-yet-materialized file (or a locally mirrored one the
+                    // sync-folder `openFile` handler could not open) be viewed with an
+                    // installed app via ACTION_VIEW, instead of only ever offering
+                    // "Save as" for it.
+                    try {
+                        val fileUri = FileProvider.getUriForFile(
+                            this,
+                            "$packageName.shared_files",
+                            sourceFile,
+                        )
+                        val openIntent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(fileUri, mimeType)
+                            clipData = ClipData.newRawUri(suggestedName, fileUri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(Intent.createChooser(openIntent, "Open file"))
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("open_failed", e.message, null)
+                    }
                 }
             }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, syncFolderChannel)

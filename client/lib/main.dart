@@ -1875,37 +1875,16 @@ final class _FilesSectionState extends State<_FilesSection> {
   }
 
   Future<void> _shareFile(BuildContext context, FileEntry entry) async {
-    final controller = widget.controller;
     final sharer = widget.androidFileSharer;
-    if (controller == null || sharer == null || entry.isDirectory) return;
+    if (sharer == null || entry.isDirectory) return;
 
     try {
-      final tempDir = await getTemporaryDirectory();
-      final shareRoot = Directory('${tempDir.path}/homebox_shared');
-      await _deleteExpiredSharedFiles(shareRoot);
-      final shareDirectory = Directory(
-        '${shareRoot.path}/${entry.node.id}_${DateTime.now().microsecondsSinceEpoch}',
+      final sharedFile = await _prepareTempFileForHandoff(
+        context,
+        entry,
+        'Could not prepare the file for sharing.',
       );
-      await shareDirectory.create(recursive: true);
-      // SensitiveNodeMetadata validates file names, so this is a single safe
-      // path component. Keeping the original name helps recipient apps infer
-      // the extension in addition to the MIME type supplied below.
-      final sharedFile = File('${shareDirectory.path}/${entry.name}');
-      final downloaded = await controller.downloadFile(entry, sharedFile.path);
-      if (!downloaded) {
-        await shareDirectory.delete(recursive: true);
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                controller.errorMessage ??
-                    'Could not prepare the file for sharing.',
-              ),
-            ),
-          );
-        }
-        return;
-      }
+      if (sharedFile == null) return;
       try {
         await sharer.shareFile(
           sourcePath: sharedFile.path,
@@ -1913,7 +1892,7 @@ final class _FilesSectionState extends State<_FilesSection> {
           mimeType: entry.metadata.mimeType,
         );
       } catch (_) {
-        await shareDirectory.delete(recursive: true);
+        await sharedFile.parent.delete(recursive: true);
         rethrow;
       }
     } catch (_) {
@@ -1923,6 +1902,43 @@ final class _FilesSectionState extends State<_FilesSection> {
         );
       }
     }
+  }
+
+  /// Downloads and decrypts [entry] into a fresh directory under this app's
+  /// share cache — the same sandboxed boundary [AndroidFileSharer] verifies
+  /// before granting another app a read URI — for hand-off to either the
+  /// share sheet ([_shareFile]) or an installed viewer
+  /// ([_openOrDownloadFile]). Returns null on failure, having already shown
+  /// [failureMessage] (or the controller's own error) and cleaned up.
+  Future<File?> _prepareTempFileForHandoff(
+    BuildContext context,
+    FileEntry entry,
+    String failureMessage,
+  ) async {
+    final controller = widget.controller;
+    if (controller == null) return null;
+    final tempDir = await getTemporaryDirectory();
+    final shareRoot = Directory('${tempDir.path}/homebox_shared');
+    await _deleteExpiredSharedFiles(shareRoot);
+    final shareDirectory = Directory(
+      '${shareRoot.path}/${entry.node.id}_${DateTime.now().microsecondsSinceEpoch}',
+    );
+    await shareDirectory.create(recursive: true);
+    // SensitiveNodeMetadata validates file names, so this is a single safe
+    // path component. Keeping the original name helps recipient apps infer
+    // the extension in addition to the MIME type supplied separately.
+    final sharedFile = File('${shareDirectory.path}/${entry.name}');
+    final downloaded = await controller.downloadFile(entry, sharedFile.path);
+    if (!downloaded) {
+      await shareDirectory.delete(recursive: true);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(controller.errorMessage ?? failureMessage)),
+        );
+      }
+      return null;
+    }
+    return sharedFile;
   }
 
   Future<void> _deleteExpiredSharedFiles(Directory shareRoot) async {
@@ -1959,10 +1975,36 @@ final class _FilesSectionState extends State<_FilesSection> {
         );
         if (opened) return;
       } on PlatformException {
-        // If an external app cannot open the mirrored document, fall back to
-        // Save as, which is still available from this same tap.
+        // If an external app cannot open the mirrored document, fall through
+        // to the temp-file open path below.
       }
     }
+    if (!context.mounted) return;
+
+    // Not (yet) materialized to a local sync folder, so there is no document
+    // to open directly. Download a temp copy — same as _shareFile does for
+    // the share sheet — and hand it to an installed viewer via ACTION_VIEW,
+    // instead of jumping straight to "Save as" for every unsynced tap.
+    final sharer = widget.androidFileSharer;
+    if (sharer != null) {
+      final tempFile = await _prepareTempFileForHandoff(
+        context,
+        entry,
+        'Could not open the file.',
+      );
+      if (tempFile == null) return;
+      try {
+        final opened = await sharer.openFile(
+          sourcePath: tempFile.path,
+          suggestedName: entry.name,
+          mimeType: entry.metadata.mimeType,
+        );
+        if (opened) return;
+      } on PlatformException {
+        // No installed app can open this file type; fall back to Save as.
+      }
+    }
+
     if (!context.mounted) return;
     await _downloadFile(context, entry);
   }
