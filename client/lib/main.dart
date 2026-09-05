@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'core/e2ee/account_identity.dart';
 import 'core/e2ee/device_identity.dart';
 import 'core/e2ee/vault_key_store.dart';
 import 'core/localization/app_locale_controller.dart';
@@ -2926,27 +2927,65 @@ final class _DeviceProvisioningCard extends StatelessWidget {
       ),
     );
     if (!context.mounted || target == null) return;
+    final targetFingerprint = await devicePublicKeyFingerprint(
+      target.publicKey,
+    );
+    if (!context.mounted) return;
+    var fingerprintVerified = false;
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Approve this device?'),
-        content: Text(
-          'HomeBox will encrypt this vault key for ${target.name}. Verify that this is the device you just signed in on.',
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Verify and approve device'),
+          content: SizedBox(
+            width: 460,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'On ${target.name}, open Settings → This device. Compare the full pairing fingerprint before sharing the vault key.',
+                ),
+                const SizedBox(height: 12),
+                SelectableText(
+                  targetFingerprint,
+                  style: const TextStyle(fontFamily: 'monospace'),
+                ),
+                const SizedBox(height: 12),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: fingerprintVerified,
+                  onChanged: (value) => setDialogState(
+                    () => fingerprintVerified = value ?? false,
+                  ),
+                  title: const Text(
+                    'The fingerprint exactly matches the new device',
+                  ),
+                  controlAffinity: ListTileControlAffinity.leading,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: fingerprintVerified
+                  ? () => Navigator.pop(context, true)
+                  : null,
+              child: const Text('Sign and approve'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Approve'),
-          ),
-        ],
       ),
     );
     if (confirmed != true) return;
-    final approved = await controller.provisionDevice(target);
+    final approved = await controller.provisionDevice(
+      target,
+      fingerprintVerified: fingerprintVerified,
+    );
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(

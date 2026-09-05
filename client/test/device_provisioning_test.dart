@@ -30,6 +30,7 @@ void main() {
       recipientPublicKey: recipientPublicKey,
     );
     final encoded = envelope.encode();
+    expect(envelope.protocolVersion, homeBoxLegacyDeviceProvisioningVersion);
     expect(encoded.length, DeviceProvisioningEnvelope.encodedLength);
     expect(_contains(encoded, vaultKeyBytes), isFalse);
 
@@ -44,6 +45,53 @@ void main() {
     opened.destroy();
     vaultKey.destroy();
     recipient.destroy();
+  });
+
+  test('protocol v2 cryptographically binds the device certificate', () async {
+    final recipient = await keyExchange.newKeyPair();
+    final vaultKey = SecretKeyData(List<int>.filled(32, 21));
+    final binding = Uint8List.fromList(List<int>.generate(32, (i) => i));
+    final cipher = DeviceProvisioningCipher();
+    final envelope = await cipher.create(
+      vaultKey: vaultKey,
+      keyVersion: 1,
+      vaultId: vaultId,
+      recipientDeviceId: deviceId,
+      recipientPublicKey: await recipient.extractPublicKey(),
+      certificateBinding: binding,
+    );
+    expect(envelope.protocolVersion, homeBoxDeviceProvisioningVersion);
+    await expectLater(
+      cipher.open(
+        envelope: DeviceProvisioningEnvelope.decode(envelope.encode()),
+        recipientKeyPair: recipient,
+        vaultId: vaultId,
+        recipientDeviceId: deviceId,
+      ),
+      throwsFormatException,
+    );
+    final tamperedBinding = Uint8List.fromList(binding)..[0] ^= 1;
+    await expectLater(
+      cipher.open(
+        envelope: envelope,
+        recipientKeyPair: recipient,
+        vaultId: vaultId,
+        recipientDeviceId: deviceId,
+        certificateBinding: tamperedBinding,
+      ),
+      throwsA(isA<SecretBoxAuthenticationError>()),
+    );
+    final opened = await cipher.open(
+      envelope: envelope,
+      recipientKeyPair: recipient,
+      vaultId: vaultId,
+      recipientDeviceId: deviceId,
+      certificateBinding: binding,
+    );
+    expect(await opened.extractBytes(), List<int>.filled(32, 21));
+    opened.destroy();
+    recipient.destroy();
+    vaultKey.destroy();
   });
 
   test('a different recipient cannot open the provisioning envelope', () async {

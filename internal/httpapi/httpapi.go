@@ -225,11 +225,23 @@ func (a *API) listShareDevices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no active recipient device found")
 		return
 	}
+	certificates, err := a.provisioning.LatestCertifications(r.Context(), userID)
+	if err != nil {
+		log.Printf("list share devices: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list recipient devices")
+		return
+	}
 	out := make([]shareDeviceResponse, 0, len(devices))
 	for _, device := range devices {
-		out = append(out, shareDeviceResponse{
+		resp := shareDeviceResponse{
 			ID: device.ID, Platform: device.Platform, PublicKey: base64.StdEncoding.EncodeToString(device.PublicKey), KeyVersion: device.KeyVersion,
-		})
+		}
+		if certificate, ok := certificates[device.ID]; ok {
+			resp.SignatureVersion = certificate.SignatureVersion
+			resp.AccountIdentityPublicKey = base64.StdEncoding.EncodeToString(certificate.AccountPublicKey)
+			resp.PublicKeySignature = base64.StdEncoding.EncodeToString(certificate.DeviceSignature)
+		}
+		out = append(out, resp)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -237,23 +249,29 @@ func (a *API) listShareDevices(w http.ResponseWriter, r *http.Request) {
 // --- devices ---
 
 type deviceResponse struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Platform    string  `json:"platform"`
-	PublicKey   string  `json:"publicKey"`
-	KeyVersion  int     `json:"keyVersion"`
-	CreatedAt   string  `json:"createdAt"`
-	LastSeenAt  string  `json:"lastSeenAt"`
-	LastSyncAt  *string `json:"lastSyncAt,omitempty"`
-	RevokedAt   *string `json:"revokedAt,omitempty"`
-	HasVaultKey bool    `json:"hasVaultKey"`
+	ID                       string  `json:"id"`
+	Name                     string  `json:"name"`
+	Platform                 string  `json:"platform"`
+	PublicKey                string  `json:"publicKey"`
+	KeyVersion               int     `json:"keyVersion"`
+	CreatedAt                string  `json:"createdAt"`
+	LastSeenAt               string  `json:"lastSeenAt"`
+	LastSyncAt               *string `json:"lastSyncAt,omitempty"`
+	RevokedAt                *string `json:"revokedAt,omitempty"`
+	HasVaultKey              bool    `json:"hasVaultKey"`
+	SignatureVersion         int     `json:"signatureVersion,omitempty"`
+	AccountIdentityPublicKey string  `json:"accountIdentityPublicKey,omitempty"`
+	PublicKeySignature       string  `json:"publicKeySignature,omitempty"`
 }
 
 type shareDeviceResponse struct {
-	ID         string `json:"id"`
-	Platform   string `json:"platform"`
-	PublicKey  string `json:"publicKey"`
-	KeyVersion int    `json:"keyVersion"`
+	ID                       string `json:"id"`
+	Platform                 string `json:"platform"`
+	PublicKey                string `json:"publicKey"`
+	KeyVersion               int    `json:"keyVersion"`
+	SignatureVersion         int    `json:"signatureVersion,omitempty"`
+	AccountIdentityPublicKey string `json:"accountIdentityPublicKey,omitempty"`
+	PublicKeySignature       string `json:"publicKeySignature,omitempty"`
 }
 
 func toDeviceResponse(d auth.Device) deviceResponse {
@@ -288,10 +306,21 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list devices")
 		return
 	}
+	certificates, err := a.provisioning.LatestCertifications(r.Context(), userID)
+	if err != nil {
+		log.Printf("list devices: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list devices")
+		return
+	}
 	out := make([]deviceResponse, 0, len(devices))
 	for _, d := range devices {
 		resp := toDeviceResponse(d)
 		resp.HasVaultKey = approved[d.ID]
+		if certificate, ok := certificates[d.ID]; ok {
+			resp.SignatureVersion = certificate.SignatureVersion
+			resp.AccountIdentityPublicKey = base64.StdEncoding.EncodeToString(certificate.AccountPublicKey)
+			resp.PublicKeySignature = base64.StdEncoding.EncodeToString(certificate.DeviceSignature)
+		}
 		out = append(out, resp)
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -312,9 +341,12 @@ func (a *API) revokeDevice(w http.ResponseWriter, r *http.Request) {
 // --- key envelopes ---
 
 type uploadEnvelopeRequest struct {
-	VaultID    string `json:"vaultId"`
-	KeyVersion int    `json:"keyVersion"`
-	Ciphertext string `json:"ciphertext"` // base64
+	VaultID                  string `json:"vaultId"`
+	KeyVersion               int    `json:"keyVersion"`
+	Ciphertext               string `json:"ciphertext"` // base64
+	SignatureVersion         int    `json:"signatureVersion,omitempty"`
+	AccountIdentityPublicKey string `json:"accountIdentityPublicKey,omitempty"`
+	PublicKeySignature       string `json:"publicKeySignature,omitempty"`
 }
 
 // uploadKeyEnvelope lets any of the caller's own active devices deliver a
@@ -345,7 +377,26 @@ func (a *API) uploadKeyEnvelope(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, auth.ErrDeviceRevoked)
 		return
 	}
-	envelope, err := a.provisioning.Upload(r.Context(), req.VaultID, userID, targetDeviceID, req.KeyVersion, ciphertext)
+	var certificate *provisioning.Certification
+	hasCertificateField := req.SignatureVersion != 0 || req.AccountIdentityPublicKey != "" || req.PublicKeySignature != ""
+	if hasCertificateField {
+		if req.SignatureVersion == 0 || req.AccountIdentityPublicKey == "" || req.PublicKeySignature == "" {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "device key certificate fields must be supplied together")
+			return
+		}
+		accountPublicKey, err := base64.StdEncoding.DecodeString(req.AccountIdentityPublicKey)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "accountIdentityPublicKey must be base64-encoded")
+			return
+		}
+		deviceSignature, err := base64.StdEncoding.DecodeString(req.PublicKeySignature)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "publicKeySignature must be base64-encoded")
+			return
+		}
+		certificate = &provisioning.Certification{SignatureVersion: req.SignatureVersion, AccountPublicKey: accountPublicKey, DeviceSignature: deviceSignature}
+	}
+	envelope, err := a.provisioning.UploadAuthenticated(r.Context(), req.VaultID, userID, targetDeviceID, req.KeyVersion, ciphertext, target.PublicKey, target.KeyVersion, certificate)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -371,10 +422,22 @@ func (a *API) downloadKeyEnvelope(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	target, err := a.auth.GetDevice(r.Context(), requestUserID(r), targetDeviceID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	response := map[string]any{
 		"id": envelope.ID, "vaultId": envelope.VaultID, "keyVersion": envelope.KeyVersion,
 		"ciphertext": base64.StdEncoding.EncodeToString(envelope.Ciphertext),
-	})
+	}
+	if envelope.Certification != nil {
+		response["signatureVersion"] = envelope.Certification.SignatureVersion
+		response["deviceKeyVersion"] = target.KeyVersion
+		response["accountIdentityPublicKey"] = base64.StdEncoding.EncodeToString(envelope.Certification.AccountPublicKey)
+		response["publicKeySignature"] = base64.StdEncoding.EncodeToString(envelope.Certification.DeviceSignature)
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func pathDeviceID(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -487,6 +550,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 
 	case errors.Is(err, provisioning.ErrNotFound):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no key envelope is available yet")
+	case errors.Is(err, provisioning.ErrIdentityConflict):
+		writeError(w, http.StatusConflict, "DEVICE_IDENTITY_CONFLICT", "account identity does not match existing device certificates")
 
 	case errors.Is(err, sharing.ErrNotFound), errors.Is(err, sharing.ErrTargetNotFound):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "share or recipient was not found")

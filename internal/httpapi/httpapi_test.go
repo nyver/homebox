@@ -3,6 +3,8 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/homebox/homebox/internal/auth"
 	"github.com/homebox/homebox/internal/database"
+	"github.com/homebox/homebox/internal/deviceauth"
 	"github.com/homebox/homebox/internal/httpapi"
 	"github.com/homebox/homebox/internal/httpserver"
 	"github.com/homebox/homebox/internal/nodes"
@@ -307,6 +310,61 @@ func TestFullLoginDeviceKeyEnvelopeAndRevokeFlow(t *testing.T) {
 	resp, _ = s.do(t, http.MethodGet, "/api/v1/users/me", nil, newToken)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("revoked device should lose API access, status=%d", resp.StatusCode)
+	}
+}
+
+func TestDeviceEnvelopeAuthenticatesTheDevicePublicKey(t *testing.T) {
+	s := startTestServer(t)
+	trustedDeviceID := "12121212-1212-1212-1212-121212121212"
+	targetDeviceID := "34343434-3434-3434-3434-343434343434"
+	trusted := loginDevice(t, s, "admin", trustedDeviceID)
+	target := loginDevice(t, s, "admin", targetDeviceID)
+	devicePublicKey := []byte("01234567890123456789012345678901")
+	accountPublicKey, accountPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement, err := deviceauth.Statement(trusted["user"].(map[string]any)["id"].(string), targetDeviceID, 1, devicePublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := ed25519.Sign(accountPrivateKey, statement)
+	body := map[string]any{
+		"vaultId": trusted["user"].(map[string]any)["id"], "keyVersion": 1,
+		"ciphertext":               base64.StdEncoding.EncodeToString([]byte("authenticated-envelope")),
+		"signatureVersion":         deviceauth.SignatureVersion,
+		"accountIdentityPublicKey": base64.StdEncoding.EncodeToString(accountPublicKey),
+		"publicKeySignature":       base64.StdEncoding.EncodeToString(signature),
+	}
+	resp, response := s.do(t, http.MethodPost, "/api/v1/devices/"+targetDeviceID+"/key-envelope", body, trusted["accessToken"].(string))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("signed envelope status=%d body=%v", resp.StatusCode, response)
+	}
+	resp, envelope := s.get(t, "/api/v1/devices/"+targetDeviceID+"/key-envelope", target["accessToken"].(string))
+	if resp.StatusCode != http.StatusOK || envelope["signatureVersion"] != float64(deviceauth.SignatureVersion) || envelope["deviceKeyVersion"] != float64(1) {
+		t.Fatalf("downloaded certificate status=%d body=%v", resp.StatusCode, envelope)
+	}
+	if envelope["accountIdentityPublicKey"] != base64.StdEncoding.EncodeToString(accountPublicKey) || envelope["publicKeySignature"] != base64.StdEncoding.EncodeToString(signature) {
+		t.Fatalf("downloaded certificate differs from uploaded certificate: %v", envelope)
+	}
+
+	tampered := append([]byte(nil), signature...)
+	tampered[0] ^= 1
+	body["publicKeySignature"] = base64.StdEncoding.EncodeToString(tampered)
+	resp, response = s.do(t, http.MethodPost, "/api/v1/devices/"+targetDeviceID+"/key-envelope", body, trusted["accessToken"].(string))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("tampered certificate status=%d body=%v", resp.StatusCode, response)
+	}
+
+	otherPublicKey, otherPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body["accountIdentityPublicKey"] = base64.StdEncoding.EncodeToString(otherPublicKey)
+	body["publicKeySignature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(otherPrivateKey, statement))
+	resp, response = s.do(t, http.MethodPost, "/api/v1/devices/"+targetDeviceID+"/key-envelope", body, trusted["accessToken"].(string))
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("conflicting account identity status=%d body=%v", resp.StatusCode, response)
 	}
 }
 

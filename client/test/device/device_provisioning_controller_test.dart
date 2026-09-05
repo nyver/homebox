@@ -3,7 +3,8 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
 import 'package:homebox_client/core/e2ee/vault_key_store.dart';
-import 'package:homebox_client/core/transport/homebox_api_client.dart' as transport;
+import 'package:homebox_client/core/transport/homebox_api_client.dart'
+    as transport;
 import 'package:homebox_client/core/transport/pinned_server_store.dart';
 import 'package:homebox_client/features/device/device_provisioning_controller.dart';
 import 'package:homebox_client/features/server/server_connection_controller.dart';
@@ -56,75 +57,69 @@ DeviceProvisioningController _controllerFor(
 );
 
 void main() {
-  test(
-    'accountDevices reports every signed-in device with its real approval state',
-    () async {
-      final fakeServer = FakeDeviceServer();
-      final httpServer = await fakeServer.start();
-      addTearDown(() => httpServer.close(force: true));
+  test('accountDevices reports every signed-in device with its real approval state', () async {
+    final fakeServer = FakeDeviceServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
 
-      final trusted = await _connectedAndSignedIn(httpServer);
-      addTearDown(trusted.serverConnection.dispose);
-      final newDevice = await _connectedAndSignedIn(httpServer);
-      addTearDown(newDevice.serverConnection.dispose);
-      final controller = _controllerFor(trusted);
-      addTearDown(controller.dispose);
+    final trusted = await _connectedAndSignedIn(httpServer);
+    addTearDown(trusted.serverConnection.dispose);
+    final newDevice = await _connectedAndSignedIn(httpServer);
+    addTearDown(newDevice.serverConnection.dispose);
+    final controller = _controllerFor(trusted);
+    addTearDown(controller.dispose);
 
-      final beforeApproval = await controller.accountDevices();
-      expect(beforeApproval, hasLength(2));
-      expect(beforeApproval.every((d) => !d.hasVaultKey), isTrue);
+    final beforeApproval = await controller.accountDevices();
+    expect(beforeApproval, hasLength(2));
+    expect(beforeApproval.every((d) => !d.hasVaultKey), isTrue);
 
-      final newDeviceId = newDevice.serverConnection.session!.device.id;
-      final trustedDeviceId = trusted.serverConnection.session!.device.id;
-      fakeServer.setHasVaultKey(newDeviceId, true);
-      final afterApproval = await controller.accountDevices();
-      expect(
-        afterApproval.singleWhere((d) => d.id == newDeviceId).hasVaultKey,
-        isTrue,
-      );
-      expect(
-        afterApproval.singleWhere((d) => d.id == trustedDeviceId).hasVaultKey,
-        isFalse,
-      );
-    },
-  );
+    final newDeviceId = newDevice.serverConnection.session!.device.id;
+    final trustedDeviceId = trusted.serverConnection.session!.device.id;
+    fakeServer.setHasVaultKey(newDeviceId, true);
+    final afterApproval = await controller.accountDevices();
+    expect(
+      afterApproval.singleWhere((d) => d.id == newDeviceId).hasVaultKey,
+      isTrue,
+    );
+    expect(
+      afterApproval.singleWhere((d) => d.id == trustedDeviceId).hasVaultKey,
+      isFalse,
+    );
+  });
 
-  test(
-    'revokeDevice signs the target device out and refuses to revoke the caller\'s own device',
-    () async {
-      final fakeServer = FakeDeviceServer();
-      final httpServer = await fakeServer.start();
-      addTearDown(() => httpServer.close(force: true));
+  test('revokeDevice signs the target device out and refuses to revoke the caller\'s own device', () async {
+    final fakeServer = FakeDeviceServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
 
-      final trusted = await _connectedAndSignedIn(httpServer);
-      addTearDown(trusted.serverConnection.dispose);
-      final newDevice = await _connectedAndSignedIn(httpServer);
-      addTearDown(newDevice.serverConnection.dispose);
-      final controller = _controllerFor(trusted);
-      addTearDown(controller.dispose);
+    final trusted = await _connectedAndSignedIn(httpServer);
+    addTearDown(trusted.serverConnection.dispose);
+    final newDevice = await _connectedAndSignedIn(httpServer);
+    addTearDown(newDevice.serverConnection.dispose);
+    final controller = _controllerFor(trusted);
+    addTearDown(controller.dispose);
 
-      final devices = await controller.accountDevices();
-      final self = devices.singleWhere(
-        (d) => d.id == trusted.serverConnection.session!.device.id,
-      );
-      final other = devices.singleWhere(
-        (d) => d.id == newDevice.serverConnection.session!.device.id,
-      );
+    final devices = await controller.accountDevices();
+    final self = devices.singleWhere(
+      (d) => d.id == trusted.serverConnection.session!.device.id,
+    );
+    final other = devices.singleWhere(
+      (d) => d.id == newDevice.serverConnection.session!.device.id,
+    );
 
-      expect(await controller.revokeDevice(self), isFalse);
-      expect(fakeServer.revokeRequestCount, 0);
+    expect(await controller.revokeDevice(self), isFalse);
+    expect(fakeServer.revokeRequestCount, 0);
 
-      expect(await controller.revokeDevice(other), isTrue);
-      expect(fakeServer.revokeRequestCount, 1);
+    expect(await controller.revokeDevice(other), isTrue);
+    expect(fakeServer.revokeRequestCount, 1);
 
-      await expectLater(
-        newDevice.serverConnection.api!.listDevices(
-          newDevice.serverConnection.session!.accessToken,
-        ),
-        throwsA(isA<transport.HomeBoxApiException>()),
-      );
-    },
-  );
+    await expectLater(
+      newDevice.serverConnection.api!.listDevices(
+        newDevice.serverConnection.session!.accessToken,
+      ),
+      throwsA(isA<transport.HomeBoxApiException>()),
+    );
+  });
 
   test(
     'selfApprove records this vault-creating device as approved on its own',
@@ -156,4 +151,55 @@ void main() {
       expect(afterApproval.single.hasVaultKey, isTrue);
     },
   );
+
+  test('pairing requires fingerprint verification and validates the account signature', () async {
+    final fakeServer = FakeDeviceServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+
+    final trusted = await _connectedAndSignedIn(httpServer);
+    final target = await _connectedAndSignedIn(httpServer);
+    addTearDown(trusted.serverConnection.dispose);
+    addTearDown(target.serverConnection.dispose);
+    final trustedVaultStorage = MemoryVaultKeyStorage();
+    final trustedVault = VaultKeyStore(trustedVaultStorage);
+    final recovery = await trustedVault.createVault(
+      userId: FakeDeviceServer.userId,
+    );
+    recovery.destroy();
+    final trustedController = _controllerFor(
+      trusted,
+      vaultKeyStore: trustedVault,
+    );
+    final targetVault = VaultKeyStore(MemoryVaultKeyStorage());
+    final targetController = _controllerFor(target, vaultKeyStore: targetVault);
+    addTearDown(trustedController.dispose);
+    addTearDown(targetController.dispose);
+
+    final targetId = target.serverConnection.session!.device.id;
+    final targetRecord = (await trustedController.availableRecipientDevices())
+        .singleWhere((device) => device.id == targetId);
+    expect(
+      await trustedController.provisionDevice(
+        targetRecord,
+        fingerprintVerified: false,
+      ),
+      isFalse,
+    );
+    expect(fakeServer.uploadedEnvelopeTargetIds, isEmpty);
+    expect(
+      await trustedController.provisionDevice(
+        targetRecord,
+        fingerprintVerified: true,
+      ),
+      isTrue,
+    );
+    expect(await targetController.collectProvisioning(), isTrue);
+
+    final trustedKey = await trustedVault.loadVaultKey();
+    final targetKey = await targetVault.loadVaultKey();
+    expect(await targetKey!.extractBytes(), await trustedKey!.extractBytes());
+    trustedKey.destroy();
+    targetKey.destroy();
+  });
 }

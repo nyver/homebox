@@ -1,6 +1,6 @@
 # ADR-012: Device Key Storage and Trusted-Device Provisioning
 
-Status: accepted for protocol version 1
+Status: accepted; protocol version 1 remains readable and version 2 is current
 
 ## Decision
 
@@ -21,23 +21,29 @@ envelope      = XChaCha20-Poly1305(wrapping_key, vault_key, AAD)
 
 The HKDF context binds the protocol version, vault-key version, opaque vault ID, opaque recipient-device ID, ephemeral public key, and salt. The nested key-envelope AAD independently binds its provisioning purpose, key version, vault ID, and recipient-device ID. All-zero X25519 shared secrets are rejected.
 
-The outer protocol-v1 format is:
+The outer format is:
 
 ```text
 magic                 4 bytes  "HBXD"
-protocol_version      2 bytes  unsigned big-endian, value 1
+protocol_version      2 bytes  unsigned big-endian, value 1 or 2
 ephemeral_public_key 32 bytes  X25519
 hkdf_salt             16 bytes
 wrapped_vault_key     83 bytes  protocol-v1 "HBXK" envelope
 ```
 
+Version 2 adds the authenticated device-certificate binding described in
+[ADR-021](021-authenticated-device-keys.md) to the HKDF context without
+changing this serialized length. Version 1 remains readable for rolling
+upgrades and existing envelopes.
+
 ## Provisioning flow
 
 1. The new device authenticates to the server, creates its device identity, and registers only its public key.
 2. The vault remains locked until provisioning succeeds.
-3. A trusted device verifies the target device out of band, obtains its public key, and uploads the recipient-specific envelope.
-4. The target downloads only its envelope and unwraps it locally with its device private key.
-5. Device revocation stops token and future-envelope delivery. Keys already obtained by a compromised device require vault-key rotation for future data.
+3. A trusted device compares the target's locally displayed SHA-256 public-key fingerprint out of band.
+4. The trusted device signs the target key with the Ed25519 Account Identity and uploads the recipient-specific v2 envelope plus certificate.
+5. The target downloads only its envelope, unwraps it locally with its device private key, derives the same Account Identity, and verifies the certificate before persisting the Vault Key.
+6. Device revocation stops token and future-envelope delivery. Keys already obtained by a compromised device require vault-key rotation for future data.
 
 Recovery Secret provisioning remains the independent recovery path described by ADR-013.
 

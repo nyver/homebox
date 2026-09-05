@@ -1,6 +1,6 @@
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../core/e2ee/account_identity.dart';
 import '../../core/e2ee/device_identity.dart';
 
 enum DeviceSetupStatus { checking, missing, creating, ready, failed }
@@ -28,7 +28,9 @@ final class DeviceSetupController extends ChangeNotifier {
         _setStatus(DeviceSetupStatus.missing);
         return;
       }
-      _publicKeyFingerprint = await _fingerprint(identity.publicKey.bytes);
+      _publicKeyFingerprint = await devicePublicKeyFingerprint(
+        identity.publicKey.bytes,
+      );
       _setStatus(DeviceSetupStatus.ready);
     } on Exception {
       _publicKeyFingerprint = null;
@@ -48,7 +50,9 @@ final class DeviceSetupController extends ChangeNotifier {
     DeviceIdentity? identity;
     try {
       identity = await _identityStore.loadOrCreate();
-      _publicKeyFingerprint = await _fingerprint(identity.publicKey.bytes);
+      _publicKeyFingerprint = await devicePublicKeyFingerprint(
+        identity.publicKey.bytes,
+      );
       _setStatus(DeviceSetupStatus.ready);
     } on Exception {
       _publicKeyFingerprint = null;
@@ -56,14 +60,6 @@ final class DeviceSetupController extends ChangeNotifier {
     } finally {
       identity?.destroy();
     }
-  }
-
-  Future<String> _fingerprint(List<int> publicKey) async {
-    final digest = await Sha256().hash(publicKey);
-    return digest.bytes
-        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-        .join(':')
-        .toUpperCase();
   }
 
   void _setStatus(DeviceSetupStatus status) {

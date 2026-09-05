@@ -81,8 +81,7 @@ final class FakeDeviceServer {
       });
       return;
     }
-    if (path.startsWith('/api/v1/devices') &&
-        !_requireActiveCaller(request)) {
+    if (path.startsWith('/api/v1/devices') && !_requireActiveCaller(request)) {
       return;
     }
     if (method == 'GET' && path == '/api/v1/devices') {
@@ -111,6 +110,26 @@ final class FakeDeviceServer {
       await request.response.close();
       return;
     }
+    if (method == 'GET' && path.endsWith('/key-envelope')) {
+      final id = path.substring(
+        '/api/v1/devices/'.length,
+        path.length - '/key-envelope'.length,
+      );
+      final device = _devices[id];
+      final envelope = device?['envelope'];
+      if (device == null || envelope == null) {
+        _writeJson(request, 404, {
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'envelope not found',
+            'requestId': 'req',
+          },
+        });
+        return;
+      }
+      _writeJson(request, 200, envelope);
+      return;
+    }
     if (method == 'POST' && path.endsWith('/key-envelope')) {
       final id = path.substring(
         '/api/v1/devices/'.length,
@@ -127,13 +146,37 @@ final class FakeDeviceServer {
         });
         return;
       }
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
       uploadedEnvelopeTargetIds.add(id);
       device['hasVaultKey'] = true;
+      device['envelope'] = <String, dynamic>{
+        'id': 'envelope-$id',
+        'vaultId': body['vaultId'],
+        'keyVersion': body['keyVersion'],
+        'ciphertext': body['ciphertext'],
+        if (body['signatureVersion'] != null) ...{
+          'signatureVersion': body['signatureVersion'],
+          'deviceKeyVersion': device['keyVersion'],
+          'accountIdentityPublicKey': body['accountIdentityPublicKey'],
+          'publicKeySignature': body['publicKeySignature'],
+        },
+      };
+      if (body['signatureVersion'] != null) {
+        device['signatureVersion'] = body['signatureVersion'];
+        device['accountIdentityPublicKey'] = body['accountIdentityPublicKey'];
+        device['publicKeySignature'] = body['publicKeySignature'];
+      }
       _writeJson(request, 201, {'id': 'envelope-$id'});
       return;
     }
     _writeJson(request, 404, {
-      'error': {'code': 'NOT_FOUND', 'message': 'unhandled route', 'requestId': 'req'},
+      'error': {
+        'code': 'NOT_FOUND',
+        'message': 'unhandled route',
+        'requestId': 'req',
+      },
     });
   }
 

@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 const String homeBoxDevicePrivateKeyStorageKey =
     'homebox.e2ee.device.x25519.private.v1';
+const int homeBoxDeviceKeyVersion = 1;
 
 abstract interface class DevicePrivateKeyStorage {
   Future<String?> read(String key);

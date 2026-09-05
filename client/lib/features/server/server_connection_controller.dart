@@ -170,7 +170,7 @@ final class ServerConnectionController extends ChangeNotifier {
           name: _localDeviceName(),
           platform: homeBoxDevicePlatform,
           publicKey: Uint8List.fromList(identity.publicKey.bytes),
-          keyVersion: 1,
+          keyVersion: homeBoxDeviceKeyVersion,
         ),
       );
       _session = session;

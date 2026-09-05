@@ -57,7 +57,11 @@ security:
     # For Android sync-folder opens, clients can derive a MIME type locally
     # from a filename when older encrypted metadata has only a generic type.
     # Recovery Secrets exist only on clients; server backups contain encrypted recovery packages.
-    # Device private keys remain in OS secure storage; only public keys and recipient envelopes reach the server.
+    # Device private keys remain in OS secure storage. New pairing envelopes
+    # use provisioning v2: a Vault-Key-derived Ed25519 Account Identity signs
+    # each X25519 device key after fingerprint verification, and its certificate
+    # is bound into HKDF. Nullable certificate fields preserve legacy v1 reads;
+    # this protocol behavior is mandatory and has no server-side opt-out.
     # Android camera photos use the same client-only encrypted upload path; the
     # app requests CAMERA at capture time, never broad gallery storage access.
     # Android app-lock biometrics are device-local (`USE_BIOMETRIC`) and do

@@ -53,6 +53,7 @@ final class HomeBoxDevice {
     this.lastSyncAt,
     this.revokedAt,
     this.hasVaultKey = false,
+    this.authentication,
   });
 
   final String id;
@@ -72,6 +73,10 @@ final class HomeBoxDevice {
   /// activity alone must never be shown as approval.
   final bool hasVaultKey;
 
+  /// Ed25519 account certificate for this exact X25519 key. Null identifies
+  /// a legacy or not-yet-approved device and is never treated as verified.
+  final DeviceKeyAuthentication? authentication;
+
   bool get isRevoked => revokedAt != null;
 }
 
@@ -83,12 +88,28 @@ final class ShareableDevice {
     required this.platform,
     required this.publicKey,
     required this.keyVersion,
+    this.authentication,
   });
 
   final String id;
   final String platform;
   final Uint8List publicKey;
   final int keyVersion;
+  final DeviceKeyAuthentication? authentication;
+}
+
+final class DeviceKeyAuthentication {
+  const DeviceKeyAuthentication({
+    required this.signatureVersion,
+    required this.deviceKeyVersion,
+    required this.accountIdentityPublicKey,
+    required this.publicKeySignature,
+  });
+
+  final int signatureVersion;
+  final int deviceKeyVersion;
+  final Uint8List accountIdentityPublicKey;
+  final Uint8List publicKeySignature;
 }
 
 final class FamilyShareEnvelope {
@@ -181,12 +202,14 @@ final class KeyEnvelope {
     required this.vaultId,
     required this.keyVersion,
     required this.ciphertext,
+    this.deviceKeyAuthentication,
   });
 
   final String id;
   final String vaultId;
   final int keyVersion;
   final Uint8List ciphertext;
+  final DeviceKeyAuthentication? deviceKeyAuthentication;
 }
 
 final class NodeInfo {
@@ -383,6 +406,10 @@ final class HomeBoxApiClient {
             platform: json['platform'] as String,
             publicKey: base64Decode(json['publicKey'] as String),
             keyVersion: json['keyVersion'] as int,
+            authentication: _deviceKeyAuthenticationFromJson(
+              json,
+              deviceKeyVersion: json['keyVersion'] as int,
+            ),
           );
         })
         .toList(growable: false);
@@ -431,6 +458,7 @@ final class HomeBoxApiClient {
     required String vaultId,
     required int keyVersion,
     required Uint8List ciphertext,
+    DeviceKeyAuthentication? deviceKeyAuthentication,
   }) async {
     final json = await _postJson(
       '/api/v1/devices/$targetDeviceId/key-envelope',
@@ -439,6 +467,15 @@ final class HomeBoxApiClient {
         'vaultId': vaultId,
         'keyVersion': keyVersion,
         'ciphertext': base64Encode(ciphertext),
+        if (deviceKeyAuthentication != null) ...{
+          'signatureVersion': deviceKeyAuthentication.signatureVersion,
+          'accountIdentityPublicKey': base64Encode(
+            deviceKeyAuthentication.accountIdentityPublicKey,
+          ),
+          'publicKeySignature': base64Encode(
+            deviceKeyAuthentication.publicKeySignature,
+          ),
+        },
       },
     );
     return json['id'] as String;
@@ -460,6 +497,10 @@ final class HomeBoxApiClient {
       vaultId: json['vaultId'] as String,
       keyVersion: json['keyVersion'] as int,
       ciphertext: base64Decode(json['ciphertext'] as String),
+      deviceKeyAuthentication: _deviceKeyAuthenticationFromJson(
+        json,
+        deviceKeyVersion: json['deviceKeyVersion'] as int?,
+      ),
     );
   }
 
@@ -1083,5 +1124,35 @@ final class HomeBoxApiClient {
         ? DateTime.parse(json['revokedAt'] as String)
         : null,
     hasVaultKey: json['hasVaultKey'] as bool? ?? false,
+    authentication: _deviceKeyAuthenticationFromJson(
+      json,
+      deviceKeyVersion: json['keyVersion'] as int,
+    ),
   );
+
+  static DeviceKeyAuthentication? _deviceKeyAuthenticationFromJson(
+    Map<String, dynamic> json, {
+    required int? deviceKeyVersion,
+  }) {
+    final signatureVersion = json['signatureVersion'];
+    final accountPublicKey = json['accountIdentityPublicKey'];
+    final signature = json['publicKeySignature'];
+    if (signatureVersion == null &&
+        accountPublicKey == null &&
+        signature == null) {
+      return null;
+    }
+    if (signatureVersion is! int ||
+        deviceKeyVersion == null ||
+        accountPublicKey is! String ||
+        signature is! String) {
+      throw const FormatException('Incomplete device key certificate.');
+    }
+    return DeviceKeyAuthentication(
+      signatureVersion: signatureVersion,
+      deviceKeyVersion: deviceKeyVersion,
+      accountIdentityPublicKey: base64Decode(accountPublicKey),
+      publicKeySignature: base64Decode(signature),
+    );
+  }
 }

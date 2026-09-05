@@ -18,6 +18,7 @@ var migrations = []migration{
 	{5, "device_last_sync", migration0005DeviceLastSync},
 	{6, "upload_metadata_version", migration0006UploadMetadataVersion},
 	{7, "trash_retention_index", migration0007TrashRetentionIndex},
+	{8, "authenticated_device_keys", migration0008AuthenticatedDeviceKeys},
 }
 
 const migration0001InitialSchema = `
@@ -160,4 +161,16 @@ ALTER TABLE upload_sessions ADD COLUMN metadata_key_version INTEGER NOT NULL DEF
 // deleted nodes instead of walking every active node in a large vault.
 const migration0007TrashRetentionIndex = `
 CREATE INDEX IF NOT EXISTS idx_nodes_deleted_at ON nodes(deleted_at) WHERE deleted_at IS NOT NULL;
+`
+
+// migration0008AuthenticatedDeviceKeys keeps legacy provisioning envelopes
+// readable while allowing new clients to attach an Ed25519 account-identity
+// certificate to the exact X25519 device key they approved out of band.
+const migration0008AuthenticatedDeviceKeys = `
+ALTER TABLE vault_key_envelopes ADD COLUMN signature_version INTEGER;
+ALTER TABLE vault_key_envelopes ADD COLUMN account_identity_public_key BLOB;
+ALTER TABLE vault_key_envelopes ADD COLUMN device_key_signature BLOB;
+CREATE INDEX IF NOT EXISTS idx_vault_envelopes_certificates
+  ON vault_key_envelopes(target_user_id,target_device_id,created_at)
+  WHERE signature_version IS NOT NULL AND revoked_at IS NULL;
 `

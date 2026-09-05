@@ -4,7 +4,8 @@ import 'package:cryptography/cryptography.dart';
 
 import 'key_envelope.dart';
 
-const int homeBoxDeviceProvisioningVersion = 1;
+const int homeBoxLegacyDeviceProvisioningVersion = 1;
+const int homeBoxDeviceProvisioningVersion = 2;
 const int homeBoxDeviceProvisioningSaltLength = 16;
 
 final class DeviceProvisioningEnvelope {
@@ -12,8 +13,13 @@ final class DeviceProvisioningEnvelope {
     required SimplePublicKey ephemeralPublicKey,
     required List<int> salt,
     required this.wrappedVaultKey,
+    this.protocolVersion = homeBoxDeviceProvisioningVersion,
   }) : _ephemeralPublicKey = _copyX25519PublicKey(ephemeralPublicKey),
        _salt = Uint8List.fromList(salt) {
+    if (protocolVersion != homeBoxLegacyDeviceProvisioningVersion &&
+        protocolVersion != homeBoxDeviceProvisioningVersion) {
+      throw ArgumentError.value(protocolVersion, 'protocolVersion');
+    }
     if (_salt.length != homeBoxDeviceProvisioningSaltLength) {
       throw ArgumentError.value(_salt.length, 'salt.length');
     }
@@ -31,6 +37,7 @@ final class DeviceProvisioningEnvelope {
   final SimplePublicKey _ephemeralPublicKey;
   final Uint8List _salt;
   final KeyEnvelope wrappedVaultKey;
+  final int protocolVersion;
 
   int get keyVersion => wrappedVaultKey.keyVersion;
 
@@ -40,8 +47,7 @@ final class DeviceProvisioningEnvelope {
   Uint8List encode() {
     final result = Uint8List(encodedLength);
     result.setAll(0, _magic);
-    ByteData.sublistView(result)
-        .setUint16(4, homeBoxDeviceProvisioningVersion, Endian.big);
+    ByteData.sublistView(result).setUint16(4, protocolVersion, Endian.big);
     result.setAll(6, _ephemeralPublicKey.bytes);
     result.setAll(38, _salt);
     result.setAll(54, wrappedVaultKey.encode());
@@ -63,7 +69,8 @@ final class DeviceProvisioningEnvelope {
       }
     }
     final version = ByteData.sublistView(bytes).getUint16(4, Endian.big);
-    if (version != homeBoxDeviceProvisioningVersion) {
+    if (version != homeBoxLegacyDeviceProvisioningVersion &&
+        version != homeBoxDeviceProvisioningVersion) {
       throw FormatException(
         'Unsupported device provisioning envelope version: $version.',
       );
@@ -84,6 +91,7 @@ final class DeviceProvisioningEnvelope {
       ),
       salt: Uint8List.sublistView(bytes, 38, 54),
       wrappedVaultKey: wrappedVaultKey,
+      protocolVersion: version,
     );
   }
 }
@@ -108,9 +116,14 @@ final class DeviceProvisioningCipher {
     required Uint8List vaultId,
     required Uint8List recipientDeviceId,
     required SimplePublicKey recipientPublicKey,
+    Uint8List? certificateBinding,
   }) async {
     _validateContext(vaultId, recipientDeviceId, keyVersion);
     _validateX25519PublicKey(recipientPublicKey);
+    final protocolVersion = certificateBinding == null
+        ? homeBoxLegacyDeviceProvisioningVersion
+        : homeBoxDeviceProvisioningVersion;
+    _validateCertificateBinding(protocolVersion, certificateBinding);
 
     final ephemeralKeyPair = await _keyExchange.newKeyPair();
     try {
@@ -134,6 +147,8 @@ final class DeviceProvisioningCipher {
           recipientDeviceId: recipientDeviceId,
           ephemeralPublicKey: ephemeralPublicKey,
           salt: salt,
+          protocolVersion: protocolVersion,
+          certificateBinding: certificateBinding,
         );
         try {
           final wrappedVaultKey = await _keyEnvelopeCipher.wrapKey(
@@ -148,6 +163,7 @@ final class DeviceProvisioningCipher {
             ephemeralPublicKey: ephemeralPublicKey,
             salt: salt,
             wrappedVaultKey: wrappedVaultKey,
+            protocolVersion: protocolVersion,
           );
         } finally {
           wrappingKey.destroy();
@@ -165,8 +181,10 @@ final class DeviceProvisioningCipher {
     required SimpleKeyPair recipientKeyPair,
     required Uint8List vaultId,
     required Uint8List recipientDeviceId,
+    Uint8List? certificateBinding,
   }) async {
     _validateContext(vaultId, recipientDeviceId, envelope.keyVersion);
+    _validateCertificateBinding(envelope.protocolVersion, certificateBinding);
     final wrappingKey = await _deriveWrappingKey(
       keyPair: recipientKeyPair,
       remotePublicKey: envelope._ephemeralPublicKey,
@@ -175,6 +193,8 @@ final class DeviceProvisioningCipher {
       recipientDeviceId: recipientDeviceId,
       ephemeralPublicKey: envelope._ephemeralPublicKey,
       salt: envelope._salt,
+      protocolVersion: envelope.protocolVersion,
+      certificateBinding: certificateBinding,
     );
     try {
       return await _keyEnvelopeCipher.unwrapKey(
@@ -196,6 +216,8 @@ final class DeviceProvisioningCipher {
     required Uint8List recipientDeviceId,
     required SimplePublicKey ephemeralPublicKey,
     required List<int> salt,
+    required int protocolVersion,
+    required Uint8List? certificateBinding,
   }) async {
     final rawSharedSecret = await _keyExchange.sharedSecretKey(
       keyPair: keyPair,
@@ -227,6 +249,8 @@ final class DeviceProvisioningCipher {
           recipientDeviceId,
           ephemeralPublicKey,
           salt,
+          protocolVersion,
+          certificateBinding,
         ),
       );
       late final Uint8List derivedKeyBytes;
@@ -251,17 +275,50 @@ final class DeviceProvisioningCipher {
     Uint8List recipientDeviceId,
     SimplePublicKey ephemeralPublicKey,
     List<int> salt,
+    int protocolVersion,
+    Uint8List? certificateBinding,
   ) {
-    final result = Uint8List(4 + 2 + 4 + 16 + 16 + 32 + 16);
+    final result = Uint8List(
+      4 +
+          2 +
+          4 +
+          16 +
+          16 +
+          32 +
+          16 +
+          (protocolVersion == homeBoxDeviceProvisioningVersion ? 32 : 0),
+    );
     result.setAll(0, const [0x48, 0x42, 0x58, 0x49]); // HBXI
     final data = ByteData.sublistView(result);
-    data.setUint16(4, homeBoxDeviceProvisioningVersion, Endian.big);
+    data.setUint16(4, protocolVersion, Endian.big);
     data.setUint32(6, keyVersion, Endian.big);
     result.setAll(10, vaultId);
     result.setAll(26, recipientDeviceId);
     result.setAll(42, ephemeralPublicKey.bytes);
     result.setAll(74, salt);
+    if (certificateBinding != null) {
+      result.setAll(90, certificateBinding);
+    }
     return result;
+  }
+
+  void _validateCertificateBinding(
+    int protocolVersion,
+    Uint8List? certificateBinding,
+  ) {
+    if (protocolVersion == homeBoxDeviceProvisioningVersion) {
+      if (certificateBinding == null || certificateBinding.length != 32) {
+        throw const FormatException(
+          'Provisioning v2 requires a 32-byte device certificate binding.',
+        );
+      }
+      return;
+    }
+    if (certificateBinding != null) {
+      throw const FormatException(
+        'Legacy provisioning must not include a device certificate binding.',
+      );
+    }
   }
 
   void _validateContext(
