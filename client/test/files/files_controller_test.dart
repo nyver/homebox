@@ -434,6 +434,52 @@ void main() {
     expect(downloadedBytes, originalBytes);
   });
 
+  test(
+    'entriesAsOf advances when the folder is (re)loaded, not on a pure re-sort',
+    () async {
+      final fakeServer = _FakeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+
+      final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final recoverySecret = await vaultKeyStore.createVault(
+        userId: _FakeServer.userId,
+      );
+      recoverySecret.destroy();
+
+      final syncEngine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(syncEngine.dispose);
+      final controller = FilesController(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(controller.dispose);
+
+      expect(await controller.createFolder('Documents'), isTrue);
+      final afterFirstLoad = controller.entriesAsOf;
+
+      // A pure re-sort reorders the same entries without reloading them, so
+      // the "as of" instant used for "Updated x ago" labels must not move -
+      // otherwise those labels would silently tick forward on every unrelated
+      // rebuild instead of staying fixed until new data actually arrives.
+      controller.setSort(FileListSort.updatedAt);
+      expect(controller.entriesAsOf, afterFirstLoad);
+
+      // A new folder appearing is a real reload, so the reference instant
+      // must move forward to reflect it.
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      expect(await controller.createFolder('Photos'), isTrue);
+      expect(controller.entriesAsOf.isAfter(afterFirstLoad), isTrue);
+    },
+  );
+
   test('busy transfers report their direction so the Files page can label upload vs. download progress', () async {
     final fakeServer = _FakeServer();
     final httpServer = await fakeServer.start();

@@ -128,6 +128,7 @@ final class FilesController extends ChangeNotifier {
   FilesStatus _status = FilesStatus.idle;
   String? _errorMessage;
   List<FileEntry> _entries = const [];
+  DateTime? _entriesAsOf;
   final List<_Breadcrumb> _path = [];
   bool _busy = false;
   double? _progress;
@@ -138,6 +139,12 @@ final class FilesController extends ChangeNotifier {
   FilesStatus get status => _status;
   String? get errorMessage => _errorMessage;
   List<FileEntry> get entries => _entries;
+  /// When [entries] was last (re)loaded — the folder was opened, or new
+  /// files/folders appeared in it. "Updated x ago" labels are computed
+  /// relative to this fixed instant rather than the current wall clock, so
+  /// they don't silently tick forward while the list is otherwise unchanged
+  /// (e.g. on every upload/download progress notification).
+  DateTime get entriesAsOf => _entriesAsOf ?? DateTime.now().toUtc();
   bool get busy => _busy;
   double? get progress => _progress;
   FileTransferDirection? get transferDirection => _transferDirection;
@@ -240,6 +247,7 @@ final class FilesController extends ChangeNotifier {
       }
       decrypted.sort(_compareEntries);
       _entries = decrypted;
+      _entriesAsOf = DateTime.now().toUtc();
       _setStatus(FilesStatus.ready);
     } catch (e) {
       // Broad on purpose: StateError/ArgumentError (thrown by this class's

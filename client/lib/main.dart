@@ -1510,11 +1510,18 @@ String _transferProgressLabel(FileTransferDirection? direction, int percent) =>
 /// [LocalNode.updatedAt] rather than [LocalNode.createdAt] so replacing a
 /// file's content (spec: "Replace content…") is reflected here — the server
 /// bumps `updated_at` on every node mutation, including a completed upload.
-String _fileEntrySubtitle(FileEntry entry) {
+///
+/// [referenceNow] should be [FilesController.entriesAsOf] rather than the
+/// live wall clock, so this label stays fixed as of when the folder was
+/// opened/refreshed instead of ticking forward on every unrelated rebuild
+/// (e.g. upload/download progress notifications).
+String _fileEntrySubtitle(FileEntry entry, DateTime referenceNow) {
   final parts = <String>[];
   final size = entry.metadata.plaintextSize;
   if (size != null) parts.add(_formatFileSize(size));
-  parts.add('Updated ${_formatRelativeTime(entry.node.updatedAt)}');
+  parts.add(
+    'Updated ${_formatRelativeTime(entry.node.updatedAt, referenceNow)}',
+  );
   return parts.join(' • ');
 }
 
@@ -1536,8 +1543,8 @@ String _formatFileSize(int bytes) {
   return '${size.toStringAsFixed(precision)} ${units[unitIndex]}';
 }
 
-String _formatRelativeTime(DateTime utc) {
-  final elapsed = DateTime.now().toUtc().difference(utc.toUtc());
+String _formatRelativeTime(DateTime utc, DateTime referenceNow) {
+  final elapsed = referenceNow.toUtc().difference(utc.toUtc());
   final seconds = elapsed.isNegative ? 0 : elapsed.inSeconds;
   if (seconds < 60) return _relativeTimeUnit(seconds, 'second');
   final minutes = seconds ~/ 60;
@@ -2249,7 +2256,9 @@ final class _FilesSectionState extends State<_FilesSection> {
                 title: Text(entry.name),
                 subtitle: entry.isDirectory
                     ? null
-                    : Text(_fileEntrySubtitle(entry)),
+                    : Text(
+                        _fileEntrySubtitle(entry, controller.entriesAsOf),
+                      ),
                 onTap: entry.isDirectory
                     ? () => controller.openFolder(entry)
                     : () => _openOrDownloadFile(context, entry),
