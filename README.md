@@ -1,5 +1,7 @@
 # HomeBox
 
+[![CI](https://github.com/nyver/homebox/actions/workflows/ci.yml/badge.svg)](https://github.com/nyver/homebox/actions/workflows/ci.yml)
+
 HomeBox is a self-hosted, zero-knowledge file-storage service for a small family.
 Its security boundary is deliberate: clients encrypt file content and sensitive metadata before upload; the server stores only opaque identifiers, encrypted metadata/key envelopes, and ciphertext blobs. It never receives a File DEK, vault key, folder key, user master key, or recovery secret.
 
@@ -120,6 +122,8 @@ data/
 Do not place recovery material or client E2EE private keys in this directory. Backups of the server data remain ciphertext-only and cannot recover plaintext without a trusted client or the user's recovery secret.
 
 ## Development checks
+
+These checks, plus `flutter analyze`/`flutter test`/`flutter build` for the Windows and Android clients, also run in CI on every push and pull request ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ```powershell
 gofmt -w cmd internal
