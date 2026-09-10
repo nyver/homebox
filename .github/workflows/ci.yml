@@ -43,7 +43,9 @@ jobs:
 
   client-windows:
     name: Client (Windows)
-    runs-on: windows-latest
+    # Pinned to VS2022: windows-latest's newer preview MSVC/STL treats
+    # local_auth_windows' experimental-coroutine usage as a hard error (STL1011).
+    runs-on: windows-2022
     defaults:
       run:
         working-directory: client
