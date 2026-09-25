@@ -9,3 +9,14 @@ String basenameOfLocalPath(String path) {
   final index = normalized.lastIndexOf('/');
   return index == -1 ? normalized : normalized.substring(index + 1);
 }
+
+/// Whether [name] is a transient file that applications create next to a
+/// document while it is open or being saved (Office `~$` owner files,
+/// KeePass `.kdbx.lock`) or HomeBox's own staging file. Such files describe
+/// no user content, so they are never uploaded and must not trigger a sync.
+bool isTransientSyncFileName(String name) {
+  final lower = name.toLowerCase();
+  return lower.endsWith('.homebox-tmp') ||
+      lower.startsWith('~\$') ||
+      lower.endsWith('.kdbx.lock');
+}

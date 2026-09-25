@@ -229,8 +229,8 @@ final class LocalFolderUploader extends ChangeNotifier {
     await for (final entry in dir.list()) {
       final name = basenameOfLocalPath(entry.path);
       if (entry is File) {
-        if (name.endsWith('.homebox-tmp')) {
-          continue; // SyncFolderMaterializer's own in-flight temp file.
+        if (isTransientSyncFileName(name)) {
+          continue; // in-flight temp file or an open application's lock file.
         }
         localFiles[name] = entry;
       } else if (entry is Directory) {

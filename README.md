@@ -30,6 +30,7 @@ This repository currently provides the security-first Go server foundation, a Wi
 - Atomic ciphertext-only server backup and safe restore commands. A backup contains a consistent SQLite snapshot, immutable ciphertext blobs, the transport identity key, the supplied server config, and a SHA-256 manifest. It never contains a Recovery Secret or client private E2EE key.
 - Automatic server maintenance that permanently removes Trash entries after three days, cleans expired sessions, abandoned upload ciphertext, and idempotency records, and removes unreachable ciphertext blobs only after a two-pass grace period. It never decrypts content. The same pass remains available as a manual command.
 - Windows users can open the selected local sync folder directly from the Sync page or the HomeBox notification-area menu; the tray action stays disabled until a folder is selected. A materialized file's Files-menu action can also open its containing folder in Explorer.
+- On Windows, tapping a file that is already mirrored in the local sync folder opens that local copy in its default application (Windows shows its app chooser when none is associated; executable and script types are refused with a hint to use Save as). Edits saved by the application, for example a KeePass database, are detected by the sync-folder watcher and uploaded as a new file version. Editor lock and temporary files (`~$*`, `*.kdbx.lock`) are never uploaded.
 
 ## Run the server foundation
 

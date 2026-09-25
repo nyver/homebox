@@ -33,6 +33,28 @@ void main() {
     },
   );
 
+  test('ignores application lock files but not the document itself', () async {
+    final events = StreamController<String>.broadcast();
+    addTearDown(events.close);
+    var calls = 0;
+    final watcher = SyncFolderWatcher(
+      onChange: () async => calls++,
+      debounce: const Duration(milliseconds: 5),
+      eventStream: (_) => events.stream,
+    );
+    addTearDown(watcher.dispose);
+
+    watcher.start(r'C:\sync-root');
+    events
+      ..add(r'C:\sync-root\passwords.kdbx.lock')
+      ..add(r'C:\sync-root\~$report.docx');
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(calls, 0);
+
+    events.add(r'C:\sync-root\passwords.kdbx');
+    await _waitFor(() => calls == 1);
+  });
+
   test('queues one follow-up pass while a sync pass is running', () async {
     final events = StreamController<String>.broadcast();
     addTearDown(events.close);

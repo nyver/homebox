@@ -1987,6 +1987,35 @@ final class _FilesSectionState extends State<_FilesSection> {
         // to the temp-file open path below.
       }
     }
+    if (defaultTargetPlatform == TargetPlatform.windows &&
+        syncFolder != null &&
+        relativePath != null) {
+      // The file is already mirrored on disk: open that copy in place so the
+      // edits made by the external application are noticed by the sync-folder
+      // watcher and uploaded, instead of editing a detached download.
+      final localPath = '$syncFolder/$relativePath';
+      if (await _windowsSyncFolder.openFile(localPath)) return;
+      final stillPresent = await File(localPath).exists();
+      if (!context.mounted) return;
+      if (stillPresent) {
+        // Present but refused (for example an executable type): do not
+        // launch it, and do not silently download a second copy either.
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              _localized(
+                context,
+                en: 'HomeBox could not open this file. Use Save as… instead.',
+                ru: 'HomeBox не удалось открыть файл. Используйте «Сохранить как…».',
+              ),
+            ),
+          ),
+        );
+        return;
+      }
+      // The local copy vanished since the last sync pass; fall through to the
+      // regular download below.
+    }
     if (!context.mounted) return;
 
     // Not (yet) materialized to a local sync folder, so there is no document

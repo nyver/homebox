@@ -37,4 +37,29 @@ void main() {
 
     expect(await WindowsSyncFolder().openFileLocation(''), isFalse);
   });
+
+  test('opens a materialized file through the native runner', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    String? requestedPath;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          expect(call.method, 'openFile');
+          requestedPath = call.arguments as String;
+          return true;
+        });
+
+    final opened = await WindowsSyncFolder().openFile(
+      r'C:\HomeBox\Sync\passwords.kdbx',
+    );
+
+    expect(opened, isTrue);
+    expect(requestedPath, r'C:\HomeBox\Sync\passwords.kdbx');
+  });
+
+  test('openFile reports false when the runner is unavailable', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+
+    expect(await WindowsSyncFolder().openFile(r'C:\HomeBox.txt'), isFalse);
+    expect(await WindowsSyncFolder().openFile(''), isFalse);
+  });
 }

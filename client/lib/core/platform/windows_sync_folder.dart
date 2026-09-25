@@ -24,6 +24,23 @@ final class WindowsSyncFolder {
     }
   }
 
+  /// Opens the materialized [filePath] in the user's default application
+  /// (Windows shows its own app chooser when none is associated).
+  ///
+  /// The native runner refuses missing files and executable/script types, so
+  /// a `false` result means the caller should fall back to "Save as". Edits
+  /// the user saves are picked up by the sync-folder watcher and uploaded.
+  Future<bool> openFile(String filePath) async {
+    if (defaultTargetPlatform != TargetPlatform.windows || filePath.isEmpty) {
+      return false;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('openFile', filePath) ?? false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
   /// Opens Explorer at the directory containing the materialized [filePath].
   ///
   /// The native runner verifies that the path still names a regular file, as

@@ -309,8 +309,11 @@ void main() {
 
     // Edit the file directly on disk.
     await localFile.writeAsString('edited by the user');
+    // An editor's lock file next to the document must not become a vault file.
+    await File('${rootDir.path}/note.txt.kdbx.lock').writeAsString('lock');
 
     await uploader.scan(rootDir.path);
+    expect(syncEngine.nodeCache.listChildren(null), hasLength(1));
     expect(
       uploader.status,
       LocalUploadStatus.idle,

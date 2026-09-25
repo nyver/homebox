@@ -1,5 +1,6 @@
 #include "flutter_window.h"
 
+#include <cwctype>
 #include <optional>
 #include <shellapi.h>
 #include <string>
@@ -43,6 +44,29 @@ std::wstring WideFromUtf8(const std::string& value) {
   MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
                       static_cast<int>(value.size()), result.data(), length);
   return result;
+}
+
+// Extensions that Windows would execute rather than open in a viewer. A synced
+// file with one of these must never be launched by a plain tap; the caller
+// falls back to "Save as" instead.
+bool IsExecutableExtension(const std::wstring& path) {
+  const std::wstring::size_type dot = path.find_last_of(L'.');
+  const std::wstring::size_type separator = path.find_last_of(L"\\/");
+  if (dot == std::wstring::npos ||
+      (separator != std::wstring::npos && dot < separator)) {
+    return false;
+  }
+  std::wstring extension = path.substr(dot);
+  for (wchar_t& c : extension) c = static_cast<wchar_t>(std::towlower(c));
+  static const wchar_t* const kBlocked[] = {
+      L".exe", L".com", L".scr", L".pif", L".bat", L".cmd", L".msi",
+      L".msp", L".ps1", L".psm1", L".vbs", L".vbe", L".js",  L".jse",
+      L".wsf", L".wsh", L".hta", L".cpl", L".lnk", L".url", L".reg",
+      L".jar", L".appx", L".msix"};
+  for (const wchar_t* blocked : kBlocked) {
+    if (extension == blocked) return true;
+  }
+  return false;
 }
 
 }  // namespace
@@ -249,6 +273,29 @@ bool FlutterWindow::OpenFileLocation(const std::wstring& file_path) {
          32;
 }
 
+bool FlutterWindow::OpenFile(const std::wstring& file_path) {
+  if (file_path.empty()) return false;
+  std::wstring path = file_path;
+  for (wchar_t& c : path) {
+    if (c == L'/') c = L'\\';
+  }
+  const DWORD attributes = GetFileAttributes(path.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+      IsExecutableExtension(path)) {
+    return false;
+  }
+  // The "open" verb uses the user's default application. When none is
+  // associated (SE_ERR_NOASSOC), "openas" shows Windows' own app chooser.
+  intptr_t result = reinterpret_cast<intptr_t>(ShellExecute(
+      GetHandle(), L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+  if (result == SE_ERR_NOASSOC) {
+    result = reinterpret_cast<intptr_t>(ShellExecute(
+        GetHandle(), L"openas", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+  }
+  return result > 32;
+}
+
 void FlutterWindow::ConfigurePlatformChannel() {
   platform_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       flutter_controller_->engine()->messenger(), "homebox/windows",
@@ -294,6 +341,22 @@ void FlutterWindow::ConfigurePlatformChannel() {
         }
         if (call.method_name() == "openSyncFolder") {
           result->Success(flutter::EncodableValue(OpenSyncFolder()));
+          return;
+        }
+        if (call.method_name() == "openFile") {
+          const auto* path = call.arguments() == nullptr
+                                 ? nullptr
+                                 : std::get_if<std::string>(call.arguments());
+          if (path == nullptr) {
+            result->Error("invalid-argument", "Expected a UTF-8 file path.");
+            return;
+          }
+          const std::wstring wide_path = WideFromUtf8(*path);
+          if (path->empty() || wide_path.empty()) {
+            result->Error("invalid-argument", "File path is not valid UTF-8.");
+            return;
+          }
+          result->Success(flutter::EncodableValue(OpenFile(wide_path)));
           return;
         }
         if (call.method_name() == "openFileLocation") {

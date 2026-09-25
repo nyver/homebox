@@ -6,6 +6,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import '../../core/util/local_path.dart';
+
 typedef SyncFolderChangeHandler = Future<void> Function();
 typedef SyncFolderPathEventStream = Stream<String> Function(String rootPath);
 
@@ -42,8 +44,8 @@ final class SyncFolderWatcher extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
 
   /// Starts watching [rootPath], replacing any earlier watched directory.
-  /// Paths ending in `.homebox-tmp` are materializer staging files and do not
-  /// represent user changes.
+  /// Materializer staging files and application lock files (see
+  /// [isTransientSyncFileName]) do not represent user changes.
   void start(String rootPath) {
     if (rootPath.isEmpty) {
       throw ArgumentError.value(rootPath, 'rootPath');
@@ -119,7 +121,8 @@ final class SyncFolderWatcher extends ChangeNotifier {
     _setStatus(SyncFolderWatcherStatus.error);
   }
 
-  bool _isTemporaryPath(String path) => path.endsWith('.homebox-tmp');
+  bool _isTemporaryPath(String path) =>
+      isTransientSyncFileName(basenameOfLocalPath(path));
 
   void _setStatus(SyncFolderWatcherStatus status) {
     _status = status;
