@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "flutter_window.h"
+#include "single_instance.h"
 #include "utils.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
@@ -17,6 +18,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   }
   if (::GetLastError() == ERROR_ALREADY_EXISTS) {
     ::CloseHandle(single_instance);
+    // Bring the running instance forward instead of silently exiting, so a
+    // repeated launch restores the window hidden in the notification area.
+    ActivatePrimaryInstance(5000);
     return EXIT_SUCCESS;
   }
 

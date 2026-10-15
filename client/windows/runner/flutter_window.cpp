@@ -9,6 +9,7 @@
 #include "flutter/generated_plugin_registrant.h"
 #include <flutter/standard_method_codec.h>
 #include "resource.h"
+#include "single_instance.h"
 
 namespace {
 
@@ -108,6 +109,7 @@ bool FlutterWindow::OnCreate() {
   // A notification-area policy may block icon registration. The main window
   // must remain usable in that case instead of failing the entire startup.
   AddTrayIcon();
+  MarkPrimaryInstanceWindow(GetHandle());
   return true;
 }
 
@@ -127,6 +129,15 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               LPARAM const lparam) noexcept {
   if (message == WM_DROPFILES) {
     HandleFileDrop(reinterpret_cast<HDROP>(wparam));
+    return 0;
+  }
+  if (message == WM_DESTROY) {
+    // OnDestroy runs after the base class has dropped the window handle, so
+    // the property must be removed here while |hwnd| is still valid.
+    UnmarkPrimaryInstanceWindow(hwnd);
+  }
+  if (message != 0 && message == ShowInstanceMessage()) {
+    ShowFromTray();
     return 0;
   }
 
@@ -233,8 +244,11 @@ void FlutterWindow::RemoveTrayIcon() {
 }
 
 void FlutterWindow::ShowFromTray() {
-  ShowWindow(GetHandle(), SW_RESTORE);
-  SetForegroundWindow(GetHandle());
+  HWND window = GetHandle();
+  // SW_RESTORE would un-maximize a hidden maximized window; only use it when
+  // the window is actually minimized.
+  ShowWindow(window, IsIconic(window) ? SW_RESTORE : SW_SHOW);
+  SetForegroundWindow(window);
 }
 
 bool FlutterWindow::HasOpenableSyncFolder() const {
