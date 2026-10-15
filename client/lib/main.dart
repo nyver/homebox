@@ -1580,38 +1580,90 @@ const Widget _folderListIcon = SizedBox.square(
 /// Shows a decrypted, downscaled image thumbnail when it is inexpensive to
 /// fetch. All other files, including unsupported image encodings, retain the
 /// regular file icon.
-class _FileListLeading extends StatelessWidget {
+///
+/// Stateful on purpose: the Files list rebuilds on every controller
+/// notification (refreshes, transfer progress), and a [FutureBuilder] given
+/// a fresh future on each rebuild would drop back to the icon for a frame,
+/// making every thumbnail flicker. The row keeps its own bytes and only asks
+/// again when the file or its content version changes.
+class _FileListLeading extends StatefulWidget {
   const _FileListLeading({required this.entry, required this.controller});
 
   final FileEntry entry;
   final FilesController controller;
 
   @override
-  Widget build(BuildContext context) {
-    if (!controller.canShowImagePreview(entry)) {
-      return _defaultFileListIcon;
+  State<_FileListLeading> createState() => _FileListLeadingState();
+}
+
+class _FileListLeadingState extends State<_FileListLeading> {
+  Uint8List? _bytes;
+  // The request this row is still waiting for, if any. Compared by identity
+  // so a late completion for a previous file never paints over the current one.
+  ({FilesController controller, FileEntry entry})? _pending;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(_FileListLeading oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller ||
+        oldWidget.entry.node.id != widget.entry.node.id ||
+        oldWidget.entry.node.currentVersionId !=
+            widget.entry.node.currentVersionId) {
+      _release();
+      _load();
     }
+  }
+
+  @override
+  void dispose() {
+    _release();
+    super.dispose();
+  }
+
+  void _load() {
+    final controller = widget.controller;
+    final entry = widget.entry;
+    _bytes = controller.cachedImagePreview(entry);
+    if (_bytes != null || !controller.canShowImagePreview(entry)) return;
+    final request = (controller: controller, entry: entry);
+    _pending = request;
+    unawaited(
+      controller.imagePreview(entry).then((bytes) {
+        if (!identical(_pending, request)) return;
+        _pending = null;
+        if (mounted && bytes != null) setState(() => _bytes = bytes);
+      }),
+    );
+  }
+
+  void _release() {
+    final pending = _pending;
+    _pending = null;
+    pending?.controller.releaseImagePreview(pending.entry);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = _bytes;
+    if (bytes == null) return _defaultFileListIcon;
     return SizedBox.square(
       dimension: _fileListLeadingSize,
-      child: FutureBuilder(
-        future: controller.imagePreview(entry),
-        builder: (context, snapshot) {
-          final bytes = snapshot.data;
-          if (bytes == null) {
-            return _defaultFileListIcon;
-          }
-          return ClipRRect(
-            borderRadius: BorderRadius.circular(6),
-            child: Image.memory(
-              bytes,
-              fit: BoxFit.cover,
-              cacheWidth: 96,
-              cacheHeight: 96,
-              errorBuilder: (context, error, stackTrace) =>
-                  _defaultFileListIcon,
-            ),
-          );
-        },
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: Image.memory(
+          bytes,
+          fit: BoxFit.cover,
+          cacheWidth: 96,
+          cacheHeight: 96,
+          gaplessPlayback: true,
+          errorBuilder: (context, error, stackTrace) => _defaultFileListIcon,
+        ),
       ),
     );
   }

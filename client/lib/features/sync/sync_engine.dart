@@ -406,7 +406,13 @@ final class SyncEngine extends ChangeNotifier {
       );
       for (final change in page.changes) {
         final nodeId = change.nodeId;
-        if (nodeId != null) {
+        // A mutation queued after this pass's push phase started (e.g. Move
+        // to Trash while a pass was in flight) is applied optimistically in
+        // the cache only. Overwriting it with the server's older state would
+        // resurrect the node until the next pass, and the sync folder would
+        // download it again. Its own push refreshes the node afterwards.
+        if (nodeId != null &&
+            !pendingOperations.hasPendingOperationsForNode(nodeId)) {
           await _refreshNodeFromServer(
             api,
             accessToken,

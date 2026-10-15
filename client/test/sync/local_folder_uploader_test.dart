@@ -554,4 +554,151 @@ void main() {
       expect(utf8.decode(downloaded), 'nested local file');
     },
   );
+
+  test(
+    'scan never re-uploads the local copy of a file moved to Trash while a sync pass is running',
+    () async {
+      final h = await _SyncFolderHarness.create();
+      final sourceDir = await Directory.systemTemp.createTemp(
+        'homebox_trash_source_',
+      );
+      addTearDown(() => sourceDir.delete(recursive: true));
+      final source = File('${sourceDir.path}/photo.jpg');
+      await source.writeAsString('trashed picture');
+      expect(await h.files.uploadFile(source.path), isTrue);
+      expect(await h.files.createFolder('Album'), isTrue);
+      await _awaitBackgroundSync(h.engine);
+      await h.materializer.materialize(h.root.path);
+      expect(await File('${h.root.path}/photo.jpg').exists(), isTrue);
+
+      // Trash both while a folder pass would sit between its materialize()
+      // prune and the uploader's listing: the cache already says deleted,
+      // but the local copies are still on disk.
+      for (final entry in List.of(h.files.entries)) {
+        expect(await h.files.deleteNode(entry), isTrue);
+      }
+      await _awaitBackgroundSync(h.engine);
+
+      await h.uploader.scan(h.root.path);
+      expect(h.uploader.status, LocalUploadStatus.idle);
+      expect(
+        h.engine.nodeCache.listChildren(null),
+        isEmpty,
+        reason: 'a stale materialized copy must not come back as a new node',
+      );
+
+      await h.materializer.materialize(h.root.path);
+      expect(await File('${h.root.path}/photo.jpg').exists(), isFalse);
+      expect(await Directory('${h.root.path}/Album').exists(), isFalse);
+      await h.uploader.scan(h.root.path);
+      expect(h.engine.nodeCache.listChildren(null), isEmpty);
+    },
+  );
+
+  test(
+    'scan trusts an unchanged size and modification time instead of re-hashing',
+    () async {
+      final h = await _SyncFolderHarness.create();
+      final sourceDir = await Directory.systemTemp.createTemp(
+        'homebox_stat_source_',
+      );
+      addTearDown(() => sourceDir.delete(recursive: true));
+      final source = File('${sourceDir.path}/notes.txt');
+      await source.writeAsString('version one');
+      expect(await h.files.uploadFile(source.path), isTrue);
+      final node = h.files.entries.single.node;
+      await h.materializer.materialize(h.root.path);
+
+      final recorded = h.engine.materializedFiles.getById(node.id)!;
+      expect(recorded.localSize, 'version one'.length);
+      expect(recorded.localModifiedAt, isNotNull);
+
+      // Same length and a restored timestamp: indistinguishable from an
+      // untouched file without reading it, so the scan must not hash it.
+      final local = File('${h.root.path}/notes.txt');
+      await local.writeAsString('version two');
+      await local.setLastModified(recorded.localModifiedAt!);
+      await h.uploader.scan(h.root.path);
+      expect(
+        h.engine.nodeCache.getById(node.id)!.currentVersionId,
+        node.currentVersionId,
+      );
+
+      // A real edit moves the timestamp, so it is hashed and uploaded.
+      await local.setLastModified(
+        recorded.localModifiedAt!.add(const Duration(minutes: 1)),
+      );
+      await h.uploader.scan(h.root.path);
+      final updated = h.engine.nodeCache.getById(node.id)!;
+      expect(updated.currentVersionId, isNot(node.currentVersionId));
+      final afterUpload = h.engine.materializedFiles.getById(node.id)!;
+      expect(afterUpload.contentVersionId, updated.currentVersionId);
+      expect(afterUpload.localSize, 'version two'.length);
+    },
+  );
+}
+
+/// Server, vault, engine, Files controller and both sync-folder directions
+/// wired together against a fresh temporary root folder.
+final class _SyncFolderHarness {
+  _SyncFolderHarness._({
+    required this.engine,
+    required this.files,
+    required this.materializer,
+    required this.uploader,
+    required this.root,
+  });
+
+  final SyncEngine engine;
+  final FilesController files;
+  final SyncFolderMaterializer materializer;
+  final LocalFolderUploader uploader;
+  final Directory root;
+
+  static Future<_SyncFolderHarness> create() async {
+    final fakeServer = FakeNodeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: FakeNodeServer.userId,
+    );
+    recoverySecret.destroy();
+    final engine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(engine.dispose);
+    final files = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: engine,
+    );
+    addTearDown(files.dispose);
+    final materializer = SyncFolderMaterializer(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: engine,
+    );
+    addTearDown(materializer.dispose);
+    final uploader = LocalFolderUploader(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: engine,
+    );
+    addTearDown(uploader.dispose);
+    final root = await Directory.systemTemp.createTemp(
+      'homebox_uploader_root_',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    return _SyncFolderHarness._(
+      engine: engine,
+      files: files,
+      materializer: materializer,
+      uploader: uploader,
+      root: root,
+    );
+  }
 }

@@ -138,6 +138,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           ? metadata.fileName
           : '$relativePath/${metadata.fileName}';
       if (node.isDirectory) {
+        final previous = _syncEngine.materializedDirectories.getById(node.id);
         await _createDirectory(rootPath, childRelativePath);
         _syncEngine.materializedDirectories.upsert(
           MaterializedDirectory(
@@ -156,6 +157,12 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           seenNodeIds: seenNodeIds,
           fileErrors: fileErrors,
         );
+        if (previous != null && previous.relativePath != childRelativePath) {
+          // Renamed or moved on the server: its files were relocated above,
+          // so drop the now-empty old folder. Left behind, the uploader would
+          // see an unknown local folder and create it remotely again.
+          await _deleteEmptyDirectory(rootPath, previous.relativePath);
+        }
       } else {
         await _materializeFile(
           node: node,
@@ -198,11 +205,14 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         if (await oldFile.exists()) {
           await Directory(File(targetPath).parent.path).create(recursive: true);
           await oldFile.rename(targetPath);
+          final stat = await _localStat(targetPath);
           _syncEngine.materializedFiles.upsert(
             MaterializedFile(
               nodeId: node.id,
               relativePath: relativePath,
               contentVersionId: node.currentVersionId,
+              localSize: stat?.size,
+              localModifiedAt: stat?.modified,
             ),
           );
         }
@@ -223,6 +233,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     if (!_usesAndroidStorage &&
         expectedHash != null &&
         await File(targetPath).exists()) {
+      final stat = await _localStat(targetPath);
       final localHash = await plaintextFileSha256(File(targetPath));
       if (localHash.toLowerCase() == expectedHash.toLowerCase()) {
         _syncEngine.materializedFiles.upsert(
@@ -230,6 +241,8 @@ final class SyncFolderMaterializer extends ChangeNotifier {
             nodeId: node.id,
             relativePath: relativePath,
             contentVersionId: node.currentVersionId,
+            localSize: stat?.size,
+            localModifiedAt: stat?.modified,
           ),
         );
         _syncEngine.materializationFailures.remove(node.id);
@@ -288,11 +301,14 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         // clean up the stale copy at its old location.
         await _deleteFile(rootPath, existing.relativePath);
       }
+      final stat = await _localStat(targetPath);
       _syncEngine.materializedFiles.upsert(
         MaterializedFile(
           nodeId: node.id,
           relativePath: relativePath,
           contentVersionId: node.currentVersionId,
+          localSize: stat?.size,
+          localModifiedAt: stat?.modified,
         ),
       );
       _syncEngine.materializationFailures.remove(node.id);
@@ -392,6 +408,14 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       );
     }
     return Directory('$rootPath/$relativePath').create(recursive: true);
+  }
+
+  /// The stat recorded alongside a materialized file so the uploader can skip
+  /// re-hashing it. Android SAF documents are never scanned, so none there.
+  Future<FileStat?> _localStat(String targetPath) async {
+    if (_usesAndroidStorage) return null;
+    final stat = await File(targetPath).stat();
+    return stat.type == FileSystemEntityType.notFound ? null : stat;
   }
 
   Future<bool> _fileExists(String rootPath, String relativePath) {

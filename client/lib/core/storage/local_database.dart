@@ -137,4 +137,11 @@ final List<_Migration> _migrations = [
       node_revision INTEGER NOT NULL
     );
   '''),
+  // Size and modification time of the local copy when its content was last
+  // known to match content_version_id, so a sync-folder scan can skip
+  // re-hashing untouched files. NULL means unknown: hash before trusting it.
+  _Migration(5, '''
+    ALTER TABLE materialized_files ADD COLUMN local_size INTEGER;
+    ALTER TABLE materialized_files ADD COLUMN local_modified_at INTEGER;
+  '''),
 ];

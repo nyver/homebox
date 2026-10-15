@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
@@ -414,4 +415,68 @@ void main() {
     expect(laterReady.single.retryCount, 1);
     expect(laterReady.single.lastErrorCode, 'INTERNAL_ERROR');
   });
+
+  test(
+    'a pull never overwrites a node whose own mutation is still waiting to be pushed',
+    () async {
+      final fakeServer = FakeNodeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      // Live on the server and still unseen by this engine's change cursor,
+      // so the next pull will try to refresh it.
+      fakeServer.remoteCreate(id: 'node-1');
+      final engine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(engine.dispose);
+      final now = DateTime.now().toUtc();
+      engine.nodeCache.upsert(
+        LocalNode(
+          id: 'node-1',
+          parentId: null,
+          nodeType: 'DIRECTORY',
+          metadataCiphertext: Uint8List.fromList(utf8.encode('m')),
+          metadataKeyVersion: 1,
+          currentVersionId: null,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: now,
+          pendingCreate: false,
+        ),
+      );
+      // Queued Move to Trash that this pass's push phase does not attempt
+      // (here: still in its backoff window).
+      engine.pendingOperations.enqueue(
+        PendingOperation(
+          id: 'queued-delete',
+          operationId: 'op-queued-delete',
+          type: PendingOperationType.deleteNode,
+          nodeId: 'node-1',
+          payload: const {},
+          baseRevision: 1,
+          createdAt: now,
+          retryCount: 1,
+          nextRetryAt: now.add(const Duration(minutes: 5)),
+          status: PendingOperationStatus.pending,
+        ),
+      );
+
+      await engine.runOnce();
+
+      expect(engine.status, SyncStatus.idle, reason: engine.errorMessage);
+      expect(
+        engine.nodeCache.getById('node-1')!.isDeleted,
+        isTrue,
+        reason: 'the optimistic Trash must survive until its push runs',
+      );
+      expect(
+        engine.pendingOperations.getById('queued-delete')!.status,
+        PendingOperationStatus.pending,
+      );
+    },
+  );
 }

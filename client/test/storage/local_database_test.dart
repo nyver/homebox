@@ -15,7 +15,7 @@ void main() {
     final versions = second.db.select(
       'SELECT version FROM schema_migrations ORDER BY version',
     );
-    expect(versions.map((r) => r['version']), [1, 2, 3, 4]);
+    expect(versions.map((r) => r['version']), [1, 2, 3, 4, 5]);
     // Re-opening must not error re-applying earlier migrations, and the
     // nodes table from migration 1 must still exist and be usable.
     second.db.execute(
@@ -28,6 +28,16 @@ void main() {
           .select('SELECT COUNT(*) AS c FROM materialization_failures')
           .first['c'],
       0,
+    );
+    final materializedColumns = {
+      for (final row in second.db.select(
+        'PRAGMA table_info(materialized_files)',
+      ))
+        row['name'],
+    };
+    expect(
+      materializedColumns,
+      containsAll(['local_size', 'local_modified_at']),
     );
   });
 

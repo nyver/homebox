@@ -43,6 +43,17 @@ enum LocalUploadStatus { idle, scanning, resyncing, error }
 /// this device is left alone to avoid mistaking an incomplete pull for intent.
 /// A local rename is still seen as a delete plus a new node rather than
 /// recognized as a rename of the existing one.
+///
+/// A local file or folder still recorded as the materialized copy of some
+/// node, but no longer matching a live node at that path, is never uploaded
+/// as new: its node was moved to Trash, renamed, or moved on the server (or
+/// in the Files page while a pass was running), and the next materialize()
+/// pass removes or relocates it. Uploading it would resurrect a trashed file.
+///
+/// A tracked file whose size and modification time still match what was
+/// recorded when its content was last verified is not re-hashed, so an idle
+/// scan of a large folder costs a directory listing instead of reading every
+/// byte again.
 final class LocalFolderUploader extends ChangeNotifier {
   LocalFolderUploader({
     required ServerConnectionController serverConnection,
@@ -97,6 +108,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         keyScopeId: session.user.id,
         vaultKey: vaultKey,
         vaultId: vaultId,
+        tracked: _TrackedPaths.snapshot(_syncEngine),
       );
       _errorMessage = null;
       _setStatus(LocalUploadStatus.idle);
@@ -187,6 +199,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         keyScopeId: session.user.id,
         vaultKey: vaultKey,
         vaultId: uuidStringToBytes(session.user.id),
+        tracked: _TrackedPaths.snapshot(_syncEngine),
         strict: true,
       );
       _errorMessage = null;
@@ -212,6 +225,7 @@ final class LocalFolderUploader extends ChangeNotifier {
     required String keyScopeId,
     required SecretKey vaultKey,
     required Uint8List vaultId,
+    required _TrackedPaths tracked,
     bool strict = false,
   }) async {
     final dir = Directory(
@@ -278,8 +292,14 @@ final class LocalFolderUploader extends ChangeNotifier {
       );
     }
 
+    String childPath(String name) =>
+        relativePath.isEmpty ? name : '$relativePath/$name';
+
     for (final name in localFiles.keys) {
       if (expectedChildren.containsKey(name)) continue; // already handled above (or is a directory-named collision, skipped below).
+      // A stale copy of a node trashed, renamed or moved elsewhere; the
+      // materializer cleans it up (see the class doc comment).
+      if (tracked.files.contains(childPath(name))) continue;
       await _uploadNewFile(
         api: api,
         accessToken: accessToken,
@@ -296,6 +316,7 @@ final class LocalFolderUploader extends ChangeNotifier {
 
     for (final name in localDirs) {
       if (expectedChildren.containsKey(name)) continue;
+      if (tracked.directories.contains(childPath(name))) continue;
       final createdDirectory = await _createRemoteDirectory(
         api: api,
         accessToken: accessToken,
@@ -309,12 +330,13 @@ final class LocalFolderUploader extends ChangeNotifier {
       await _scanDirectory(
         rootPath: rootPath,
         parentId: createdDirectory.id,
-        relativePath: relativePath.isEmpty ? name : '$relativePath/$name',
+        relativePath: childPath(name),
         api: api,
         accessToken: accessToken,
         keyScopeId: keyScopeId,
         vaultKey: vaultKey,
         vaultId: vaultId,
+        tracked: tracked,
         strict: strict,
       );
     }
@@ -332,14 +354,13 @@ final class LocalFolderUploader extends ChangeNotifier {
       await _scanDirectory(
         rootPath: rootPath,
         parentId: node.id,
-        relativePath: relativePath.isEmpty
-            ? entry.key
-            : '$relativePath/${entry.key}',
+        relativePath: childPath(entry.key),
         api: api,
         accessToken: accessToken,
         keyScopeId: keyScopeId,
         vaultKey: vaultKey,
         vaultId: vaultId,
+        tracked: tracked,
         strict: strict,
       );
     }
@@ -359,7 +380,19 @@ final class LocalFolderUploader extends ChangeNotifier {
     bool strict = false,
   }) async {
     try {
-      final plaintextLength = await localFile.length();
+      final fileRelativePath = relativePath.isEmpty
+          ? name
+          : '$relativePath/$name';
+      final stat = await localFile.stat();
+      final materialized = _syncEngine.materializedFiles.getById(node.id);
+      final materializedCurrent =
+          materialized != null &&
+          materialized.contentVersionId == node.currentVersionId &&
+          materialized.relativePath == fileRelativePath;
+      if (materializedCurrent && materialized.matchesLocalStat(stat)) {
+        return; // untouched since its content was last verified.
+      }
+      final plaintextLength = stat.size;
       if (plaintextLength > homeBoxMaxPlaintextFileSize) {
         if (strict) {
           throw StateError('$name exceeds the HomeBox file size limit.');
@@ -369,7 +402,20 @@ final class LocalFolderUploader extends ChangeNotifier {
       final hash = await plaintextFileSha256(localFile);
       if (currentMetadata.plaintextSha256?.toLowerCase() ==
           hash.toLowerCase()) {
-        return; // unchanged - either untouched, or exactly what materialize() itself just wrote.
+        // Unchanged - either untouched, or exactly what materialize() itself
+        // just wrote. Remember the stat so the next scan can skip the hash.
+        if (materializedCurrent) {
+          _syncEngine.materializedFiles.upsert(
+            MaterializedFile(
+              nodeId: node.id,
+              relativePath: fileRelativePath,
+              contentVersionId: node.currentVersionId,
+              localSize: stat.size,
+              localModifiedAt: stat.modified,
+            ),
+          );
+        }
+        return;
       }
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(
@@ -404,8 +450,12 @@ final class LocalFolderUploader extends ChangeNotifier {
       _syncEngine.materializedFiles.upsert(
         MaterializedFile(
           nodeId: node.id,
-          relativePath: relativePath.isEmpty ? name : '$relativePath/$name',
+          relativePath: fileRelativePath,
           contentVersionId: uploadedNode.currentVersionId,
+          // Taken before hashing: an edit made during the upload changes the
+          // stat, so the next scan hashes again instead of skipping it.
+          localSize: stat.size,
+          localModifiedAt: stat.modified,
         ),
       );
     } catch (error) {
@@ -430,7 +480,8 @@ final class LocalFolderUploader extends ChangeNotifier {
     bool strict = false,
   }) async {
     try {
-      final plaintextLength = await localFile.length();
+      final stat = await localFile.stat();
+      final plaintextLength = stat.size;
       if (plaintextLength > homeBoxMaxPlaintextFileSize) {
         if (strict) {
           throw StateError('$name exceeds the HomeBox file size limit.');
@@ -489,6 +540,8 @@ final class LocalFolderUploader extends ChangeNotifier {
           nodeId: nodeId,
           relativePath: relativePath.isEmpty ? name : '$relativePath/$name',
           contentVersionId: uploadedNode.currentVersionId,
+          localSize: stat.size,
+          localModifiedAt: stat.modified,
         ),
       );
     } catch (error) {
@@ -602,4 +655,24 @@ final class LocalFolderUploader extends ChangeNotifier {
     _disposed = true;
     super.dispose();
   }
+}
+
+/// Relative paths this device has materialized, read once per scan so the
+/// per-entry checks stay in memory instead of querying SQLite per file.
+final class _TrackedPaths {
+  const _TrackedPaths({required this.files, required this.directories});
+
+  factory _TrackedPaths.snapshot(SyncEngine syncEngine) => _TrackedPaths(
+    files: {
+      for (final file in syncEngine.materializedFiles.listAll())
+        file.relativePath,
+    },
+    directories: {
+      for (final directory in syncEngine.materializedDirectories.listAll())
+        directory.relativePath,
+    },
+  );
+
+  final Set<String> files;
+  final Set<String> directories;
 }

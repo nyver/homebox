@@ -394,4 +394,73 @@ void main() {
     expect(fakeServer.contentDownloadCount, 1);
     expect(fakeServer.deleteRequestCount, 1);
   });
+
+  test('a folder renamed on the server is relocated without leaving its old empty folder behind', () async {
+    final fakeServer = FakeNodeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: FakeNodeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final filesController = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(filesController.dispose);
+    final materializer = SyncFolderMaterializer(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(materializer.dispose);
+    final rootDir = await Directory.systemTemp.createTemp(
+      'homebox_syncfolder_root_',
+    );
+    addTearDown(() => rootDir.delete(recursive: true));
+    final sourceDir = await Directory.systemTemp.createTemp(
+      'homebox_syncfolder_source_',
+    );
+    addTearDown(() => sourceDir.delete(recursive: true));
+
+    expect(await filesController.createFolder('Old'), isTrue);
+    await _awaitBackgroundSync(syncEngine);
+    final folder = filesController.entries.single;
+    filesController.openFolder(folder);
+    await pumpEventQueue();
+    final sourceFile = File('${sourceDir.path}/note.txt');
+    await sourceFile.writeAsString('inside the folder');
+    expect(await filesController.uploadFile(sourceFile.path), isTrue);
+    await materializer.materialize(rootDir.path);
+    expect(await File('${rootDir.path}/Old/note.txt').exists(), isTrue);
+
+    filesController.goToRoot();
+    await pumpEventQueue();
+    expect(
+      await filesController.renameNode(filesController.entries.single, 'New'),
+      isTrue,
+    );
+    await _awaitBackgroundSync(syncEngine);
+    await materializer.materialize(rootDir.path);
+
+    expect(materializer.status, SyncFolderStatus.idle);
+    expect(
+      await File('${rootDir.path}/New/note.txt').readAsString(),
+      'inside the folder',
+    );
+    expect(await Directory('${rootDir.path}/Old').exists(), isFalse);
+    expect(
+      syncEngine.materializedDirectories.getById(folder.node.id)!.relativePath,
+      'New',
+    );
+  });
 }

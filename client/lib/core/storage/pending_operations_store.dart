@@ -124,6 +124,17 @@ final class PendingOperationsStore {
     return rows.isNotEmpty;
   }
 
+  /// True while a mutation for [nodeId] is still waiting to be pushed
+  /// (including one in its backoff window). RUNNING is deliberately excluded:
+  /// the push phase finishes before the pull phase of the same pass.
+  bool hasPendingOperationsForNode(String nodeId) {
+    final rows = _db.select(
+      "SELECT 1 FROM pending_operations WHERE node_id = ? AND status = 'PENDING' LIMIT 1",
+      [nodeId],
+    );
+    return rows.isNotEmpty;
+  }
+
   bool get hasUnfinishedOperations {
     final rows = _db.select(
       "SELECT 1 FROM pending_operations WHERE status IN ('PENDING', 'RUNNING', 'BLOCKED') LIMIT 1",

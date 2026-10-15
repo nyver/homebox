@@ -3,6 +3,7 @@
 // backing private field names (matches ServerConnectionController/SyncEngine).
 // ignore_for_file: prefer_initializing_formals
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
@@ -120,10 +121,18 @@ final class FilesController extends ChangeNotifier {
   final SyncEngine _syncEngine;
   final MetadataCipher _metadataCipher = MetadataCipher();
   static const int _maxImagePreviewSourceSize = 12 * 1024 * 1024;
-  static const int _maxCachedImagePreviews = 8;
+  static const int _imagePreviewCacheBudgetBytes = 64 * 1024 * 1024;
+  static const int _maxCachedImagePreviews = 256;
   static const int _maxConcurrentImagePreviews = 2;
-  final Map<String, Uint8List?> _imagePreviewCache = {};
-  final Map<String, Future<Uint8List?>> _imagePreviewLoads = {};
+  // Insertion order doubles as LRU order: a cache hit is re-inserted at the
+  // end, and eviction removes from the front. Failed previews are not cached:
+  // a row asks again only when it is built anew, so a transient network
+  // error heals on the next visit without ever looping.
+  final Map<String, Uint8List> _imagePreviewCache = {};
+  int _imagePreviewCacheBytes = 0;
+  final Map<String, _ImagePreviewLoad> _imagePreviewLoads = {};
+  final Queue<_ImagePreviewLoad> _queuedImagePreviews = Queue();
+  int _activeImagePreviewLoads = 0;
 
   FilesStatus _status = FilesStatus.idle;
   String? _errorMessage;
@@ -159,37 +168,104 @@ final class FilesController extends ChangeNotifier {
   String? materializedRelativePath(String nodeId) =>
       _syncEngine.materializedFiles.getById(nodeId)?.relativePath;
 
+  /// The already-decrypted preview for [entry], if one is cached. Lets a list
+  /// row paint its thumbnail in the very first frame instead of flashing the
+  /// file icon while an already-completed future resolves.
+  Uint8List? cachedImagePreview(FileEntry entry) {
+    if (!canShowImagePreview(entry)) return null;
+    final key = _imagePreviewKey(entry);
+    final bytes = _imagePreviewCache.remove(key);
+    // Re-insert to mark this entry as most recently used.
+    if (bytes != null) _imagePreviewCache[key] = bytes;
+    return bytes;
+  }
+
   /// Returns a decrypted image source for a compact list preview. Previews
   /// deliberately use a separate, bounded cache and never claim the primary
   /// transfer state, so rendering a list cannot block an explicit upload or
   /// download. Large images remain a regular file icon to avoid excessive
   /// network and memory use while scrolling.
+  ///
+  /// Requests beyond the concurrency limit wait in a queue instead of being
+  /// rejected. Completing a preview never notifies this controller's
+  /// listeners: the requesting row updates itself, so a folder of images
+  /// does not rebuild the whole list once per thumbnail. A row that scrolls
+  /// away before its download starts should call [releaseImagePreview].
   Future<Uint8List?> imagePreview(FileEntry entry) {
     if (!canShowImagePreview(entry)) {
       return Future<Uint8List?>.value(null);
     }
-    final key = '${entry.node.id}:${entry.node.currentVersionId}';
-    if (_imagePreviewCache.containsKey(key)) {
-      return Future<Uint8List?>.value(_imagePreviewCache[key]);
-    }
+    final cached = cachedImagePreview(entry);
+    if (cached != null) return Future<Uint8List?>.value(cached);
+    final key = _imagePreviewKey(entry);
     final pending = _imagePreviewLoads[key];
-    if (pending != null) return pending;
-    if (_imagePreviewLoads.length >= _maxConcurrentImagePreviews) {
-      return Future<Uint8List?>.value(null);
+    if (pending != null) {
+      pending.demand++;
+      return pending.completer.future;
     }
-    final preview = _downloadImagePreview(entry);
-    _imagePreviewLoads[key] = preview;
-    unawaited(
-      preview.then((bytes) {
-        _imagePreviewLoads.remove(key);
-        if (_imagePreviewCache.length >= _maxCachedImagePreviews) {
-          _imagePreviewCache.remove(_imagePreviewCache.keys.first);
-        }
-        _imagePreviewCache[key] = bytes;
-        if (!_disposed) notifyListeners();
-      }),
-    );
-    return preview;
+    final load = _ImagePreviewLoad(key, entry);
+    _imagePreviewLoads[key] = load;
+    _queuedImagePreviews.add(load);
+    _pumpImagePreviews();
+    return load.completer.future;
+  }
+
+  /// Withdraws one [imagePreview] request that has not completed yet. A
+  /// queued download nobody is waiting for any more is dropped (its future
+  /// completes with null); one already in flight still finishes and is
+  /// cached, since its bytes are already on the way.
+  void releaseImagePreview(FileEntry entry) {
+    final key = _imagePreviewKey(entry);
+    final load = _imagePreviewLoads[key];
+    if (load == null || load.started) return;
+    if (--load.demand > 0) return;
+    _imagePreviewLoads.remove(key);
+    _queuedImagePreviews.remove(load);
+    load.completer.complete(null);
+  }
+
+  String _imagePreviewKey(FileEntry entry) =>
+      '${entry.node.id}:${entry.node.currentVersionId}';
+
+  void _pumpImagePreviews() {
+    while (!_disposed &&
+        _activeImagePreviewLoads < _maxConcurrentImagePreviews &&
+        _queuedImagePreviews.isNotEmpty) {
+      final load = _queuedImagePreviews.removeFirst()..started = true;
+      _activeImagePreviewLoads++;
+      unawaited(_runImagePreviewLoad(load));
+    }
+  }
+
+  Future<void> _runImagePreviewLoad(_ImagePreviewLoad load) async {
+    Uint8List? bytes;
+    try {
+      bytes = await _downloadImagePreview(load.entry);
+    } catch (_) {
+      // A thumbnail is cosmetic; e.g. a secure-storage error while loading
+      // the vault key must still release this queue slot.
+    } finally {
+      _activeImagePreviewLoads--;
+      _imagePreviewLoads.remove(load.key);
+    }
+    if (!_disposed && bytes != null) _cacheImagePreview(load.key, bytes);
+    load.completer.complete(bytes);
+    _pumpImagePreviews();
+  }
+
+  void _cacheImagePreview(String key, Uint8List bytes) {
+    final previous = _imagePreviewCache.remove(key);
+    _imagePreviewCacheBytes -= previous?.length ?? 0;
+    if (bytes.length > _imagePreviewCacheBudgetBytes) return;
+    while (_imagePreviewCache.isNotEmpty &&
+        (_imagePreviewCache.length >= _maxCachedImagePreviews ||
+            _imagePreviewCacheBytes + bytes.length >
+                _imagePreviewCacheBudgetBytes)) {
+      final evicted = _imagePreviewCache.remove(_imagePreviewCache.keys.first);
+      _imagePreviewCacheBytes -= evicted!.length;
+    }
+    _imagePreviewCache[key] = bytes;
+    _imagePreviewCacheBytes += bytes.length;
   }
 
   bool canShowImagePreview(FileEntry entry) {
@@ -856,7 +932,23 @@ final class FilesController extends ChangeNotifier {
     _disposed = true;
     _syncEngine.removeListener(_onSyncEngineChanged);
     _imagePreviewCache.clear();
-    _imagePreviewLoads.clear();
+    _imagePreviewCacheBytes = 0;
+    // In-flight loads complete on their own; queued ones would never start.
+    for (final load in _queuedImagePreviews) {
+      _imagePreviewLoads.remove(load.key);
+      load.completer.complete(null);
+    }
+    _queuedImagePreviews.clear();
     super.dispose();
   }
+}
+
+final class _ImagePreviewLoad {
+  _ImagePreviewLoad(this.key, this.entry);
+
+  final String key;
+  final FileEntry entry;
+  final Completer<Uint8List?> completer = Completer<Uint8List?>();
+  int demand = 1;
+  bool started = false;
 }
