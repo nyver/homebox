@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -335,6 +336,21 @@ final class HomeBoxApiClient {
   final Uri _baseUrl;
   final PinnedHttpClient _transport;
 
+  /// Bounds connection setup plus the TLS handshake.
+  static const Duration _connectTimeout = Duration(seconds: 30);
+
+  /// Bounds the wait for response headers. Generous because completing a
+  /// maximum-size upload makes the server assemble and fsync 500 MiB.
+  static const Duration _responseTimeout = Duration(minutes: 3);
+
+  /// Fails a response body that stops delivering bytes. Without it a
+  /// stalled connection on a flaky mobile network leaves sync "busy"
+  /// forever instead of going offline and retrying.
+  static const Duration _idleTimeout = Duration(seconds: 60);
+
+  /// Page size for directory listings; the server caps it at 1000.
+  static const int _listPageSize = 500;
+
   Future<HomeBoxSession> login({
     required String username,
     required String password,
@@ -540,16 +556,29 @@ final class HomeBoxApiClient {
     String? parentId,
     bool ownedOnly = false,
   }) async {
-    final path = parentId == null
-        ? ownedOnly
-              ? '/api/v1/nodes/children?ownedOnly=true'
-              : '/api/v1/nodes/children'
-        : '/api/v1/nodes/children?parentId=$parentId';
-    final body = await _send('GET', path, accessToken: accessToken);
-    final decoded = jsonDecode(body) as List<dynamic>;
-    return decoded
-        .map((entry) => _nodeFromJson(entry as Map<String, dynamic>))
-        .toList(growable: false);
+    final nodes = <NodeInfo>[];
+    String? after;
+    do {
+      final query = <String, String>{
+        'parentId': ?parentId,
+        if (parentId == null && ownedOnly) 'ownedOnly': 'true',
+        'limit': '$_listPageSize',
+        'after': ?after,
+      };
+      final response = await _sendRawWithHeaders(
+        'GET',
+        Uri(path: '/api/v1/nodes/children', queryParameters: query).toString(),
+        accessToken: accessToken,
+      );
+      final decoded = jsonDecode(utf8.decode(response.body)) as List<dynamic>;
+      nodes.addAll(
+        decoded.map((entry) => _nodeFromJson(entry as Map<String, dynamic>)),
+      );
+      // A server that predates pagination ignores `limit` and sends no
+      // cursor, which ends the loop after its complete single response.
+      after = response.headers.value('x-next-after');
+    } while (after != null && after.isNotEmpty);
+    return List.unmodifiable(nodes);
   }
 
   Future<List<NodeInfo>> listTrash(String accessToken) async {
@@ -757,18 +786,27 @@ final class HomeBoxApiClient {
   /// Streams ciphertext to [destination] with bounded memory. Production
   /// file downloads use this path; the byte-returning method above remains
   /// for small previews and transport-level tests.
+  ///
+  /// With [resume] and a [versionId], bytes already in [destination] from an
+  /// interrupted attempt are kept and only the remainder is requested. The
+  /// version ID is the blob's ETag, so a server that no longer serves that
+  /// exact ciphertext answers with the full body instead of a range, and
+  /// the partial file is replaced rather than spliced with other content.
+  /// A failed resumable download leaves its partial file for the next try.
   Future<void> downloadFileContentToFile(
     String accessToken,
     String nodeId,
     File destination, {
     String? versionId,
     void Function(double progress)? onProgress,
+    bool resume = false,
   }) => _sendRawToFile(
     'GET',
     _fileContentPath(nodeId, versionId),
     destination,
     accessToken: accessToken,
     onResponseProgress: onProgress,
+    resumeEntityTag: resume && versionId != null ? '"$versionId"' : null,
   );
 
   String _fileContentPath(String nodeId, String? versionId) {
@@ -939,7 +977,7 @@ final class HomeBoxApiClient {
         'Response exceeds the allowed in-memory size.',
       );
     }
-    await for (final chunk in response) {
+    await for (final chunk in _withIdleTimeout(response)) {
       received += chunk.length;
       if (maxResponseBytes != null && received > maxResponseBytes) {
         throw const FormatException(
@@ -965,34 +1003,78 @@ final class HomeBoxApiClient {
     String? accessToken,
     List<int>? body,
     String contentType = 'application/octet-stream',
+    Map<String, String> headers = const {},
   }) async {
     try {
       // The TLS handshake happens during openUrl (connection setup), not
       // during close(), so badCertificateCallback rejections surface here —
       // both calls must be inside this try block.
-      final request = await _transport.client.openUrl(
-        method,
-        _baseUrl.resolve(path),
-      );
+      final request = await _transport.client
+          .openUrl(method, _baseUrl.resolve(path))
+          .timeout(_connectTimeout);
       if (accessToken != null) {
         request.headers.set(
           HttpHeaders.authorizationHeader,
           'Bearer $accessToken',
         );
       }
+      headers.forEach(request.headers.set);
       if (body != null) {
         request.headers.set(HttpHeaders.contentTypeHeader, contentType);
         request.add(body);
       }
-      return await request.close();
+      try {
+        return await request.close().timeout(_responseTimeout);
+      } on TimeoutException {
+        request.abort();
+        rethrow;
+      }
     } on HandshakeException {
-      // badCertificateCallback rejected the server's certificate: either it
-      // does not match the pinned fingerprint, or the handshake otherwise
-      // failed. Either way this must not be treated as a retryable network
-      // error (spec §18 SERVER_IDENTITY_CHANGED).
-      throw ServerIdentityMismatchException(_transport.pinnedFingerprint);
+      // Only a certificate that failed the pin is SERVER_IDENTITY_CHANGED
+      // (spec §18), which must never be retried silently. Any other
+      // handshake failure is an ordinary, retryable network error.
+      if (_transport.identityRejected) {
+        throw ServerIdentityMismatchException(_transport.pinnedFingerprint);
+      }
+      rethrow;
     }
   }
+
+  /// Like [_sendRaw] but also returns the response headers, for endpoints
+  /// that carry pagination cursors in them.
+  Future<({Uint8List body, HttpHeaders headers})> _sendRawWithHeaders(
+    String method,
+    String path, {
+    String? accessToken,
+  }) async {
+    final response = await _openResponse(
+      method,
+      path,
+      accessToken: accessToken,
+    );
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in _withIdleTimeout(response)) {
+      builder.add(chunk);
+    }
+    final bytes = builder.takeBytes();
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return (body: bytes, headers: response.headers);
+    }
+    throw _errorFrom(
+      response.statusCode,
+      utf8.decode(bytes, allowMalformed: true),
+    );
+  }
+
+  Stream<List<int>> _withIdleTimeout(Stream<List<int>> body) => body.timeout(
+    _idleTimeout,
+    onTimeout: (sink) {
+      sink.addError(
+        TimeoutException('The server stopped sending data.', _idleTimeout),
+      );
+      sink.close();
+    },
+  );
 
   Future<void> _sendRawToFile(
     String method,
@@ -1000,16 +1082,41 @@ final class HomeBoxApiClient {
     File destination, {
     String? accessToken,
     void Function(double progress)? onResponseProgress,
+    String? resumeEntityTag,
   }) async {
     const maxCiphertextBytes = 500 * 1024 * 1024 + 125 * 16;
+    final resumable = resumeEntityTag != null;
+    var offset = resumable && await destination.exists()
+        ? await destination.length()
+        : 0;
     final response = await _openResponse(
       method,
       path,
       accessToken: accessToken,
+      headers: {
+        if (offset > 0) HttpHeaders.rangeHeader: 'bytes=$offset-',
+        if (offset > 0) HttpHeaders.ifRangeHeader: resumeEntityTag!,
+      },
     );
+    if (response.statusCode == HttpStatus.requestedRangeNotSatisfiable &&
+        offset > 0) {
+      await response.drain<void>();
+      // The partial file is already at least as long as the blob: it is
+      // either complete or corrupt. Start over; AEAD and the plaintext
+      // hash still verify whatever ends up on disk.
+      await destination.delete();
+      return _sendRawToFile(
+        method,
+        path,
+        destination,
+        accessToken: accessToken,
+        onResponseProgress: onResponseProgress,
+        resumeEntityTag: resumeEntityTag,
+      );
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final errorBytes = BytesBuilder(copy: false);
-      await for (final chunk in response) {
+      await for (final chunk in _withIdleTimeout(response)) {
         if (errorBytes.length + chunk.length > 1024 * 1024) {
           throw _errorFrom(response.statusCode, '');
         }
@@ -1020,7 +1127,24 @@ final class HomeBoxApiClient {
         utf8.decode(errorBytes.takeBytes(), allowMalformed: true),
       );
     }
-    if (response.contentLength > maxCiphertextBytes) {
+    var total = response.contentLength;
+    if (response.statusCode == HttpStatus.partialContent) {
+      final range = _parseContentRange(
+        response.headers.value(HttpHeaders.contentRangeHeader),
+      );
+      if (range == null || range.start != offset) {
+        await response.drain<void>();
+        throw const FormatException(
+          'The server returned an unexpected byte range.',
+        );
+      }
+      total = range.total;
+    } else {
+      // A full body: the server ignored the range (the version changed,
+      // or it does not support ranges), so discard any partial bytes.
+      offset = 0;
+    }
+    if (total > maxCiphertextBytes) {
       final subscription = response.listen((_) {});
       await subscription.cancel();
       throw const FormatException(
@@ -1030,11 +1154,13 @@ final class HomeBoxApiClient {
 
     await destination.parent.create(recursive: true);
     RandomAccessFile? output;
-    var received = 0;
-    final total = response.contentLength;
+    var received = offset;
     try {
-      output = await destination.open(mode: FileMode.write);
-      await for (final chunk in response) {
+      output = await destination.open(
+        mode: offset > 0 ? FileMode.append : FileMode.write,
+      );
+      if (total > 0) onResponseProgress?.call(received / total);
+      await for (final chunk in _withIdleTimeout(response)) {
         received += chunk.length;
         if (received > maxCiphertextBytes) {
           throw const FormatException(
@@ -1047,11 +1173,22 @@ final class HomeBoxApiClient {
       await output.flush();
       await output.close();
       output = null;
-    } catch (_) {
+    } catch (e) {
       if (output != null) await output.close();
-      if (await destination.exists()) await destination.delete();
+      // A resumable download keeps what it already received unless the
+      // bytes themselves are wrong.
+      if ((!resumable || e is FormatException) && await destination.exists()) {
+        await destination.delete();
+      }
       rethrow;
     }
+  }
+
+  /// Parses `bytes <start>-<end>/<total>`; null for anything else.
+  static ({int start, int total})? _parseContentRange(String? value) {
+    final match = RegExp(r'^bytes (\d+)-(\d+)/(\d+)$').firstMatch(value ?? '');
+    if (match == null) return null;
+    return (start: int.parse(match[1]!), total: int.parse(match[3]!));
   }
 
   HomeBoxApiException _errorFrom(int statusCode, String responseBody) {

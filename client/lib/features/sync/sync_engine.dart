@@ -4,7 +4,6 @@
 // ignore_for_file: prefer_initializing_formals
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
@@ -18,6 +17,8 @@ import '../../core/storage/pending_operations_store.dart';
 import '../../core/storage/sync_state_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../server/server_connection_controller.dart';
+import '../../core/util/user_facing_error.dart';
+import '../../core/transport/network_errors.dart';
 
 enum SyncStatus { idle, syncing, paused, offline, error }
 
@@ -188,15 +189,18 @@ final class SyncEngine extends ChangeNotifier {
       await _pullChanges(api, session.accessToken, session.user.id);
       _errorMessage = null;
       if (!_paused) _setStatus(SyncStatus.idle);
-    } on SocketException {
-      // A timeout, offline Wi-Fi, or a temporarily unreachable server is an
-      // expected mobile-network condition. Keep the outbox intact and let the
-      // periodic pass retry rather than presenting it as a sync failure.
-      _errorMessage = 'Cannot reach the HomeBox server. Check the network and server address.';
-      if (!_paused) _setStatus(SyncStatus.offline);
     } catch (e) {
-      _errorMessage = '$e';
-      if (!_paused) _setStatus(SyncStatus.error);
+      if (isTransientNetworkError(e)) {
+        // A timeout, offline Wi-Fi, a stalled connection, or a temporarily
+        // unreachable server is an expected mobile-network condition. Keep
+        // the outbox intact and let the periodic pass retry rather than
+        // presenting it as a sync failure.
+        _errorMessage = 'Cannot reach the HomeBox server. Check the network and server address.';
+        if (!_paused) _setStatus(SyncStatus.offline);
+      } else {
+        _errorMessage = describeError(e);
+        if (!_paused) _setStatus(SyncStatus.error);
+      }
     } finally {
       _runningNow = false;
       _inFlight = null;

@@ -23,12 +23,20 @@ const (
 	argonKeyLen  uint32 = 32
 )
 
+// maxConcurrentPasswordHashes caps simultaneous Argon2id evaluations; each
+// one holds argonMemory (64 MiB) while it runs.
+const maxConcurrentPasswordHashes = 2
+
+const maxConcurrentAttemptsPerAddress = 4
+
 type Service struct {
 	db             *sql.DB
 	maxUsers       int
 	accessTokenTTL time.Duration
 	now            func() time.Time
-	loginLimiter   *loginLimiter
+	loginLimiter   *attemptLimiter
+	addressLimiter *attemptLimiter
+	passwordSlots  chan struct{}
 }
 
 type User struct {
@@ -41,7 +49,16 @@ type User struct {
 // access token is valid before a client must present its refresh token
 // (config: security.application_encryption.session_max_age).
 func New(db *sql.DB, maxUsers int, accessTokenTTL time.Duration) *Service {
-	return &Service{db: db, maxUsers: maxUsers, accessTokenTTL: accessTokenTTL, now: time.Now, loginLimiter: newLoginLimiter()}
+	return &Service{
+		db: db, maxUsers: maxUsers, accessTokenTTL: accessTokenTTL, now: time.Now,
+		loginLimiter: newAttemptLimiter(loginBackoff, 1),
+		// A few concurrent attempts per address leave room for a family
+		// signing in together behind one NAT while stopping one client from
+		// queueing hundreds of Argon2id evaluations before its first
+		// failure is even recorded.
+		addressLimiter: newAttemptLimiter(addressBackoff, maxConcurrentAttemptsPerAddress),
+		passwordSlots:  make(chan struct{}, maxConcurrentPasswordHashes),
+	}
 }
 
 func (s *Service) BootstrapAdmin(ctx context.Context, username, password string) (User, error) {

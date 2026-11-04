@@ -3,6 +3,7 @@
 #include <cwctype>
 #include <optional>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <string>
 #include <vector>
 
@@ -47,9 +48,12 @@ std::wstring WideFromUtf8(const std::string& value) {
   return result;
 }
 
-// Extensions that Windows would execute rather than open in a viewer. A synced
-// file with one of these must never be launched by a plain tap; the caller
-// falls back to "Save as" instead.
+// Extensions that Windows would execute, install, mount, or otherwise treat
+// as active content rather than open in a viewer. A synced file with one of
+// these must never be launched by a plain tap; the caller falls back to
+// "Save as" instead. The explicit list covers types Windows does not always
+// flag; AssocIsDangerous adds the system's own Attachment Manager list,
+// including types registered later by installed software.
 bool IsExecutableExtension(const std::wstring& path) {
   const std::wstring::size_type dot = path.find_last_of(L'.');
   const std::wstring::size_type separator = path.find_last_of(L"\\/");
@@ -60,14 +64,24 @@ bool IsExecutableExtension(const std::wstring& path) {
   std::wstring extension = path.substr(dot);
   for (wchar_t& c : extension) c = static_cast<wchar_t>(std::towlower(c));
   static const wchar_t* const kBlocked[] = {
-      L".exe", L".com", L".scr", L".pif", L".bat", L".cmd", L".msi",
-      L".msp", L".ps1", L".psm1", L".vbs", L".vbe", L".js",  L".jse",
-      L".wsf", L".wsh", L".hta", L".cpl", L".lnk", L".url", L".reg",
-      L".jar", L".appx", L".msix"};
+      // Programs, installers, and packages.
+      L".exe", L".com", L".scr", L".pif", L".msi", L".msp", L".mst",
+      L".appx", L".appxbundle", L".msix", L".msixbundle", L".application",
+      L".appref-ms", L".gadget", L".cpl", L".msc", L".diagcab", L".xll",
+      // Scripts and script hosts.
+      L".bat", L".cmd", L".ps1", L".ps1xml", L".ps2", L".ps2xml", L".psc1",
+      L".psc2", L".psd1", L".psm1", L".vb", L".vbs", L".vbe", L".js",
+      L".jse", L".ws", L".wsf", L".wsc", L".wsh", L".hta", L".sct",
+      L".py", L".pyw", L".pyc", L".pyz", L".jar", L".inf", L".reg",
+      // Shortcuts and shell links that launch another target.
+      L".lnk", L".url", L".website", L".scf", L".library-ms",
+      L".searchconnector-ms", L".search-ms", L".settingcontent-ms",
+      // Compiled help and disk images that bypass Mark-of-the-Web.
+      L".chm", L".hlp", L".iso", L".img", L".vhd", L".vhdx"};
   for (const wchar_t* blocked : kBlocked) {
     if (extension == blocked) return true;
   }
-  return false;
+  return AssocIsDangerous(extension.c_str()) != FALSE;
 }
 
 }  // namespace

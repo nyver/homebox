@@ -20,6 +20,7 @@ import '../../core/util/local_path.dart';
 import '../server/server_connection_controller.dart';
 import '../sync/sync_engine.dart';
 import 'file_transfer.dart';
+import '../../core/util/user_facing_error.dart';
 
 enum FilesStatus { idle, loading, ready, failed }
 
@@ -106,19 +107,31 @@ final class FilesController extends ChangeNotifier {
   // Named `serverConnection`/`vaultKeyStore`/`syncEngine` rather than
   // initializing formals so callers get readable named arguments instead of
   // the backing private field names (matches ServerConnectionController).
+  ///
+  /// [thumbnailer] shrinks a decoded preview before it is cached, so the
+  /// cache holds small thumbnails instead of full-size photos.
+  /// [localSyncFolderRoot] returns the selected sync folder as a filesystem
+  /// path (Windows); a preview of a file already mirrored there and
+  /// unchanged since is then read from disk instead of the network.
   FilesController({
     required ServerConnectionController serverConnection,
     required VaultKeyStore vaultKeyStore,
     required SyncEngine syncEngine,
+    Future<Uint8List> Function(Uint8List image)? thumbnailer,
+    String? Function()? localSyncFolderRoot,
   }) : _serverConnection = serverConnection,
        _vaultKeyStore = vaultKeyStore,
-       _syncEngine = syncEngine {
+       _syncEngine = syncEngine,
+       _thumbnailer = thumbnailer,
+       _localSyncFolderRoot = localSyncFolderRoot {
     _syncEngine.addListener(_onSyncEngineChanged);
   }
 
   final ServerConnectionController _serverConnection;
   final VaultKeyStore _vaultKeyStore;
   final SyncEngine _syncEngine;
+  final Future<Uint8List> Function(Uint8List image)? _thumbnailer;
+  final String? Function()? _localSyncFolderRoot;
   final MetadataCipher _metadataCipher = MetadataCipher();
   static const int _maxImagePreviewSourceSize = 12 * 1024 * 1024;
   static const int _imagePreviewCacheBudgetBytes = 64 * 1024 * 1024;
@@ -142,12 +155,17 @@ final class FilesController extends ChangeNotifier {
   bool _busy = false;
   double? _progress;
   FileTransferDirection? _transferDirection;
+  // Transfers run one at a time to bound memory and bandwidth, but a new
+  // request waits its turn instead of being rejected.
+  Future<void> _transferTail = Future<void>.value();
+  int _queuedTransfers = 0;
   FileListSort _sort = FileListSort.name;
   bool _disposed = false;
 
   FilesStatus get status => _status;
   String? get errorMessage => _errorMessage;
   List<FileEntry> get entries => _entries;
+
   /// When [entries] was last (re)loaded — the folder was opened, or new
   /// files/folders appeared in it. "Updated x ago" labels are computed
   /// relative to this fixed instant rather than the current wall clock, so
@@ -155,6 +173,9 @@ final class FilesController extends ChangeNotifier {
   /// (e.g. on every upload/download progress notification).
   DateTime get entriesAsOf => _entriesAsOf ?? DateTime.now().toUtc();
   bool get busy => _busy;
+
+  /// Transfers waiting for the current one to finish.
+  int get queuedTransfers => _queuedTransfers;
   double? get progress => _progress;
   FileTransferDirection? get transferDirection => _transferDirection;
   FileListSort get sort => _sort;
@@ -329,7 +350,7 @@ final class FilesController extends ChangeNotifier {
       // Broad on purpose: StateError/ArgumentError (thrown by this class's
       // own checks) do not extend Exception, so `on Exception` would miss
       // them and crash instead of surfacing errorMessage.
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       _setStatus(FilesStatus.failed);
     }
   }
@@ -412,7 +433,7 @@ final class FilesController extends ChangeNotifier {
       await refresh();
       return true;
     } catch (e) {
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       notifyListeners();
       return false;
     }
@@ -472,7 +493,7 @@ final class FilesController extends ChangeNotifier {
       await refresh();
       return true;
     } catch (e) {
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       notifyListeners();
       return false;
     }
@@ -517,7 +538,7 @@ final class FilesController extends ChangeNotifier {
       await refresh();
       return true;
     } catch (e) {
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       notifyListeners();
       return false;
     }
@@ -577,53 +598,77 @@ final class FilesController extends ChangeNotifier {
     if (uniquePaths.isEmpty) {
       return const FileUploadBatchResult(succeeded: 0, failed: 0);
     }
-    if (_busy) {
-      _errorMessage = 'Another file transfer is already in progress.';
-      notifyListeners();
-      return FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length);
-    }
-    // Claimed synchronously, before any `await` — see replaceFileContent.
-    _setBusy(true, direction: FileTransferDirection.upload);
-    _errorMessage = null;
+    // Capture this before waiting in the queue. A user may navigate while
+    // earlier transfers or a large drop are uploading, but that must not
+    // move these files elsewhere.
+    final targetParentId = _currentParentId;
+    return _runTransfer(FileTransferDirection.upload, () async {
+      _errorMessage = null;
+      return _uploadBatch(uniquePaths, targetParentId);
+    });
+  }
+
+  Future<FileUploadBatchResult> _uploadBatch(
+    List<String> uniquePaths,
+    String? targetParentId,
+  ) async {
     var succeeded = 0;
     var failed = 0;
     final successfulPaths = <String>[];
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      return FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length);
+    }
+    for (var index = 0; index < uniquePaths.length; index++) {
+      try {
+        await _uploadFileToParent(
+          localPath: uniquePaths[index],
+          ctx: ctx,
+          parentId: targetParentId,
+          onProgress: (progress) =>
+              _setProgress((index + progress) / uniquePaths.length),
+        );
+        succeeded++;
+        successfulPaths.add(uniquePaths[index]);
+      } catch (e) {
+        // Continue so a single unreadable or oversized dropped file does
+        // not prevent the rest of the selection from being backed up.
+        failed++;
+        _errorMessage = describeError(e);
+        notifyListeners();
+      }
+    }
+    await refresh();
+    return FileUploadBatchResult(
+      succeeded: succeeded,
+      failed: failed,
+      successfulPaths: List.unmodifiable(successfulPaths),
+    );
+  }
+
+  /// Runs [body] as the next file transfer, after every transfer requested
+  /// before it has finished. The busy flag and progress belong to whichever
+  /// transfer is running; [queuedTransfers] counts the ones still waiting.
+  Future<T> _runTransfer<T>(
+    FileTransferDirection direction,
+    Future<T> Function() body,
+  ) async {
+    final previous = _transferTail;
+    final done = Completer<void>();
+    _transferTail = done.future;
+    _queuedTransfers++;
+    if (!_disposed) notifyListeners();
     try {
-      final ctx = await _requireContext();
-      if (ctx == null) {
-        return FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length);
-      }
-      // Capture this before any asynchronous work. A user may navigate
-      // while a large drop is uploading, but that must not move later
-      // files elsewhere.
-      final targetParentId = _currentParentId;
-      for (var index = 0; index < uniquePaths.length; index++) {
-        try {
-          await _uploadFileToParent(
-            localPath: uniquePaths[index],
-            ctx: ctx,
-            parentId: targetParentId,
-            onProgress: (progress) =>
-                _setProgress((index + progress) / uniquePaths.length),
-          );
-          succeeded++;
-          successfulPaths.add(uniquePaths[index]);
-        } catch (e) {
-          // Continue so a single unreadable or oversized dropped file does
-          // not prevent the rest of the selection from being backed up.
-          failed++;
-          _errorMessage = '$e';
-          notifyListeners();
-        }
-      }
-      await refresh();
-      return FileUploadBatchResult(
-        succeeded: succeeded,
-        failed: failed,
-        successfulPaths: List.unmodifiable(successfulPaths),
-      );
+      await previous;
+    } finally {
+      _queuedTransfers--;
+    }
+    _setBusy(true, direction: direction);
+    try {
+      return await body();
     } finally {
       _setBusy(false);
+      done.complete();
     }
   }
 
@@ -704,15 +749,13 @@ final class FilesController extends ChangeNotifier {
   /// and integrity metadata.
   Future<bool> replaceFileContent(FileEntry entry, String localPath) async {
     if (entry.isDirectory) return false;
-    if (_busy) {
-      _errorMessage = 'Another file transfer is already in progress.';
-      notifyListeners();
-      return false;
-    }
-    // Claimed synchronously, before any `await`, so two calls arriving
-    // close together can't both observe `_busy == false` and both proceed
-    // — Dart can't interleave them without an await in between.
-    _setBusy(true, direction: FileTransferDirection.upload);
+    return _runTransfer(
+      FileTransferDirection.upload,
+      () => _replaceFileContent(entry, localPath),
+    );
+  }
+
+  Future<bool> _replaceFileContent(FileEntry entry, String localPath) async {
     try {
       final ctx = await _requireContext();
       if (ctx == null) return false;
@@ -762,11 +805,9 @@ final class FilesController extends ChangeNotifier {
       // Broad on purpose: StateError/ArgumentError (thrown by this class's
       // own checks) do not extend Exception, so `on Exception` would miss
       // them and crash instead of surfacing errorMessage.
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       notifyListeners();
       return false;
-    } finally {
-      _setBusy(false);
     }
   }
 
@@ -776,14 +817,13 @@ final class FilesController extends ChangeNotifier {
   /// each (any authentication failure aborts before anything is written),
   /// and verifies the plaintext SHA-256 recorded in the encrypted metadata
   /// before the file is saved.
-  Future<bool> downloadFile(FileEntry entry, String destinationPath) async {
-    if (_busy) {
-      _errorMessage = 'Another file transfer is already in progress.';
-      notifyListeners();
-      return false;
-    }
-    // Claimed synchronously, before any `await` — see replaceFileContent.
-    _setBusy(true, direction: FileTransferDirection.download);
+  Future<bool> downloadFile(FileEntry entry, String destinationPath) =>
+      _runTransfer(
+        FileTransferDirection.download,
+        () => _downloadFile(entry, destinationPath),
+      );
+
+  Future<bool> _downloadFile(FileEntry entry, String destinationPath) async {
     try {
       final ctx = await _requireContext();
       if (ctx == null) return false;
@@ -803,15 +843,45 @@ final class FilesController extends ChangeNotifier {
       // Broad on purpose: StateError/ArgumentError (thrown by this class's
       // own checks) do not extend Exception, so `on Exception` would miss
       // them and crash instead of surfacing errorMessage.
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       notifyListeners();
       return false;
-    } finally {
-      _setBusy(false);
     }
   }
 
   Future<Uint8List?> _downloadImagePreview(FileEntry entry) async {
+    final source =
+        await _readLocalImagePreview(entry) ?? await _fetchImagePreview(entry);
+    final thumbnailer = _thumbnailer;
+    if (source == null || thumbnailer == null) return source;
+    return thumbnailer(source);
+  }
+
+  /// The mirrored sync-folder copy of [entry], if it still holds exactly the
+  /// current version (the recorded size and modification time match).
+  Future<Uint8List?> _readLocalImagePreview(FileEntry entry) async {
+    final root = _localSyncFolderRoot?.call();
+    final record = _syncEngine.materializedFiles.getById(entry.node.id);
+    if (root == null ||
+        record == null ||
+        record.contentVersionId != entry.node.currentVersionId) {
+      return null;
+    }
+    try {
+      final file = File('$root/${record.relativePath}');
+      final stat = await file.stat();
+      if (stat.type != FileSystemEntityType.file ||
+          !record.matchesLocalStat(stat) ||
+          stat.size > _maxImagePreviewSourceSize) {
+        return null;
+      }
+      return await file.readAsBytes();
+    } on FileSystemException {
+      return null;
+    }
+  }
+
+  Future<Uint8List?> _fetchImagePreview(FileEntry entry) async {
     try {
       final api = _serverConnection.api;
       final session = _serverConnection.session;

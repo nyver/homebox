@@ -45,10 +45,16 @@ security:
     # exists, and the specification's own fallback rule (spec §15.2.5)
     # prefers each platform's standard TLS stack over an unvetted one.
     protocol: "tls1.3-ecdsa-p256-cert-pinning"
-    # Access-token lifetime. A session older than this must present its
-    # refresh token to get a new access token. Flutter clients renew their
-    # access token in the background shortly before this elapses, so an
-    # idle client stays authenticated without the user noticing.
+    # Access-token lifetime; must be a positive duration. A session older
+    # than this must present its refresh token to get a new access token.
+    # Flutter clients renew their access token in the background shortly
+    # before this elapses, so an idle client stays authenticated without the
+    # user noticing. Refresh tokens rotate on every use; a client retrying
+    # within one minute after losing the response is reissued a session,
+    # while a rotated token reused later revokes all sessions of its device.
+    # Login throttling (per username and per client address) is built in and
+    # needs no setting; do not put a proxy in front of HomeBox, because the
+    # address limit uses the TCP peer address.
     session_max_age: "15m"
   e2ee:
     # File framing is fixed by protocol v1: XChaCha20-Poly1305, 4 MB plaintext chunks.
@@ -82,6 +88,9 @@ uploads:
   # local destination. Notifications are client-only and need no setting.
   # Windows Files-page uploads are copied into the matching local sync folder
   # and hash-verified there, avoiding a redundant server download.
+  # Each upload session may declare at most 65536 chunks of at most 8 MiB
+  # ciphertext each; these protocol bounds are fixed, not configurable.
+  # Interrupted downloads resume via HTTP Range requests; no setting needed.
   abandoned_after_hours: 24
 
 sync:

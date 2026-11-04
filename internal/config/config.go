@@ -148,8 +148,10 @@ func (c Config) Validate() error {
 	if !c.Security.ApplicationEncryption.Enabled || !c.Security.ApplicationEncryption.RequiredForHTTP {
 		return errors.New("application encryption is mandatory for HTTP")
 	}
-	if _, err := time.ParseDuration(c.Security.ApplicationEncryption.SessionMaxAge); err != nil {
+	if sessionMaxAge, err := time.ParseDuration(c.Security.ApplicationEncryption.SessionMaxAge); err != nil {
 		return fmt.Errorf("security.application_encryption.session_max_age: %w", err)
+	} else if sessionMaxAge <= 0 {
+		return errors.New("security.application_encryption.session_max_age must be a positive duration")
 	}
 	if c.Server.TLS.Enabled && (c.Server.TLS.CertFile == "" || c.Server.TLS.KeyFile == "") {
 		return errors.New("TLS certificate and key files are required when TLS is enabled")

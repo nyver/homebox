@@ -1,3 +1,4 @@
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
@@ -57,9 +58,20 @@ final class E2eeFileHeader {
 
 final class E2eeFileCipher {
   E2eeFileCipher({Xchacha20? algorithm})
-    : _algorithm = algorithm ?? Xchacha20.poly1305Aead();
+    : _algorithm = algorithm ?? Xchacha20.poly1305Aead(),
+      _offload = algorithm == null;
 
   final Xchacha20 _algorithm;
+
+  /// The `cryptography` package's XChaCha20-Poly1305 is pure Dart. Running
+  /// a 4 MiB frame on the UI isolate stalls rendering for a noticeable
+  /// moment per frame, so the default algorithm runs large frames on a
+  /// short-lived background isolate. An injected algorithm (tests, custom
+  /// implementations) is used in place, since it may not be sendable.
+  final bool _offload;
+
+  /// Below this size the isolate round trip costs more than it saves.
+  static const int _offloadThreshold = 64 * 1024;
 
   Future<SecretKey> newFileKey() => _algorithm.newSecretKey();
 
@@ -87,14 +99,68 @@ final class E2eeFileCipher {
       chunkNumber: chunkNumber,
       totalChunks: totalChunks,
     );
+    final nonce = _nonce(header, chunkNumber);
+    final aad = _aad(header, fileVersionId, chunkNumber, totalChunks);
+    if (_offload && plaintext.length >= _offloadThreshold) {
+      return _encryptInBackground(
+        _compactForIsolate(plaintext),
+        await fileKey.extractBytes(),
+        nonce,
+        aad,
+      );
+    }
     final box = await _algorithm.encrypt(
       plaintext,
       secretKey: fileKey,
-      nonce: _nonce(header, chunkNumber),
-      aad: _aad(header, fileVersionId, chunkNumber, totalChunks),
+      nonce: nonce,
+      aad: aad,
     );
     return Uint8List.fromList(box.concatenation(nonce: false));
   }
+
+  /// Returns [bytes] as a standalone buffer. A typed-data view (one chunk of
+  /// a larger in-memory file or blob) can be serialized together with its
+  /// whole backing buffer when sent to another isolate, which would copy the
+  /// entire file once per chunk.
+  static Uint8List _compactForIsolate(List<int> bytes) {
+    if (bytes is Uint8List &&
+        bytes.offsetInBytes == 0 &&
+        bytes.lengthInBytes == bytes.buffer.lengthInBytes) {
+      return bytes;
+    }
+    return Uint8List.fromList(bytes);
+  }
+
+  // Static so the isolate closure captures only its arguments, never `this`.
+  static Future<Uint8List> _encryptInBackground(
+    Uint8List plaintext,
+    List<int> keyBytes,
+    Uint8List nonce,
+    Uint8List aad,
+  ) => Isolate.run(() async {
+    final box = await Xchacha20.poly1305Aead().encrypt(
+      plaintext,
+      secretKey: SecretKeyData(keyBytes),
+      nonce: nonce,
+      aad: aad,
+    );
+    return Uint8List.fromList(box.concatenation(nonce: false));
+  });
+
+  static Future<Uint8List> _decryptInBackground(
+    List<int> cipherText,
+    List<int> mac,
+    List<int> keyBytes,
+    Uint8List nonce,
+    Uint8List aad,
+  ) => Isolate.run(() async {
+    final plaintext = await Xchacha20.poly1305Aead().decrypt(
+      SecretBox(cipherText, nonce: nonce, mac: Mac(mac)),
+      secretKey: SecretKeyData(keyBytes),
+      aad: aad,
+    );
+    return Uint8List.fromList(plaintext);
+  });
 
   Future<Uint8List> decryptChunk({
     required List<int> ciphertextFrame,
@@ -120,15 +186,22 @@ final class E2eeFileCipher {
       nonceLength: 0,
       macLength: homeBoxChunkMacLength,
     );
-    final box = SecretBox(
-      parsed.cipherText,
-      nonce: _nonce(header, chunkNumber),
-      mac: parsed.mac,
-    );
+    final nonce = _nonce(header, chunkNumber);
+    final aad = _aad(header, fileVersionId, chunkNumber, totalChunks);
+    if (_offload && ciphertextFrame.length >= _offloadThreshold) {
+      return _decryptInBackground(
+        _compactForIsolate(parsed.cipherText),
+        parsed.mac.bytes,
+        await fileKey.extractBytes(),
+        nonce,
+        aad,
+      );
+    }
+    final box = SecretBox(parsed.cipherText, nonce: nonce, mac: parsed.mac);
     final plaintext = await _algorithm.decrypt(
       box,
       secretKey: fileKey,
-      aad: _aad(header, fileVersionId, chunkNumber, totalChunks),
+      aad: aad,
     );
     return Uint8List.fromList(plaintext);
   }

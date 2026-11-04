@@ -19,6 +19,7 @@ var migrations = []migration{
 	{6, "upload_metadata_version", migration0006UploadMetadataVersion},
 	{7, "trash_retention_index", migration0007TrashRetentionIndex},
 	{8, "authenticated_device_keys", migration0008AuthenticatedDeviceKeys},
+	{9, "hot_path_indexes_and_token_rotation", migration0009HotPathIndexesAndTokenRotation},
 }
 
 const migration0001InitialSchema = `
@@ -173,4 +174,18 @@ ALTER TABLE vault_key_envelopes ADD COLUMN device_key_signature BLOB;
 CREATE INDEX IF NOT EXISTS idx_vault_envelopes_certificates
   ON vault_key_envelopes(target_user_id,target_device_id,created_at)
   WHERE signature_version IS NOT NULL AND revoked_at IS NULL;
+`
+
+// migration0009HotPathIndexesAndTokenRotation indexes the per-account sync
+// feed, refresh-token lookup, and blob-ID reservation checks, and records
+// which refresh token replaced a rotated one. rotated_to distinguishes a
+// rotation (where a briefly late retry is tolerated and a later reuse means
+// theft) from an explicit logout or device revocation.
+const migration0009HotPathIndexesAndTokenRotation = `
+CREATE INDEX IF NOT EXISTS idx_sync_changes_user_revision ON sync_changes(user_scope_id, revision);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_device ON refresh_tokens(device_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_blob ON upload_sessions(blob_id);
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_file_version ON upload_sessions(file_version_id);
+ALTER TABLE refresh_tokens ADD COLUMN rotated_to TEXT;
 `

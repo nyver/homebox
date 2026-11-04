@@ -10,6 +10,7 @@ import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart'
     show homeBoxPersonalVaultKeyVersion;
 import '../../core/transport/homebox_api_client.dart' as transport;
+import '../../core/transport/network_errors.dart';
 
 const int homeBoxMaxPlaintextFileSize = 500 * 1024 * 1024;
 
@@ -125,10 +126,47 @@ Future<Uint8List> downloadAndDecryptFile({
   return plaintextBytes;
 }
 
+/// How many times one download call resumes after a dropped connection
+/// before reporting the failure.
+const int _downloadAttempts = 3;
+
+/// Partial ciphertext older than this is abandoned and removed.
+const Duration _stalePartialDownloadAge = Duration(days: 2);
+
+/// Partial ciphertext files currently being written by this process. Only
+/// one writer may own a version's resumable file at a time.
+final Set<String> _activePartialDownloads = <String>{};
+
+Directory _partialDownloadDirectory() => Directory(
+  '${Directory.systemTemp.path}${Platform.pathSeparator}homebox-downloads',
+);
+
+Future<void> _pruneStalePartialDownloads(Directory directory) async {
+  final cutoff = DateTime.now().subtract(_stalePartialDownloadAge);
+  try {
+    await for (final entity in directory.list()) {
+      if (entity is! File || _activePartialDownloads.contains(entity.path)) {
+        continue;
+      }
+      if ((await entity.lastModified()).isBefore(cutoff)) {
+        await entity.delete();
+      }
+    }
+  } on FileSystemException {
+    // Best effort: a locked or vanished leftover must not block a download.
+  }
+}
+
 /// Streams a download through temporary ciphertext and plaintext files so a
 /// maximum-size vault item never has to coexist in memory in encrypted and
 /// decrypted form. The destination is replaced only after every AEAD frame
 /// and the encrypted metadata's plaintext hash have been verified.
+///
+/// The ciphertext is kept per file version in the system temp folder. A
+/// dropped connection resumes from the bytes already received (within this
+/// call, and on a later retry of the same version) instead of starting a
+/// large download over. It is ciphertext only and is removed once the file
+/// is saved, when verification fails, or after two days.
 Future<void> downloadAndDecryptFileToPath({
   required transport.HomeBoxApiClient api,
   required String accessToken,
@@ -156,23 +194,47 @@ Future<void> downloadAndDecryptFileToPath({
   );
   final header = E2eeFileHeader.decode(version.e2eeHeader);
 
-  final workDirectory = await Directory.systemTemp.createTemp(
-    'homebox-download-',
+  final partialDirectory = _partialDownloadDirectory();
+  await partialDirectory.create(recursive: true);
+  await _pruneStalePartialDownloads(partialDirectory);
+  final resumablePath =
+      '${partialDirectory.path}${Platform.pathSeparator}${version.id}.hbxblob.part';
+  // A concurrent download of the same version (for example an explicit
+  // Save as while the sync folder mirrors it) uses a private file instead
+  // of interleaving writes into the shared resumable one.
+  final resumable = _activePartialDownloads.add(resumablePath);
+  final ciphertextFile = File(
+    resumable
+        ? resumablePath
+        : '${partialDirectory.path}${Platform.pathSeparator}${version.id}-${generateUuidV4()}.hbxblob.part',
   );
-  final ciphertextFile = File('${workDirectory.path}/ciphertext.hbxblob');
+  var keepCiphertext = resumable;
   final destination = File(destinationPath);
   final plaintextTemp = File(
     '$destinationPath.homebox-tmp-${generateUuidV4()}',
   );
   try {
     onProgress?.call(0);
-    await api.downloadFileContentToFile(
-      accessToken,
-      nodeId,
-      ciphertextFile,
-      versionId: version.id,
-      onProgress: (progress) => onProgress?.call(progress * 0.9),
-    );
+    for (var attempt = 1; ; attempt++) {
+      try {
+        await api.downloadFileContentToFile(
+          accessToken,
+          nodeId,
+          ciphertextFile,
+          versionId: version.id,
+          onProgress: (progress) => onProgress?.call(progress * 0.9),
+          resume: resumable,
+        );
+        break;
+      } catch (e) {
+        if (!resumable ||
+            attempt >= _downloadAttempts ||
+            !isTransientNetworkError(e)) {
+          rethrow;
+        }
+        await Future<void>.delayed(Duration(seconds: attempt));
+      }
+    }
     final ciphertextLength = await ciphertextFile.length();
     final fullFrameLength = homeBoxPlaintextChunkSize + homeBoxChunkMacLength;
     final prefixLength = (version.chunkCount - 1) * fullFrameLength;
@@ -240,11 +302,18 @@ Future<void> downloadAndDecryptFileToPath({
       throw const FileIntegrityException();
     }
     await _replaceVerifiedFile(plaintextTemp, destination);
+    keepCiphertext = false;
+  } catch (e) {
+    // Only an interrupted transfer is worth resuming; ciphertext that
+    // failed to decrypt or verify must be fetched again from scratch.
+    if (!isTransientNetworkError(e)) keepCiphertext = false;
+    rethrow;
   } finally {
     if (await plaintextTemp.exists()) await plaintextTemp.delete();
-    if (await workDirectory.exists()) {
-      await workDirectory.delete(recursive: true);
+    if (!keepCiphertext && await ciphertextFile.exists()) {
+      await ciphertextFile.delete();
     }
+    if (resumable) _activePartialDownloads.remove(resumablePath);
   }
 }
 

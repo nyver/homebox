@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -103,6 +104,18 @@ func (a *API) authenticated(next http.HandlerFunc) http.Handler {
 	})
 }
 
+// clientAddress is the TCP peer address used for login spray throttling.
+// HomeBox terminates its own pinned TLS and must not sit behind a proxy
+// (see README), so forwarding headers are deliberately ignored: trusting
+// them would let any client choose its own rate-limit key.
+func clientAddress(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 func bearerToken(r *http.Request) string {
 	const prefix = "Bearer "
 	header := r.Header.Get("Authorization")
@@ -157,7 +170,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "device.publicKey must be base64-encoded")
 		return
 	}
-	session, err := a.auth.Login(r.Context(), req.Username, req.Password, auth.DeviceRegistration{
+	session, err := a.auth.Login(r.Context(), clientAddress(r), req.Username, req.Password, auth.DeviceRegistration{
 		ID: req.Device.ID, Name: req.Device.Name, Platform: req.Device.Platform,
 		PublicKey: publicKey, KeyVersion: req.Device.KeyVersion,
 	})
@@ -191,8 +204,7 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.auth.Logout(r.Context(), req.RefreshToken); err != nil {
-		log.Printf("logout: %v", err)
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to logout")
+		writeInternalError(w, "logout", "failed to logout", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -217,8 +229,7 @@ func (a *API) listShareDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	devices, err := a.auth.ListShareableDevices(r.Context(), userID)
 	if err != nil {
-		log.Printf("list share devices: %v", err)
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list recipient devices")
+		writeInternalError(w, "list share devices", "failed to list recipient devices", err)
 		return
 	}
 	if len(devices) == 0 {
@@ -227,8 +238,7 @@ func (a *API) listShareDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	certificates, err := a.provisioning.LatestCertifications(r.Context(), userID)
 	if err != nil {
-		log.Printf("list share devices: %v", err)
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list recipient devices")
+		writeInternalError(w, "list share devices", "failed to list recipient devices", err)
 		return
 	}
 	out := make([]shareDeviceResponse, 0, len(devices))
@@ -296,20 +306,17 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 	userID := requestUserID(r)
 	devices, err := a.auth.ListDevices(r.Context(), userID)
 	if err != nil {
-		log.Printf("list devices: %v", err)
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list devices")
+		writeInternalError(w, "list devices", "failed to list devices", err)
 		return
 	}
 	approved, err := a.provisioning.ActiveEnvelopeDeviceIDs(r.Context(), userID)
 	if err != nil {
-		log.Printf("list devices: %v", err)
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list devices")
+		writeInternalError(w, "list devices", "failed to list devices", err)
 		return
 	}
 	certificates, err := a.provisioning.LatestCertifications(r.Context(), userID)
 	if err != nil {
-		log.Printf("list devices: %v", err)
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list devices")
+		writeInternalError(w, "list devices", "failed to list devices", err)
 		return
 	}
 	out := make([]deviceResponse, 0, len(devices))
@@ -442,7 +449,7 @@ func (a *API) downloadKeyEnvelope(w http.ResponseWriter, r *http.Request) {
 
 func pathDeviceID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := r.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
+	if !canonicalUUID(id) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid device id")
 		return "", false
 	}
@@ -486,11 +493,32 @@ type errorResponse struct {
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeErrorWithID(w, status, code, message, uuid.NewString())
+}
+
+func writeErrorWithID(w http.ResponseWriter, status int, code, message, requestID string) {
 	var body errorResponse
 	body.Error.Code = code
 	body.Error.Message = message
-	body.Error.RequestID = uuid.NewString()
+	body.Error.RequestID = requestID
 	writeJSON(w, status, body)
+}
+
+// writeInternalError logs err server-side under the same requestId the
+// client receives, so a user's error report can be matched to the log
+// line, while the response itself never reveals the underlying cause.
+func writeInternalError(w http.ResponseWriter, operation, message string, err error) {
+	requestID := uuid.NewString()
+	log.Printf("%s [request %s]: %v", operation, requestID, err)
+	writeErrorWithID(w, http.StatusInternalServerError, "INTERNAL_ERROR", message, requestID)
+}
+
+// canonicalUUID accepts only the lowercase, hyphenated spelling clients and
+// the server generate, so one opaque ID cannot be addressed (or stored)
+// under several equivalent forms.
+func canonicalUUID(value string) bool {
+	parsed, err := uuid.Parse(value)
+	return err == nil && parsed.String() == value
 }
 
 // writeServiceError maps every domain service's sentinel errors to the spec
@@ -542,6 +570,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "UPLOAD_CHUNK_INVALID", "upload has missing ciphertext chunks")
 	case errors.Is(err, uploads.ErrRevisionConflict):
 		writeError(w, http.StatusConflict, "REVISION_CONFLICT", "node revision conflict")
+	case errors.Is(err, uploads.ErrIDConflict):
+		writeError(w, http.StatusConflict, "UPLOAD_ID_CONFLICT", "blob or file version id is already in use")
 	case errors.Is(err, uploads.ErrTargetNodeMissing):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "target file node not found")
 
@@ -561,7 +591,6 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "REVISION_CONFLICT", "folder is already shared with this account")
 
 	default:
-		log.Printf("internal error: %v", err)
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "an internal error occurred")
+		writeInternalError(w, "internal error", "an internal error occurred", err)
 	}
 }

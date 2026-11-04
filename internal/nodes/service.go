@@ -9,6 +9,7 @@ package nodes
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
@@ -77,7 +78,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Node, error) {
 	}
 	defer tx.Rollback()
 
-	if result, err := s.replayIfProcessed(ctx, tx, in.OperationID); err != nil {
+	if result, err := s.replayIfProcessed(ctx, tx, in.OperationID, in.OwnerID, "NODE_CREATE"); err != nil {
 		return Node{}, err
 	} else if result != nil {
 		// Release the connection before Get acquires one of its own — this
@@ -135,35 +136,8 @@ func (s *Service) Get(ctx context.Context, userID, nodeID string) (Node, error) 
 // ListChildren returns the non-deleted direct children of parentID, or the
 // caller's root-level nodes when parentID is nil.
 func (s *Service) ListChildren(ctx context.Context, userID string, parentID *string) ([]Node, error) {
-	var rows *sql.Rows
-	var err error
-	if parentID == nil {
-		rows, err = s.db.QueryContext(ctx, `SELECT n.id,n.owner_id,n.parent_id,n.node_type,n.metadata_ciphertext,n.metadata_key_version,n.current_version_id,n.revision,n.created_at,n.updated_at,n.deleted_at
-			FROM nodes n WHERE n.owner_id=? AND n.parent_id IS NULL AND n.deleted_at IS NULL
-			UNION ALL
-			SELECT n.id,n.owner_id,n.parent_id,n.node_type,n.metadata_ciphertext,n.metadata_key_version,n.current_version_id,n.revision,n.created_at,n.updated_at,n.deleted_at
-			FROM nodes n JOIN shares sh ON sh.node_id=n.id
-			WHERE sh.target_user_id=? AND sh.permission='READ' AND sh.revoked_at IS NULL AND n.deleted_at IS NULL
-			ORDER BY created_at`, userID, userID)
-	} else {
-		if err := s.requireReadableDirectory(ctx, userID, *parentID); err != nil {
-			return nil, err
-		}
-		rows, err = s.db.QueryContext(ctx, selectNodeColumns+" FROM nodes WHERE parent_id = ? AND deleted_at IS NULL ORDER BY created_at", *parentID)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var nodes []Node
-	for rows.Next() {
-		n, err := scanNode(rows)
-		if err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, n)
-	}
-	return nodes, rows.Err()
+	nodes, _, err := s.ListChildrenPage(ctx, userID, parentID, PageRequest{})
+	return nodes, err
 }
 
 // ListOwnedRoots returns only the caller's active root nodes. Unlike
@@ -171,20 +145,107 @@ func (s *Service) ListChildren(ctx context.Context, userID string, parentID *str
 // another account, which is required by owner-only bulk workflows such as a
 // client-side Vault rebuild.
 func (s *Service) ListOwnedRoots(ctx context.Context, userID string) ([]Node, error) {
-	rows, err := s.db.QueryContext(ctx, selectNodeColumns+" FROM nodes WHERE owner_id = ? AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at", userID)
+	nodes, _, err := s.ListOwnedRootsPage(ctx, userID, PageRequest{})
+	return nodes, err
+}
+
+// MaxPageSize caps one page of a directory listing.
+const MaxPageSize = 1000
+
+// PageRequest selects one keyset page of a listing ordered by
+// (created_at, id). A zero Limit returns every remaining row; After is the
+// opaque cursor returned with the previous page.
+type PageRequest struct {
+	Limit int
+	After string
+}
+
+// ListChildrenPage is ListChildren with keyset pagination. The returned
+// cursor is empty once the listing is exhausted.
+func (s *Service) ListChildrenPage(ctx context.Context, userID string, parentID *string, page PageRequest) ([]Node, string, error) {
+	if parentID == nil {
+		return s.listPage(ctx, `SELECT n.id,n.owner_id,n.parent_id,n.node_type,n.metadata_ciphertext,n.metadata_key_version,n.current_version_id,n.revision,n.created_at,n.updated_at,n.deleted_at
+			FROM nodes n WHERE n.owner_id=? AND n.parent_id IS NULL AND n.deleted_at IS NULL
+			UNION ALL
+			SELECT n.id,n.owner_id,n.parent_id,n.node_type,n.metadata_ciphertext,n.metadata_key_version,n.current_version_id,n.revision,n.created_at,n.updated_at,n.deleted_at
+			FROM nodes n JOIN shares sh ON sh.node_id=n.id
+			WHERE sh.target_user_id=? AND sh.permission='READ' AND sh.revoked_at IS NULL AND n.deleted_at IS NULL`, page, userID, userID)
+	}
+	if err := s.requireReadableDirectory(ctx, userID, *parentID); err != nil {
+		return nil, "", err
+	}
+	return s.listPage(ctx, selectNodeColumns+" FROM nodes WHERE parent_id = ? AND deleted_at IS NULL", page, *parentID)
+}
+
+// ListOwnedRootsPage is ListOwnedRoots with keyset pagination.
+func (s *Service) ListOwnedRootsPage(ctx context.Context, userID string, page PageRequest) ([]Node, string, error) {
+	return s.listPage(ctx, selectNodeColumns+" FROM nodes WHERE owner_id = ? AND parent_id IS NULL AND deleted_at IS NULL", page, userID)
+}
+
+func (s *Service) listPage(ctx context.Context, base string, page PageRequest, args ...any) ([]Node, string, error) {
+	if page.Limit < 0 || page.Limit > MaxPageSize {
+		return nil, "", apierror.NewValidation(fmt.Sprintf("page limit must be between 1 and %d", MaxPageSize))
+	}
+	query := "SELECT * FROM (" + base + ") page"
+	if page.After != "" {
+		createdAt, id, err := decodeCursor(page.After)
+		if err != nil {
+			return nil, "", err
+		}
+		query += " WHERE (page.created_at, page.id) > (?, ?)"
+		args = append(args, createdAt, id)
+	}
+	query += " ORDER BY page.created_at, page.id"
+	if page.Limit > 0 {
+		// One extra row tells whether another page exists.
+		query += " LIMIT ?"
+		args = append(args, page.Limit+1)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
-	var result []Node
+	var nodes []Node
+	var createdAt []string
 	for rows.Next() {
-		n, err := scanNode(rows)
+		n, raw, err := scanNodeWithCreatedAt(rows)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		result = append(result, n)
+		nodes = append(nodes, n)
+		createdAt = append(createdAt, raw)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	if page.Limit == 0 || len(nodes) <= page.Limit {
+		return nodes, "", nil
+	}
+	nodes = nodes[:page.Limit]
+	last := page.Limit - 1
+	return nodes, encodeCursor(createdAt[last], nodes[last].ID), nil
+}
+
+// The cursor carries the stored created_at text verbatim so the keyset
+// comparison matches ORDER BY exactly.
+func encodeCursor(createdAt, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(createdAt + "|" + id))
+}
+
+func decodeCursor(cursor string) (string, string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", "", apierror.NewValidation("invalid page cursor")
+	}
+	createdAt, id, ok := strings.Cut(string(raw), "|")
+	if !ok || uuid.Validate(id) != nil {
+		return "", "", apierror.NewValidation("invalid page cursor")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, createdAt); err != nil {
+		return "", "", apierror.NewValidation("invalid page cursor")
+	}
+	return createdAt, id, nil
 }
 
 func (s *Service) requireReadableDirectory(ctx context.Context, userID, nodeID string) error {
@@ -205,15 +266,21 @@ func (s *Service) requireReadableDirectory(ctx context.Context, userID, nodeID s
 }
 
 // hasReadShare authorizes any descendant of a shared folder, not just the
-// root itself. The recursive walk is bounded by SQLite's recursion limit and
-// the existing node mutation cycle checks.
+// root itself, unless the node or any folder between it and the nearest
+// shared ancestor is in Trash: a recipient must lose access to a subtree
+// the owner deleted, exactly as the owner's own listings hide it. The
+// recursive walk is bounded by SQLite's recursion limit and the existing
+// node mutation cycle checks.
 func (s *Service) hasReadShare(ctx context.Context, userID, nodeID string) bool {
 	var allowed bool
-	err := s.db.QueryRowContext(ctx, `WITH RECURSIVE ancestors(id,parent_id) AS (
-		SELECT id,parent_id FROM nodes WHERE id=?
-		UNION ALL SELECT n.id,n.parent_id FROM nodes n JOIN ancestors a ON a.parent_id=n.id
-	) SELECT EXISTS(SELECT 1 FROM shares sh JOIN ancestors a ON a.id=sh.node_id
-		WHERE sh.target_user_id=? AND sh.permission='READ' AND sh.revoked_at IS NULL)`, nodeID, userID).Scan(&allowed)
+	err := s.db.QueryRowContext(ctx, `WITH RECURSIVE ancestors(id,parent_id,deleted_at,depth) AS (
+		SELECT id,parent_id,deleted_at,0 FROM nodes WHERE id=?
+		UNION ALL SELECT n.id,n.parent_id,n.deleted_at,a.depth+1 FROM nodes n JOIN ancestors a ON a.parent_id=n.id
+	), nearest AS (
+		SELECT MIN(a.depth) AS depth FROM ancestors a JOIN shares sh ON sh.node_id=a.id
+		WHERE sh.target_user_id=? AND sh.permission='READ' AND sh.revoked_at IS NULL
+	) SELECT EXISTS(SELECT 1 FROM nearest WHERE nearest.depth IS NOT NULL
+		AND NOT EXISTS(SELECT 1 FROM ancestors a WHERE a.depth <= nearest.depth AND a.deleted_at IS NOT NULL))`, nodeID, userID).Scan(&allowed)
 	return err == nil && allowed
 }
 
@@ -246,7 +313,7 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (Node, error) {
 	}
 	defer tx.Rollback()
 
-	if result, err := s.replayIfProcessed(ctx, tx, in.OperationID); err != nil {
+	if result, err := s.replayIfProcessed(ctx, tx, in.OperationID, in.UserID, "NODE_UPDATE"); err != nil {
 		return Node{}, err
 	} else if result != nil {
 		tx.Rollback() // see the identical comment in Create.
@@ -320,7 +387,7 @@ func (s *Service) Delete(ctx context.Context, userID, deviceID, nodeID, operatio
 	}
 	defer tx.Rollback()
 
-	if result, err := s.replayIfProcessed(ctx, tx, operationID); err != nil {
+	if result, err := s.replayIfProcessed(ctx, tx, operationID, userID, "NODE_DELETE"); err != nil {
 		return err
 	} else if result != nil {
 		return nil
@@ -364,7 +431,7 @@ func (s *Service) Restore(ctx context.Context, userID, deviceID, nodeID, operati
 	}
 	defer tx.Rollback()
 
-	if result, err := s.replayIfProcessed(ctx, tx, operationID); err != nil {
+	if result, err := s.replayIfProcessed(ctx, tx, operationID, userID, "NODE_RESTORE"); err != nil {
 		return Node{}, err
 	} else if result != nil {
 		tx.Rollback() // see the identical comment in Create.
@@ -431,12 +498,19 @@ type rowScanner interface {
 }
 
 func scanNode(row rowScanner) (Node, error) {
+	n, _, err := scanNodeWithCreatedAt(row)
+	return n, err
+}
+
+// scanNodeWithCreatedAt also returns the raw stored created_at text, which
+// keyset pagination cursors must reproduce byte for byte.
+func scanNodeWithCreatedAt(row rowScanner) (Node, string, error) {
 	var n Node
 	var parentID, currentVersionID, deletedAt sql.NullString
 	var createdAt, updatedAt string
 	if err := row.Scan(&n.ID, &n.OwnerID, &parentID, &n.NodeType, &n.MetadataCiphertext, &n.MetadataKeyVersion,
 		&currentVersionID, &n.Revision, &createdAt, &updatedAt, &deletedAt); err != nil {
-		return Node{}, err
+		return Node{}, "", err
 	}
 	if parentID.Valid {
 		n.ParentID = &parentID.String
@@ -446,19 +520,19 @@ func scanNode(row rowScanner) (Node, error) {
 	}
 	var err error
 	if n.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
-		return Node{}, err
+		return Node{}, "", err
 	}
 	if n.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt); err != nil {
-		return Node{}, err
+		return Node{}, "", err
 	}
 	if deletedAt.Valid {
 		t, err := time.Parse(time.RFC3339Nano, deletedAt.String)
 		if err != nil {
-			return Node{}, err
+			return Node{}, "", err
 		}
 		n.DeletedAt = &t
 	}
-	return n, nil
+	return n, createdAt, nil
 }
 
 func (s *Service) lockNode(ctx context.Context, tx *sql.Tx, userID, nodeID string) (Node, error) {
@@ -552,17 +626,25 @@ type processedResult struct {
 	revision int64
 }
 
-func (s *Service) replayIfProcessed(ctx context.Context, tx *sql.Tx, operationID string) (*processedResult, error) {
+// replayIfProcessed returns the recorded result of an already applied
+// operation. Operation IDs are global keys, so one recorded by another
+// account or for a different mutation is rejected instead of replayed.
+func (s *Service) replayIfProcessed(ctx context.Context, tx *sql.Tx, operationID, userID, operationType string) (*processedResult, error) {
 	var payload []byte
-	err := tx.QueryRowContext(ctx, "SELECT result_payload FROM processed_operations WHERE operation_id=?", operationID).Scan(&payload)
+	var recordedUser, recordedType string
+	err := tx.QueryRowContext(ctx, "SELECT user_id,operation_type,result_payload FROM processed_operations WHERE operation_id=?", operationID).
+		Scan(&recordedUser, &recordedType, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	if recordedUser != userID || recordedType != operationType {
+		return nil, apierror.NewValidation("operation ID has already been used")
+	}
 	fields := strings.SplitN(string(payload), ":", 2)
-	if len(fields) != 2 || !validUUID(fields[0]) {
+	if len(fields) != 2 || uuid.Validate(fields[0]) != nil {
 		return nil, errors.New("invalid stored operation result")
 	}
 	revision, err := strconv.ParseInt(fields[1], 10, 64)
@@ -584,7 +666,12 @@ type queryRower interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-func validUUID(v string) bool { _, err := uuid.Parse(v); return err == nil }
+// validUUID accepts only the canonical lowercase, hyphenated spelling so
+// one opaque ID can never be stored under several equivalent forms.
+func validUUID(v string) bool {
+	parsed, err := uuid.Parse(v)
+	return err == nil && parsed.String() == v
+}
 func nullableString(v *string) any {
 	if v == nil {
 		return nil

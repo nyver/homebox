@@ -16,6 +16,7 @@ import '../../core/util/local_path.dart';
 import '../files/file_transfer.dart';
 import '../server/server_connection_controller.dart';
 import '../sync/sync_engine.dart';
+import '../../core/util/user_facing_error.dart';
 
 enum LocalUploadStatus { idle, scanning, resyncing, error }
 
@@ -113,7 +114,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       _errorMessage = null;
       _setStatus(LocalUploadStatus.idle);
     } catch (e) {
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       _setStatus(LocalUploadStatus.error);
     } finally {
       _running = false;

@@ -3,20 +3,17 @@ package httpapi
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/homebox/homebox/internal/uploads"
 )
 
-// maxChunkBodyBytes bounds a single PUT chunk body. Per ADR-010 clients use
-// a fixed 4 MiB plaintext chunk size; this leaves headroom for AEAD framing
-// overhead without trusting a client-declared size before reading the body.
-const maxChunkBodyBytes = 8 * 1024 * 1024
+// maxChunkBodyBytes bounds a single PUT chunk body before it is read.
+const maxChunkBodyBytes = uploads.MaxChunkCiphertextSize
 
 type createUploadRequest struct {
 	TargetNodeID       string `json:"targetNodeId"`
@@ -174,7 +171,7 @@ func (a *API) downloadFileContent(w http.ResponseWriter, r *http.Request) {
 	versionID := r.URL.Query().Get("versionId")
 	if versionID == "" {
 		versionID = *node.CurrentVersionID
-	} else if _, err := uuid.Parse(versionID); err != nil {
+	} else if !canonicalUUID(versionID) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "versionId must be a UUID")
 		return
 	}
@@ -186,17 +183,28 @@ func (a *API) downloadFileContent(w http.ResponseWriter, r *http.Request) {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "stored ciphertext is missing")
+			writeInternalError(w, "download ciphertext", "stored ciphertext is missing", err)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to open stored ciphertext")
+		writeInternalError(w, "download ciphertext", "failed to open stored ciphertext", err)
 		return
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		writeInternalError(w, "download ciphertext", "failed to open stored ciphertext", err)
+		return
+	}
+	if info.Size() != size {
+		writeInternalError(w, "download ciphertext", "stored ciphertext is damaged", fmt.Errorf("blob %s has %d bytes, database records %d", path, info.Size(), size))
+		return
+	}
+	// A file version's ciphertext is immutable, so its ID is a strong ETag.
+	// ServeContent then answers Range/If-Range requests, letting a client
+	// resume an interrupted large download instead of starting over.
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, file)
+	w.Header().Set("ETag", `"`+versionID+`"`)
+	http.ServeContent(w, r, "", time.Time{}, file)
 }
 
 type fileVersionResponse struct {

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
@@ -268,18 +269,42 @@ final class RecoveryPackageCipher {
     }
   }
 
+  /// Argon2id is deliberately slow and memory-hard, and the `cryptography`
+  /// implementation is pure Dart: on the UI isolate it would freeze the app
+  /// for the whole derivation. It runs on a background isolate instead.
   Future<SecretKey> _deriveKey(
     RecoverySecret recoverySecret,
     List<int> salt,
     int memoryKiB,
     int iterations,
     int parallelism,
-  ) => Argon2id(
-    parallelism: parallelism,
-    memory: memoryKiB,
-    iterations: iterations,
-    hashLength: 32,
-  ).deriveKey(secretKey: recoverySecret._material, nonce: salt);
+  ) async {
+    final derived = await _deriveInBackground(
+      await recoverySecret._material.extractBytes(),
+      List<int>.of(salt),
+      memoryKiB,
+      iterations,
+      parallelism,
+    );
+    return SecretKeyData(derived);
+  }
+
+  // Static so the isolate closure captures only its arguments.
+  static Future<List<int>> _deriveInBackground(
+    List<int> secret,
+    List<int> salt,
+    int memoryKiB,
+    int iterations,
+    int parallelism,
+  ) => Isolate.run(() async {
+    final key = await Argon2id(
+      parallelism: parallelism,
+      memory: memoryKiB,
+      iterations: iterations,
+      hashLength: 32,
+    ).deriveKey(secretKey: SecretKeyData(secret), nonce: salt);
+    return key.extractBytes();
+  });
 
   Uint8List _aad(
     Uint8List userId,

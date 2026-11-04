@@ -17,6 +17,7 @@ import '../../core/transport/homebox_api_client.dart' as transport;
 import '../files/file_transfer.dart';
 import '../server/server_connection_controller.dart';
 import '../sync/sync_engine.dart';
+import '../../core/util/user_facing_error.dart';
 
 enum SyncFolderStatus { idle, materializing, error }
 
@@ -104,7 +105,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       _errorMessage = null;
       _setStatus(SyncFolderStatus.idle);
     } catch (e) {
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       _setStatus(SyncFolderStatus.error);
     } finally {
       _running = false;

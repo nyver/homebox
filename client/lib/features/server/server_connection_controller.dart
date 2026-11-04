@@ -13,6 +13,7 @@ import '../../core/transport/homebox_api_client.dart';
 import '../../core/transport/pinned_http_client.dart';
 import '../../core/transport/pinned_server_store.dart';
 import 'session_store.dart';
+import '../../core/util/user_facing_error.dart';
 
 enum ServerConnectionStatus {
   /// No server has been pinned yet.
@@ -125,7 +126,7 @@ final class ServerConnectionController extends ChangeNotifier {
       _discoveredFingerprint = fingerprint;
       _setStatus(ServerConnectionStatus.awaitingTrust);
     } catch (e) {
-      _errorMessage = 'Could not reach that server: $e';
+      _errorMessage = 'Could not reach that server. ${describeError(e)}';
       _setStatus(ServerConnectionStatus.failed);
     }
   }
@@ -179,10 +180,10 @@ final class ServerConnectionController extends ChangeNotifier {
       _setStatus(ServerConnectionStatus.authenticated);
       _scheduleAccessTokenRefresh();
     } on HomeBoxApiException catch (e) {
-      _errorMessage = e.message;
+      _errorMessage = describeError(e);
       _setStatus(ServerConnectionStatus.connectedLoggedOut);
     } on Exception catch (e) {
-      _errorMessage = 'Login failed: $e';
+      _errorMessage = 'Login failed. ${describeError(e)}';
       _setStatus(ServerConnectionStatus.connectedLoggedOut);
     } finally {
       identity?.destroy();
@@ -304,7 +305,7 @@ final class ServerConnectionController extends ChangeNotifier {
       } else {
         // Preserve the durable token and current UI session. The next
         // authenticated operation retries refresh instead of forcing login.
-        _errorMessage = 'Could not refresh the saved session: $e';
+        _errorMessage = 'Could not refresh the saved session. ${describeError(e)}';
         notifyListeners();
       }
       return false;
@@ -343,7 +344,7 @@ final class ServerConnectionController extends ChangeNotifier {
         await _sessionStore.clearRefreshToken();
         _setStatus(ServerConnectionStatus.connectedLoggedOut);
       } else {
-        _errorMessage = 'Could not restore the saved session: $e';
+        _errorMessage = 'Could not restore the saved session. ${describeError(e)}';
         _setStatus(ServerConnectionStatus.failed);
       }
       return null;

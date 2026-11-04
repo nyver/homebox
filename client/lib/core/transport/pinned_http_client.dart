@@ -33,12 +33,22 @@ final class PinnedHttpClient {
 
   final String pinnedFingerprint;
   late final HttpClient _client;
+  bool _identityRejected = false;
 
   HttpClient get client => _client;
 
+  /// Whether the most recent certificate this client inspected failed the
+  /// pin. A `HandshakeException` is only a `SERVER_IDENTITY_CHANGED` when
+  /// this is true; any other handshake failure (a dropped connection, a
+  /// captive portal, a server restarting) is an ordinary network error and
+  /// must not be reported as a possible attack.
+  bool get identityRejected => _identityRejected;
+
   bool _verify(X509Certificate cert, String host, int port) {
     final fingerprint = ServerFingerprint.fromCertificateDer(cert.der);
-    return fingerprint != null && fingerprint == pinnedFingerprint;
+    final matches = fingerprint != null && fingerprint == pinnedFingerprint;
+    _identityRejected = !matches;
+    return matches;
   }
 
   void close({bool force = false}) => _client.close(force: force);
@@ -63,23 +73,31 @@ final class ServerDiscoveryException implements Exception {
 final class ServerDiscovery {
   const ServerDiscovery._();
 
-  static Future<String> probeFingerprint(Uri healthCheckUrl) async {
+  static Future<String> probeFingerprint(
+    Uri healthCheckUrl, {
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
     String? seen;
     final client = HttpClient(
       context: SecurityContext(withTrustedRoots: false),
     )
+      ..connectionTimeout = timeout
       ..badCertificateCallback = (cert, host, port) {
         seen = ServerFingerprint.fromCertificateDer(cert.der);
         return seen != null; // Accepted only to inspect the certificate; nothing here is trusted yet.
       };
     try {
-      final request = await client.getUrl(healthCheckUrl);
-      final response = await request.close();
-      final certificate = response.certificate;
-      seen ??= certificate == null
-          ? null
-          : ServerFingerprint.fromCertificateDer(certificate.der);
-      await response.drain<void>();
+      // A typo'd address or a firewalled port must fail with a clear
+      // message instead of leaving the connect dialog spinning.
+      await () async {
+        final request = await client.getUrl(healthCheckUrl);
+        final response = await request.close();
+        final certificate = response.certificate;
+        seen ??= certificate == null
+            ? null
+            : ServerFingerprint.fromCertificateDer(certificate.der);
+        await response.drain<void>();
+      }().timeout(timeout);
     } finally {
       client.close(force: true);
     }

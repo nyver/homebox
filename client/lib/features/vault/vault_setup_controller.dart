@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../core/e2ee/vault_key_store.dart';
+import '../../core/util/user_facing_error.dart';
 
 enum VaultSetupStatus { checking, locked, creating, ready, failed }
 
@@ -32,7 +33,7 @@ final class VaultSetupController extends ChangeNotifier {
       // Broad on purpose: storage/decoding failures can throw
       // FormatException or ArgumentError, and the latter does not extend
       // Exception, so `on Exception` alone would miss it and crash.
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       _setStatus(VaultSetupStatus.failed);
     }
   }
@@ -59,7 +60,7 @@ final class VaultSetupController extends ChangeNotifier {
     } catch (e) {
       // Broad on purpose: VaultKeyStore.createVault throws StateError if a
       // vault already exists, which does not extend Exception.
-      _errorMessage = '$e';
+      _errorMessage = describeError(e);
       _setStatus(VaultSetupStatus.locked);
       return null;
     }

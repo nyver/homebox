@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -38,7 +39,7 @@ func TestLoginIssuesSessionAndRegistersDevice(t *testing.T) {
 	mustBootstrap(t, s, "admin", "correct horse battery staple")
 
 	deviceID := uuid.NewString()
-	session, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(deviceID))
+	session, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(deviceID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +60,7 @@ func TestRecordSyncSetsLastSyncWithoutChangingLoginActivity(t *testing.T) {
 	s := newTestService(t)
 	user := mustBootstrap(t, s, "admin", "correct horse battery staple")
 	deviceID := uuid.NewString()
-	if _, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(deviceID)); err != nil {
+	if _, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(deviceID)); err != nil {
 		t.Fatal(err)
 	}
 	before, err := s.GetDevice(ctx, user.ID, deviceID)
@@ -110,10 +111,10 @@ func TestListShareableDevicesOnlyReturnsActiveRecipientKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	activeID, revokedID := uuid.NewString(), uuid.NewString()
-	if _, err := s.Login(ctx, "member", "correct horse battery staple", testDevice(activeID)); err != nil {
+	if _, err := s.Login(ctx, "", "member", "correct horse battery staple", testDevice(activeID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Login(ctx, "member", "correct horse battery staple", testDevice(revokedID)); err != nil {
+	if _, err := s.Login(ctx, "", "member", "correct horse battery staple", testDevice(revokedID)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.RevokeDevice(ctx, member.ID, revokedID); err != nil {
@@ -131,7 +132,7 @@ func TestListShareableDevicesOnlyReturnsActiveRecipientKeys(t *testing.T) {
 func TestLoginRejectsWrongPassword(t *testing.T) {
 	s := newTestService(t)
 	mustBootstrap(t, s, "admin", "correct horse battery staple")
-	if _, err := s.Login(context.Background(), "admin", "wrong password entirely", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
+	if _, err := s.Login(context.Background(), "", "admin", "wrong password entirely", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
 		t.Fatalf("error=%v, want %v", err, ErrInvalidCredentials)
 	}
 }
@@ -141,12 +142,12 @@ func TestReturningDeviceMustPresentTheSamePublicKey(t *testing.T) {
 	s := newTestService(t)
 	mustBootstrap(t, s, "admin", "correct horse battery staple")
 	deviceID := uuid.NewString()
-	if _, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(deviceID)); err != nil {
+	if _, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(deviceID)); err != nil {
 		t.Fatal(err)
 	}
 	rotated := testDevice(deviceID)
 	rotated.PublicKey = []byte("different-public-key-bytes-here")
-	if _, err := s.Login(ctx, "admin", "correct horse battery staple", rotated); err != ErrDeviceConflict {
+	if _, err := s.Login(ctx, "", "admin", "correct horse battery staple", rotated); err != ErrDeviceConflict {
 		t.Fatalf("error=%v, want %v", err, ErrDeviceConflict)
 	}
 }
@@ -159,10 +160,10 @@ func TestDeviceIDCannotMoveToAnotherAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	deviceID := uuid.NewString()
-	if _, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(deviceID)); err != nil {
+	if _, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(deviceID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Login(ctx, "second-user", "another very long password", testDevice(deviceID)); err != ErrDeviceConflict {
+	if _, err := s.Login(ctx, "", "second-user", "another very long password", testDevice(deviceID)); err != ErrDeviceConflict {
 		t.Fatalf("error=%v, want %v", err, ErrDeviceConflict)
 	}
 }
@@ -171,7 +172,7 @@ func TestRefreshRotatesTokenAndInvalidatesThePrevious(t *testing.T) {
 	ctx := context.Background()
 	s := newTestService(t)
 	mustBootstrap(t, s, "admin", "correct horse battery staple")
-	first, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(uuid.NewString()))
+	first, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,8 +183,145 @@ func TestRefreshRotatesTokenAndInvalidatesThePrevious(t *testing.T) {
 	if second.AccessToken == first.AccessToken || second.RefreshToken == first.RefreshToken {
 		t.Fatal("refresh must issue new tokens")
 	}
+	if _, err := s.Refresh(ctx, second.RefreshToken); err != nil {
+		t.Fatalf("the rotated-in token must refresh: %v", err)
+	}
+}
+
+func TestRefreshRetryWithinGraceReissuesAndRetiresTheLostSuccessor(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	mustBootstrap(t, s, "admin", "correct horse battery staple")
+	base := time.Now()
+	s.now = func() time.Time { return base }
+	first, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lost, err := s.Refresh(ctx, first.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The client never received `lost` and retries with its old token.
+	s.now = func() time.Time { return base.Add(10 * time.Second) }
+	retried, err := s.Refresh(ctx, first.RefreshToken)
+	if err != nil {
+		t.Fatalf("retry inside the grace period: %v", err)
+	}
+	if retried.RefreshToken == lost.RefreshToken {
+		t.Fatal("a retry must issue a fresh token pair")
+	}
+	if _, err := s.Refresh(ctx, retried.RefreshToken); err != nil {
+		t.Fatalf("the reissued token must refresh: %v", err)
+	}
+}
+
+func TestRotatedRefreshTokenReuseAfterGraceRevokesTheDeviceSessions(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	mustBootstrap(t, s, "admin", "correct horse battery staple")
+	base := time.Now()
+	s.now = func() time.Time { return base }
+	first, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.Refresh(ctx, first.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return base.Add(refreshRetryGrace + time.Second) }
 	if _, err := s.Refresh(ctx, first.RefreshToken); err != ErrTokenInvalid {
 		t.Fatalf("reusing a rotated refresh token: error=%v, want %v", err, ErrTokenInvalid)
+	}
+	if _, err := s.Refresh(ctx, current.RefreshToken); err != ErrTokenInvalid {
+		t.Fatalf("theft detection must revoke the current refresh token too: error=%v", err)
+	}
+	if _, _, err := s.Authenticate(ctx, current.AccessToken); err != ErrTokenInvalid {
+		t.Fatalf("theft detection must end the current access token: error=%v", err)
+	}
+}
+
+func TestRecordSyncThrottlesRepeatedWrites(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	user := mustBootstrap(t, s, "admin", "correct horse battery staple")
+	deviceID := uuid.NewString()
+	if _, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(deviceID)); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	for _, offset := range []time.Duration{0, 30 * time.Second} {
+		s.now = func() time.Time { return base.Add(offset) }
+		if err := s.RecordSync(ctx, user.ID, deviceID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	device, err := s.GetDevice(ctx, user.ID, deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if device.LastSyncAt == nil || !device.LastSyncAt.Equal(base) {
+		t.Fatalf("last sync = %v, want the throttled %v", device.LastSyncAt, base)
+	}
+	s.now = func() time.Time { return base.Add(2 * time.Minute) }
+	if err := s.RecordSync(ctx, user.ID, deviceID); err != nil {
+		t.Fatal(err)
+	}
+	if device, err = s.GetDevice(ctx, user.ID, deviceID); err != nil {
+		t.Fatal(err)
+	}
+	if !device.LastSyncAt.Equal(base.Add(2 * time.Minute)) {
+		t.Fatalf("last sync = %v, want an update after the interval", device.LastSyncAt)
+	}
+}
+
+func TestAddressLimiterThrottlesPasswordSprayingAcrossUsernames(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	mustBootstrap(t, s, "admin", "correct horse battery staple")
+	base := time.Now()
+	s.now = func() time.Time { return base }
+	for i := 0; i < 10; i++ {
+		if _, err := s.Login(ctx, "198.51.100.7", fmt.Sprintf("user-%d", i), "wrong password", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
+			t.Fatalf("attempt %d: error=%v", i, err)
+		}
+	}
+	if _, err := s.Login(ctx, "198.51.100.7", "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != ErrRateLimited {
+		t.Fatalf("sprayed address: error=%v, want %v", err, ErrRateLimited)
+	}
+	if _, err := s.Login(ctx, "198.51.100.8", "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != nil {
+		t.Fatalf("another address must not be throttled: %v", err)
+	}
+}
+
+func TestUsernameLimiterRejectsConcurrentAttempts(t *testing.T) {
+	l := newAttemptLimiter(loginBackoff, 1)
+	now := time.Now()
+	if !l.begin("admin", now) {
+		t.Fatal("first attempt must be allowed")
+	}
+	if l.begin("admin", now) {
+		t.Fatal("a concurrent attempt for the same username must be rejected")
+	}
+	l.end("admin")
+	if !l.begin("admin", now) {
+		t.Fatal("an attempt after the first finished must be allowed")
+	}
+	l.end("admin")
+	if l.size() != 0 {
+		t.Fatalf("idle entries without failures must be dropped, size=%d", l.size())
+	}
+}
+
+func TestAttemptLimiterStaysBounded(t *testing.T) {
+	l := newAttemptLimiter(loginBackoff, 1)
+	now := time.Now()
+	for i := 0; i < maxLimiterEntries+500; i++ {
+		l.recordFailure(fmt.Sprintf("user-%d", i), now)
+	}
+	if l.size() > maxLimiterEntries {
+		t.Fatalf("limiter grew to %d entries, cap %d", l.size(), maxLimiterEntries)
 	}
 }
 
@@ -191,7 +329,7 @@ func TestLogoutRevokesTheRefreshToken(t *testing.T) {
 	ctx := context.Background()
 	s := newTestService(t)
 	mustBootstrap(t, s, "admin", "correct horse battery staple")
-	session, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(uuid.NewString()))
+	session, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +345,7 @@ func TestRevokedDeviceLosesAccessAndCannotRefresh(t *testing.T) {
 	ctx := context.Background()
 	s := newTestService(t)
 	admin := mustBootstrap(t, s, "admin", "correct horse battery staple")
-	session, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(uuid.NewString()))
+	session, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +370,7 @@ func TestExpiredAccessTokenIsRejected(t *testing.T) {
 	mustBootstrap(t, s, "admin", "correct horse battery staple")
 	base := time.Now()
 	s.now = func() time.Time { return base }
-	session, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(uuid.NewString()))
+	session, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +383,7 @@ func TestExpiredAccessTokenIsRejected(t *testing.T) {
 func TestLoginRejectsUnknownUsernameLikeAWrongPassword(t *testing.T) {
 	s := newTestService(t)
 	mustBootstrap(t, s, "admin", "correct horse battery staple")
-	if _, err := s.Login(context.Background(), "no-such-user", "irrelevant password", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
+	if _, err := s.Login(context.Background(), "", "no-such-user", "irrelevant password", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
 		t.Fatalf("error=%v, want %v", err, ErrInvalidCredentials)
 	}
 }
@@ -260,16 +398,16 @@ func TestRepeatedFailedLoginsAreRateLimited(t *testing.T) {
 	// The first couple of failures are unthrottled (loginBackoff returns 0
 	// below the threshold), so drive past it before asserting a block.
 	for i := 0; i < 3; i++ {
-		if _, err := s.Login(ctx, "admin", "wrong password", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
+		if _, err := s.Login(ctx, "", "admin", "wrong password", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
 			t.Fatalf("attempt %d: error=%v, want %v", i, err, ErrInvalidCredentials)
 		}
 	}
-	if _, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != ErrRateLimited {
+	if _, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != ErrRateLimited {
 		t.Fatalf("expected the correct password to still be rate-limited: error=%v, want %v", err, ErrRateLimited)
 	}
 
 	s.now = func() time.Time { return base.Add(2 * time.Second) }
-	if _, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != nil {
+	if _, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != nil {
 		t.Fatalf("expected login to succeed once the backoff window passed: %v", err)
 	}
 }
@@ -278,16 +416,16 @@ func TestSuccessfulLoginClearsRateLimitState(t *testing.T) {
 	ctx := context.Background()
 	s := newTestService(t)
 	mustBootstrap(t, s, "admin", "correct horse battery staple")
-	if _, err := s.Login(ctx, "admin", "wrong once", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
+	if _, err := s.Login(ctx, "", "admin", "wrong once", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
 		t.Fatal(err)
 	}
-	if _, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != nil {
+	if _, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != nil {
 		t.Fatalf("expected success below the backoff threshold: %v", err)
 	}
 	// A fresh run of failures after a success should again take a few
 	// attempts before being throttled, proving recordSuccess reset state.
 	for i := 0; i < 2; i++ {
-		if _, err := s.Login(ctx, "admin", "wrong again", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
+		if _, err := s.Login(ctx, "", "admin", "wrong again", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
 			t.Fatalf("attempt %d: error=%v, want %v", i, err, ErrInvalidCredentials)
 		}
 	}
@@ -297,7 +435,7 @@ func TestRevokeDeviceIsIdempotentlyNotFoundOnSecondCall(t *testing.T) {
 	ctx := context.Background()
 	s := newTestService(t)
 	admin := mustBootstrap(t, s, "admin", "correct horse battery staple")
-	session, err := s.Login(ctx, "admin", "correct horse battery staple", testDevice(uuid.NewString()))
+	session, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString()))
 	if err != nil {
 		t.Fatal(err)
 	}

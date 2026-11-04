@@ -27,6 +27,17 @@ var (
 	ErrMissingChunks     = errors.New("upload has missing ciphertext chunks")
 	ErrRevisionConflict  = errors.New("node revision conflict")
 	ErrTargetNodeMissing = errors.New("target file node not found")
+	ErrIDConflict        = errors.New("blob or file version id is already in use")
+)
+
+const (
+	// MaxChunkCiphertextSize bounds one ciphertext chunk. Clients use a
+	// fixed 4 MiB plaintext chunk (ADR-010); this leaves headroom for AEAD
+	// framing without trusting a client-declared size before reading.
+	MaxChunkCiphertextSize = 8 * 1024 * 1024
+	// maxChunkCount bounds the per-upload bookkeeping a client can make the
+	// server allocate. A maximum-size file needs 125 chunks of 4 MiB.
+	maxChunkCount = 1 << 16
 )
 
 type Service struct {
@@ -35,7 +46,7 @@ type Service struct {
 	maxCiphertextSize int64
 	abandonedAfter    time.Duration
 	now               func() time.Time
-	mu                sync.Mutex
+	locks             uploadLocks
 }
 
 type CreateInput struct {
@@ -79,7 +90,8 @@ func New(db *sql.DB, storagePath string, maxCiphertextSize int64, abandonedAfter
 }
 
 func (s *Service) Create(ctx context.Context, in CreateInput) (Session, error) {
-	if !validUUID(in.TargetNodeID) || !validUUID(in.FileVersionID) || !validUUID(in.BlobID) || in.ExpectedRevision == nil || *in.ExpectedRevision < 0 || in.ChunkCount < 1 || in.ChunkSize < 1 || in.ChunkSize > s.maxCiphertextSize {
+	if !validUUID(in.TargetNodeID) || !validUUID(in.FileVersionID) || !validUUID(in.BlobID) || in.ExpectedRevision == nil || *in.ExpectedRevision < 0 ||
+		in.ChunkCount < 1 || in.ChunkCount > maxChunkCount || in.ChunkSize < 1 || in.ChunkSize > MaxChunkCiphertextSize {
 		return Session{}, apierror.NewValidation("invalid opaque upload framing")
 	}
 	if len(in.WrappedFileKey) == 0 || len(in.E2EEHeader) == 0 || len(in.MetadataCiphertext) == 0 || in.MetadataKeyVersion < 1 {
@@ -93,13 +105,35 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Session, error) {
 	}
 	now := s.now().UTC()
 	session := Session{ID: uuid.NewString(), BlobID: in.BlobID, FileVersionID: in.FileVersionID, Status: "OPEN", ChunkCount: in.ChunkCount, ExpiresAt: now.Add(s.abandonedAfter)}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO upload_sessions
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, err
+	}
+	defer tx.Rollback()
+	// Blob and file-version IDs are client-chosen so uploads can be
+	// prepared offline, which makes them untrusted. Reserving them here,
+	// atomically with the session insert, guarantees at most one open
+	// session ever writes a given blob path and that no upload can target
+	// an already committed blob.
+	var inUse bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?)
+		OR EXISTS(SELECT 1 FROM file_versions WHERE id=?)
+		OR EXISTS(SELECT 1 FROM upload_sessions WHERE (blob_id=? OR file_version_id=?) AND status IN ('OPEN','COMMITTING'))`,
+		in.BlobID, in.FileVersionID, in.BlobID, in.FileVersionID).Scan(&inUse); err != nil {
+		return Session{}, err
+	}
+	if inUse {
+		return Session{}, ErrIDConflict
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO upload_sessions
 		(id,user_id,device_id,target_node_id,file_version_id,blob_id,expected_revision,chunk_size,chunk_count,max_ciphertext_size,metadata_ciphertext,metadata_key_version,wrapped_file_key,e2ee_header,status,created_at,expires_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN',?,?)`,
 		session.ID, in.UserID, in.DeviceID, nullableString(in.TargetNodeID), in.FileVersionID, in.BlobID, nullableInt(in.ExpectedRevision), in.ChunkSize, in.ChunkCount, s.maxCiphertextSize,
-		in.MetadataCiphertext, in.MetadataKeyVersion, in.WrappedFileKey, in.E2EEHeader, now.Format(time.RFC3339Nano), session.ExpiresAt.Format(time.RFC3339Nano))
-	if err != nil {
+		in.MetadataCiphertext, in.MetadataKeyVersion, in.WrappedFileKey, in.E2EEHeader, now.Format(time.RFC3339Nano), session.ExpiresAt.Format(time.RFC3339Nano)); err != nil {
 		return Session{}, fmt.Errorf("create upload session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Session{}, err
 	}
 	if err := os.MkdirAll(s.uploadDir(session.ID), 0o700); err != nil {
 		return Session{}, fmt.Errorf("create upload temp directory: %w", err)
@@ -108,11 +142,13 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Session, error) {
 }
 
 func (s *Service) PutChunk(ctx context.Context, userID, deviceID, uploadID string, chunkNo int, ciphertext []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !validUUID(uploadID) || chunkNo < 0 || len(ciphertext) == 0 || int64(len(ciphertext)) > s.maxCiphertextSize {
+	if !validUUID(uploadID) || chunkNo < 0 || len(ciphertext) == 0 || len(ciphertext) > MaxChunkCiphertextSize {
 		return apierror.NewValidation("invalid ciphertext chunk")
 	}
+	// Serializes only this upload's chunk writes and completion; other
+	// uploads proceed in parallel.
+	unlock := s.locks.lock(uploadID)
+	defer unlock()
 	session, err := s.sessionForDevice(ctx, userID, deviceID, uploadID)
 	if err != nil {
 		return err
@@ -122,6 +158,9 @@ func (s *Service) PutChunk(ctx context.Context, userID, deviceID, uploadID strin
 	}
 	if chunkNo >= session.ChunkCount {
 		return apierror.NewValidation("chunk number exceeds declared chunk count")
+	}
+	if int64(len(ciphertext)) > session.chunkSize {
+		return apierror.NewValidation("chunk exceeds the declared chunk size")
 	}
 	digest := sha256.Sum256(ciphertext)
 	digestText := hex.EncodeToString(digest[:])
@@ -181,8 +220,11 @@ func (s *Service) Get(ctx context.Context, userID, deviceID, uploadID string) (S
 // no-op rather than an error, so a client retrying a DELETE after a network
 // blip doesn't need special-case handling.
 func (s *Service) Abort(ctx context.Context, userID, deviceID, uploadID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if !validUUID(uploadID) {
+		return ErrNotFound
+	}
+	unlock := s.locks.lock(uploadID)
+	defer unlock()
 	session, err := s.sessionForDevice(ctx, userID, deviceID, uploadID)
 	if err != nil {
 		return err
@@ -263,11 +305,11 @@ func (s *Service) ListVersions(ctx context.Context, nodeID string) ([]FileVersio
 }
 
 func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInput) (CompleteResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !validUUID(uploadID) || !validUUID(in.OperationID) || in.KeyScopeID == "" || in.KeyVersion < 1 {
 		return CompleteResult{}, apierror.NewValidation("invalid opaque completion request")
 	}
+	unlock := s.locks.lock(uploadID)
+	defer unlock()
 	session, err := s.sessionForDevice(ctx, in.UserID, in.DeviceID, uploadID)
 	if err != nil {
 		return CompleteResult{}, err
@@ -291,13 +333,8 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 	if in.ExpectedRevision != nil && *in.ExpectedRevision != expectedRevision {
 		return CompleteResult{}, apierror.NewValidation("completion revision does not match the upload session")
 	}
-	var existingResult []byte
-	err = s.db.QueryRowContext(ctx, "SELECT result_payload FROM processed_operations WHERE operation_id=?", in.OperationID).Scan(&existingResult)
-	if err == nil {
-		return decodeResult(existingResult)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return CompleteResult{}, err
+	if result, found, err := replayCompletion(ctx, s.db, in); err != nil || found {
+		return result, err
 	}
 	chunks, totalSize, err := s.loadChunks(ctx, uploadID, session.ChunkCount)
 	if err != nil {
@@ -307,7 +344,7 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 		return CompleteResult{}, apierror.NewValidation("ciphertext exceeds configured file limit")
 	}
 	blobPath := filepath.Join(s.storagePath, "blobs", session.BlobID+".hbxblob")
-	digest, err := s.assembleCiphertext(blobPath, chunks)
+	digest, err := s.assembleCiphertext(ctx, session.BlobID, blobPath, chunks)
 	if err != nil {
 		return CompleteResult{}, err
 	}
@@ -323,10 +360,8 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 		return CompleteResult{}, err
 	}
 	defer tx.Rollback()
-	if err := tx.QueryRowContext(ctx, "SELECT result_payload FROM processed_operations WHERE operation_id=?", in.OperationID).Scan(&existingResult); err == nil {
-		return decodeResult(existingResult)
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return CompleteResult{}, err
+	if result, found, err := replayCompletion(ctx, tx, in); err != nil || found {
+		return result, err
 	}
 	var ownerID string
 	var currentRevision int64
@@ -395,12 +430,13 @@ type dbSession struct {
 	metadataCiphertext []byte
 	metadataKeyVersion int
 	expectedRevision   sql.NullInt64
+	chunkSize          int64
 }
 
 func (s *Service) sessionForDevice(ctx context.Context, userID, deviceID, uploadID string) (dbSession, error) {
 	var r dbSession
 	var expires string
-	err := s.db.QueryRowContext(ctx, `SELECT id,blob_id,file_version_id,status,chunk_count,expires_at,target_node_id,e2ee_header,wrapped_file_key,metadata_ciphertext,metadata_key_version,expected_revision FROM upload_sessions WHERE id=? AND user_id=? AND device_id=?`, uploadID, userID, deviceID).Scan(&r.ID, &r.BlobID, &r.FileVersionID, &r.Status, &r.ChunkCount, &expires, &r.targetNodeID, &r.e2eeHeader, &r.wrappedFileKey, &r.metadataCiphertext, &r.metadataKeyVersion, &r.expectedRevision)
+	err := s.db.QueryRowContext(ctx, `SELECT id,blob_id,file_version_id,status,chunk_count,expires_at,target_node_id,e2ee_header,wrapped_file_key,metadata_ciphertext,metadata_key_version,expected_revision,chunk_size FROM upload_sessions WHERE id=? AND user_id=? AND device_id=?`, uploadID, userID, deviceID).Scan(&r.ID, &r.BlobID, &r.FileVersionID, &r.Status, &r.ChunkCount, &expires, &r.targetNodeID, &r.e2eeHeader, &r.wrappedFileKey, &r.metadataCiphertext, &r.metadataKeyVersion, &r.expectedRevision, &r.chunkSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound
 	}
@@ -469,9 +505,15 @@ func (s *Service) loadChunks(ctx context.Context, uploadID string, count int) ([
 	}
 	return paths, total, nil
 }
-func (s *Service) assembleCiphertext(destination string, chunks []ciphertextChunk) (string, error) {
-	partial := destination + ".partial"
-	f, err := os.OpenFile(partial, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+
+// assembleCiphertext writes the committed blob file. It is created with
+// O_EXCL at its final path and never renamed over an existing file, so a
+// colliding client-chosen blob ID can never replace or delete another
+// version's ciphertext. Until the database row commits, the file is
+// unreferenced and so invisible to readers; if the process dies first,
+// orphan GC removes it.
+func (s *Service) assembleCiphertext(ctx context.Context, blobID, destination string, chunks []ciphertextChunk) (string, error) {
+	f, err := s.createBlobFile(ctx, blobID, destination)
 	if err != nil {
 		return "", err
 	}
@@ -479,7 +521,7 @@ func (s *Service) assembleCiphertext(destination string, chunks []ciphertextChun
 	defer func() {
 		f.Close()
 		if cleanup {
-			os.Remove(partial)
+			os.Remove(destination)
 		}
 	}()
 	h := sha256.New()
@@ -508,11 +550,31 @@ func (s *Service) assembleCiphertext(destination string, chunks []ciphertextChun
 	if err := f.Close(); err != nil {
 		return "", err
 	}
-	if err := os.Rename(partial, destination); err != nil {
-		return "", err
-	}
 	cleanup = false
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// createBlobFile exclusively creates destination. A file already at that
+// path with no committed blob row can only be this session's own leftover
+// from a crash between writing and committing (Create guarantees at most
+// one open session per blob ID), so it is replaced; a committed blob is a
+// conflict and is never touched.
+func (s *Service) createBlobFile(ctx context.Context, blobID, destination string) (*os.File, error) {
+	f, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err == nil || !errors.Is(err, os.ErrExist) {
+		return f, err
+	}
+	var committed bool
+	if err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?)", blobID).Scan(&committed); err != nil {
+		return nil, err
+	}
+	if committed {
+		return nil, ErrIDConflict
+	}
+	if err := os.Remove(destination); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	return os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 }
 func (s *Service) completedResult(ctx context.Context, versionID string) (CompleteResult, error) {
 	var r CompleteResult
@@ -529,7 +591,15 @@ func writeAtomic(path string, data []byte) error {
 	}
 	return os.Rename(temp, path)
 }
-func validUUID(value string) bool { _, err := uuid.Parse(value); return err == nil }
+
+// validUUID accepts only the canonical lowercase, hyphenated form. IDs are
+// primary keys and file names; uuid.Parse alone also accepts braces,
+// "urn:uuid:" prefixes, and upper case, which would let one UUID exist
+// under several spellings (and collide on a case-insensitive disk).
+func validUUID(value string) bool {
+	parsed, err := uuid.Parse(value)
+	return err == nil && parsed.String() == value
+}
 func nullableString(v string) any {
 	if v == "" {
 		return nil
@@ -542,9 +612,71 @@ func nullableInt(v *int64) any {
 	}
 	return *v
 }
+
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// replayCompletion returns the stored result of an already processed
+// completion. Operation IDs are global keys, so one recorded by another
+// account or for another operation type is rejected rather than replayed.
+func replayCompletion(ctx context.Context, q queryRower, in CompleteInput) (CompleteResult, bool, error) {
+	var userID, operationType string
+	var payload []byte
+	err := q.QueryRowContext(ctx, "SELECT user_id,operation_type,result_payload FROM processed_operations WHERE operation_id=?", in.OperationID).
+		Scan(&userID, &operationType, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CompleteResult{}, false, nil
+	}
+	if err != nil {
+		return CompleteResult{}, false, err
+	}
+	if userID != in.UserID || operationType != "UPLOAD_COMPLETE" {
+		return CompleteResult{}, false, apierror.NewValidation("operation ID has already been used")
+	}
+	result, err := decodeResult(payload)
+	return result, true, err
+}
+
+// uploadLocks is a keyed mutex: one lock per upload ID, created on demand
+// and dropped once no caller holds or waits for it.
+type uploadLocks struct {
+	mu    sync.Mutex
+	locks map[string]*uploadLock
+}
+
+type uploadLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (l *uploadLocks) lock(id string) (unlock func()) {
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = make(map[string]*uploadLock)
+	}
+	entry := l.locks[id]
+	if entry == nil {
+		entry = &uploadLock{}
+		l.locks[id] = entry
+	}
+	entry.refs++
+	l.mu.Unlock()
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		l.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(l.locks, id)
+		}
+		l.mu.Unlock()
+	}
+}
+
 func decodeResult(v []byte) (CompleteResult, error) {
 	fields := strings.Split(string(v), ":")
-	if len(fields) != 3 || !validUUID(fields[0]) || !validUUID(fields[1]) {
+	if len(fields) != 3 || uuid.Validate(fields[0]) != nil || uuid.Validate(fields[1]) != nil {
 		return CompleteResult{}, errors.New("invalid stored operation result")
 	}
 	revision, err := strconv.ParseInt(fields[2], 10, 64)

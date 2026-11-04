@@ -38,6 +38,7 @@ type testServer struct {
 	client  *http.Client
 	rawLog  *recordingListener
 	auth    *auth.Service
+	storage string
 }
 
 func startTestServer(t *testing.T) testServer {
@@ -80,7 +81,7 @@ func startTestServer(t *testing.T) testServer {
 		t.Fatal(err)
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLSConfig}}
-	return testServer{baseURL: "https://" + rawListener.Addr().String(), client: client, rawLog: recorder, auth: authService}
+	return testServer{baseURL: "https://" + rawListener.Addr().String(), client: client, rawLog: recorder, auth: authService, storage: dir}
 }
 
 // recordingListener captures every raw byte read from each accepted

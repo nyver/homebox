@@ -7,7 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
-	"sync"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +18,16 @@ import (
 // device can stay signed in without the user re-entering a password, not
 // the E2EE trust boundary, so a fixed generous value keeps config simple.
 const refreshTokenTTL = 30 * 24 * time.Hour
+
+// refreshRetryGrace is how long a just-rotated refresh token may still be
+// presented. It covers a client whose connection dropped after the server
+// committed a rotation but before the response arrived; without it that
+// client would hold only a revoked token and be forced to log in again.
+const refreshRetryGrace = time.Minute
+
+// recordSyncInterval bounds how often a polling device rewrites its
+// last_sync_at timestamp.
+const recordSyncInterval = time.Minute
 
 var (
 	ErrInvalidCredentials = errors.New("invalid username or password")
@@ -88,6 +98,8 @@ type Session struct {
 	AccessTokenExpiresAt  time.Time
 	RefreshToken          string
 	RefreshTokenExpiresAt time.Time
+
+	refreshTokenID string
 }
 
 // Login verifies the account password, registers or re-validates the
@@ -95,7 +107,10 @@ type Session struct {
 // login only proves account identity; it never grants E2EE vault access
 // (see ADR-012) — callers must not treat a successful Session as unlocking
 // file content.
-func (s *Service) Login(ctx context.Context, username, password string, device DeviceRegistration) (Session, error) {
+//
+// clientAddr identifies the caller's network address for spray throttling
+// across usernames; an empty value disables only that address limit.
+func (s *Service) Login(ctx context.Context, clientAddr, username, password string, device DeviceRegistration) (Session, error) {
 	_, normalized, err := normalizeUsername(username)
 	if err != nil {
 		return Session{}, ErrInvalidCredentials
@@ -104,19 +119,21 @@ func (s *Service) Login(ctx context.Context, username, password string, device D
 		return Session{}, err
 	}
 	now := s.now().UTC()
-	if !s.loginLimiter.allow(normalized, now) {
+	if !s.addressLimiter.begin(clientAddr, now) {
 		return Session{}, ErrRateLimited
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Session{}, err
+	defer s.addressLimiter.end(clientAddr)
+	if !s.loginLimiter.begin(normalized, now) {
+		return Session{}, ErrRateLimited
 	}
-	defer tx.Rollback()
+	defer s.loginLimiter.end(normalized)
 
+	// The password is verified before any transaction is opened: Argon2id
+	// takes a noticeable fraction of a second and 64 MiB, and holding a
+	// write transaction across it would stall every other writer.
 	var user User
 	var status, passwordHash string
-	err = tx.QueryRowContext(ctx, "SELECT id, username, role, status, password_hash FROM users WHERE username_norm = ?",
+	err = s.db.QueryRowContext(ctx, "SELECT id, username, role, status, password_hash FROM users WHERE username_norm = ?",
 		normalized).Scan(&user.ID, &user.Username, &user.Role, &status, &passwordHash)
 	userFound := true
 	switch {
@@ -128,12 +145,37 @@ func (s *Service) Login(ctx context.Context, username, password string, device D
 	}
 	// Always run Argon2id, even for a nonexistent user, so response time
 	// doesn't reveal which usernames exist (see dummyPasswordHash).
-	passwordValid := VerifyPassword(passwordHash, password)
+	passwordValid, err := s.verifyPassword(ctx, passwordHash, password)
+	if err != nil {
+		return Session{}, err
+	}
 	if !userFound || !passwordValid {
 		s.loginLimiter.recordFailure(normalized, now)
+		s.addressLimiter.recordFailure(clientAddr, now)
 		return Session{}, ErrInvalidCredentials
 	}
 	if status != "ACTIVE" {
+		return Session{}, ErrAccountDisabled
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, err
+	}
+	defer tx.Rollback()
+	// Re-check inside the write transaction: the account may have been
+	// disabled or its password changed while Argon2id was running.
+	var currentStatus, currentHash string
+	if err := tx.QueryRowContext(ctx, "SELECT status, password_hash FROM users WHERE id = ?", user.ID).Scan(&currentStatus, &currentHash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Session{}, ErrInvalidCredentials
+		}
+		return Session{}, err
+	}
+	if currentHash != passwordHash {
+		return Session{}, ErrInvalidCredentials
+	}
+	if currentStatus != "ACTIVE" {
 		return Session{}, ErrAccountDisabled
 	}
 
@@ -149,7 +191,21 @@ func (s *Service) Login(ctx context.Context, username, password string, device D
 		return Session{}, err
 	}
 	s.loginLimiter.recordSuccess(normalized)
+	s.addressLimiter.recordSuccess(clientAddr)
 	return session, nil
+}
+
+// verifyPassword runs Argon2id under a small concurrency cap so a burst of
+// login requests cannot multiply its 64 MiB working set into memory
+// exhaustion or starve the CPU for every other request.
+func (s *Service) verifyPassword(ctx context.Context, encoded, password string) (bool, error) {
+	select {
+	case s.passwordSlots <- struct{}{}:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	defer func() { <-s.passwordSlots }()
+	return VerifyPassword(encoded, password), nil
 }
 
 // Refresh rotates a refresh token: the presented token is revoked and a new
@@ -166,22 +222,46 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, er
 	}
 	defer tx.Rollback()
 
-	var tokenID, userID, deviceID, expiresAt string
-	var revokedAt sql.NullString
-	err = tx.QueryRowContext(ctx, "SELECT id, user_id, device_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash = ?", hash[:]).
-		Scan(&tokenID, &userID, &deviceID, &expiresAt, &revokedAt)
+	var userID, deviceID, expiresAt string
+	var revokedAt, rotatedTo sql.NullString
+	err = tx.QueryRowContext(ctx, "SELECT user_id, device_id, expires_at, revoked_at, rotated_to FROM refresh_tokens WHERE token_hash = ?", hash[:]).
+		Scan(&userID, &deviceID, &expiresAt, &revokedAt, &rotatedTo)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrTokenInvalid
 	}
 	if err != nil {
 		return Session{}, err
 	}
-	if revokedAt.Valid {
-		return Session{}, ErrTokenInvalid
-	}
 	now := s.now().UTC()
 	if expires, err := time.Parse(time.RFC3339Nano, expiresAt); err != nil || !now.Before(expires) {
 		return Session{}, ErrTokenInvalid
+	}
+	if revokedAt.Valid {
+		// Logout and device revocation never set rotated_to: such a token
+		// is simply dead.
+		if !rotatedTo.Valid {
+			return Session{}, ErrTokenInvalid
+		}
+		revoked, err := time.Parse(time.RFC3339Nano, revokedAt.String)
+		if err != nil {
+			return Session{}, ErrTokenInvalid
+		}
+		if now.Sub(revoked) > refreshRetryGrace {
+			// A rotated token presented long after its rotation means two
+			// parties hold this device's refresh chain: end every session
+			// of the device so the legitimate user re-authenticates.
+			if err := revokeDeviceTokens(ctx, tx, deviceID, now); err != nil {
+				return Session{}, err
+			}
+			if err := tx.Commit(); err != nil {
+				return Session{}, err
+			}
+			log.Printf("auth: rotated refresh token reused for device %s; all of its sessions were revoked", deviceID)
+			return Session{}, ErrTokenInvalid
+		}
+		// Within the grace period this is a client retrying after it lost
+		// the previous refresh response; reissue below and retire the
+		// successor it never received.
 	}
 
 	var user User
@@ -204,11 +284,14 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, er
 		return Session{}, ErrDeviceRevoked
 	}
 
-	if _, err := tx.ExecContext(ctx, "UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?", now.Format(time.RFC3339Nano), tokenID); err != nil {
-		return Session{}, err
-	}
 	session, err := s.issueTokens(ctx, tx, now, user, dev)
 	if err != nil {
+		return Session{}, err
+	}
+	// Retires the presented token and, on a grace-period retry, the
+	// successor issued by the lost response. A device holds one session.
+	if _, err := tx.ExecContext(ctx, "UPDATE refresh_tokens SET revoked_at = ?, rotated_to = ? WHERE device_id = ? AND revoked_at IS NULL AND id != ?",
+		now.Format(time.RFC3339Nano), session.refreshTokenID, deviceID, session.refreshTokenID); err != nil {
 		return Session{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -237,9 +320,11 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (userID,
 		return "", "", ErrTokenInvalid
 	}
 	hash := TokenHash(accessToken)
-	var expiresAt string
-	err = s.db.QueryRowContext(ctx, "SELECT user_id, device_id, expires_at FROM access_tokens WHERE token_hash = ?", hash[:]).
-		Scan(&userID, &deviceID, &expiresAt)
+	var expiresAt, status string
+	var revoked sql.NullString
+	err = s.db.QueryRowContext(ctx, `SELECT a.user_id, a.device_id, a.expires_at, u.status, d.revoked_at
+		FROM access_tokens a JOIN users u ON u.id = a.user_id JOIN devices d ON d.id = a.device_id
+		WHERE a.token_hash = ?`, hash[:]).Scan(&userID, &deviceID, &expiresAt, &status, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", ErrTokenInvalid
 	}
@@ -250,12 +335,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (userID,
 	if err != nil || !s.now().UTC().Before(expires) {
 		return "", "", ErrTokenInvalid
 	}
-	var status string
-	if err := s.db.QueryRowContext(ctx, "SELECT status FROM users WHERE id = ?", userID).Scan(&status); err != nil || status != "ACTIVE" {
-		return "", "", ErrTokenInvalid
-	}
-	var revoked sql.NullString
-	if err := s.db.QueryRowContext(ctx, "SELECT revoked_at FROM devices WHERE id = ?", deviceID).Scan(&revoked); err != nil {
+	if status != "ACTIVE" {
 		return "", "", ErrTokenInvalid
 	}
 	if revoked.Valid {
@@ -268,9 +348,27 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (userID,
 // sync feed. This deliberately differs from LastSeenAt, which means merely
 // that the device logged in or refreshed its session.
 func (s *Service) RecordSync(ctx context.Context, userID, deviceID string) error {
-	now := s.now().UTC().Format(time.RFC3339Nano)
+	now := s.now().UTC()
+	var lastSyncAt sql.NullString
+	err := s.db.QueryRowContext(ctx, "SELECT last_sync_at FROM devices WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+		deviceID, userID).Scan(&lastSyncAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	// Clients poll the feed often; the Settings device list only needs
+	// minute precision, so skip the write for a recent timestamp.
+	if lastSyncAt.Valid {
+		if last, err := time.Parse(time.RFC3339Nano, lastSyncAt.String); err == nil {
+			if elapsed := now.Sub(last); elapsed >= 0 && elapsed < recordSyncInterval {
+				return nil
+			}
+		}
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE devices SET last_sync_at = ?
-		WHERE id = ? AND user_id = ? AND revoked_at IS NULL`, now, deviceID, userID)
+		WHERE id = ? AND user_id = ? AND revoked_at IS NULL`, now.Format(time.RFC3339Nano), deviceID, userID)
 	if err != nil {
 		return err
 	}
@@ -465,6 +563,7 @@ func (s *Service) issueTokens(ctx context.Context, tx *sql.Tx, now time.Time, us
 	if err != nil {
 		return Session{}, err
 	}
+	refreshTokenID := uuid.NewString()
 	accessHash := TokenHash(accessToken)
 	refreshHash := TokenHash(refreshToken)
 	accessExpires := now.Add(s.accessTokenTTL)
@@ -475,14 +574,25 @@ func (s *Service) issueTokens(ctx context.Context, tx *sql.Tx, now time.Time, us
 		return Session{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO refresh_tokens (id,user_id,device_id,token_hash,created_at,expires_at) VALUES (?,?,?,?,?,?)`,
-		uuid.NewString(), user.ID, device.ID, refreshHash[:], now.Format(time.RFC3339Nano), refreshExpires.Format(time.RFC3339Nano)); err != nil {
+		refreshTokenID, user.ID, device.ID, refreshHash[:], now.Format(time.RFC3339Nano), refreshExpires.Format(time.RFC3339Nano)); err != nil {
 		return Session{}, err
 	}
 	return Session{
 		User: user, Device: device,
 		AccessToken: accessToken, AccessTokenExpiresAt: accessExpires,
 		RefreshToken: refreshToken, RefreshTokenExpiresAt: refreshExpires,
+		refreshTokenID: refreshTokenID,
 	}, nil
+}
+
+// revokeDeviceTokens ends every session of a device whose refresh chain is
+// suspected to be compromised.
+func revokeDeviceTokens(ctx context.Context, tx *sql.Tx, deviceID string, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, "UPDATE refresh_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL", now.Format(time.RFC3339Nano), deviceID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, "DELETE FROM access_tokens WHERE device_id = ?", deviceID)
+	return err
 }
 
 func randomToken() (string, error) {
@@ -494,7 +604,7 @@ func randomToken() (string, error) {
 }
 
 func validateDeviceRegistration(d DeviceRegistration) error {
-	if _, err := uuid.Parse(d.ID); err != nil {
+	if parsed, err := uuid.Parse(d.ID); err != nil || parsed.String() != d.ID {
 		return apierror.NewValidation("device id must be a valid UUID")
 	}
 	if len(d.Name) == 0 || len(d.Name) > 128 {
@@ -510,69 +620,4 @@ func validateDeviceRegistration(d DeviceRegistration) error {
 		return apierror.NewValidation("device key version must be at least 1")
 	}
 	return nil
-}
-
-// newLoginLimiter builds the per-username login backoff tracker (spec §9.3
-// "rate limiting login"). It's process-local, in-memory state: acceptable
-// at the product's target scale (≤5 users), and a restart simply resets it
-// rather than leaving anyone permanently locked out.
-type loginLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*loginLimiterEntry
-}
-
-type loginLimiterEntry struct {
-	consecutiveFailures int
-	blockedUntil        time.Time
-}
-
-func newLoginLimiter() *loginLimiter {
-	return &loginLimiter{entries: make(map[string]*loginLimiterEntry)}
-}
-
-// allow reports whether a login attempt for username may proceed. It never
-// touches the database or Argon2id, so a blocked caller is rejected cheaply.
-func (l *loginLimiter) allow(username string, now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	entry := l.entries[username]
-	// !Before rather than After: when the backoff is zero, blockedUntil
-	// equals the failure's own timestamp, and the very next attempt (at the
-	// same or a later time) must still be allowed.
-	return entry == nil || !now.Before(entry.blockedUntil)
-}
-
-func (l *loginLimiter) recordFailure(username string, now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	entry := l.entries[username]
-	if entry == nil {
-		entry = &loginLimiterEntry{}
-		l.entries[username] = entry
-	}
-	entry.consecutiveFailures++
-	entry.blockedUntil = now.Add(loginBackoff(entry.consecutiveFailures))
-}
-
-func (l *loginLimiter) recordSuccess(username string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.entries, username)
-}
-
-// loginBackoff grows with consecutive failures: harmless for a genuine typo
-// (the first couple of attempts are unthrottled) while making sustained
-// password guessing increasingly expensive in wall-clock time on top of
-// Argon2id's own per-attempt cost.
-func loginBackoff(consecutiveFailures int) time.Duration {
-	switch {
-	case consecutiveFailures < 3:
-		return 0
-	case consecutiveFailures < 5:
-		return time.Second
-	case consecutiveFailures < 8:
-		return 10 * time.Second
-	default:
-		return time.Minute
-	}
 }

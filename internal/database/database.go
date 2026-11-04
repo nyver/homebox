@@ -16,12 +16,16 @@ func Open(storagePath string) (*sql.DB, error) {
 	if err := os.MkdirAll(databaseDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(databaseDir, "homebox.db"))
+	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(databaseDir, "homebox.db")))
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;`); err != nil {
+	// WAL lets readers proceed while one writer commits, so a small pool
+	// keeps a slow request (or a large sync page) from stalling every other
+	// API call behind a single shared connection.
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxOpenConns)
+	if err := db.PingContext(context.Background()); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("configure database: %w", err)
 	}
@@ -30,6 +34,18 @@ func Open(storagePath string) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+const maxOpenConns = 8
+
+// dataSourceName applies the connection settings through the DSN rather
+// than a one-off PRAGMA statement: foreign_keys and busy_timeout are
+// per-connection, so every pooled connection must receive them. Write
+// transactions begin IMMEDIATE so they take SQLite's write lock up front
+// and wait in busy_timeout instead of failing with SQLITE_BUSY when a
+// deferred read transaction later tries to upgrade to a write.
+func dataSourceName(path string) string {
+	return path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_txlock=immediate"
 }
 
 // Migrate applies pending migrations in order inside individual transactions,

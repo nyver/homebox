@@ -279,7 +279,12 @@ func requireActiveDevice(ctx context.Context, tx *sql.Tx, userID, deviceID strin
 	}
 	return nil
 }
-func validUUID(v string) bool { _, err := uuid.Parse(v); return err == nil }
+
+// validUUID accepts only the canonical lowercase, hyphenated spelling.
+func validUUID(v string) bool {
+	parsed, err := uuid.Parse(v)
+	return err == nil && parsed.String() == v
+}
 func isUniqueConstraint(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "unique constraint")
 }

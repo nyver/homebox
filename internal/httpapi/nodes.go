@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/homebox/homebox/internal/nodes"
 )
 
@@ -88,11 +86,27 @@ func (a *API) getNode(w http.ResponseWriter, r *http.Request) {
 func (a *API) listChildren(w http.ResponseWriter, r *http.Request) {
 	var parentID *string
 	if raw := r.URL.Query().Get("parentId"); raw != "" {
-		if _, err := uuid.Parse(raw); err != nil {
+		if !canonicalUUID(raw) {
 			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid parentId")
 			return
 		}
 		parentID = &raw
+	}
+	// limit/after are optional so older clients still receive the whole
+	// listing in one response. With limit, X-Next-After carries the cursor
+	// for the following page and is absent on the last one.
+	limit, ok := queryInt(w, r, "limit", 0)
+	if !ok {
+		return
+	}
+	if limit < 0 || limit > nodes.MaxPageSize {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid limit")
+		return
+	}
+	page := nodes.PageRequest{Limit: limit, After: r.URL.Query().Get("after")}
+	if page.After != "" && limit == 0 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "after requires limit")
+		return
 	}
 	ownedOnly := r.URL.Query().Get("ownedOnly") == "true"
 	if ownedOnly && parentID != nil {
@@ -100,15 +114,19 @@ func (a *API) listChildren(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var children []nodes.Node
+	var next string
 	var err error
 	if ownedOnly {
-		children, err = a.nodes.ListOwnedRoots(r.Context(), requestUserID(r))
+		children, next, err = a.nodes.ListOwnedRootsPage(r.Context(), requestUserID(r), page)
 	} else {
-		children, err = a.nodes.ListChildren(r.Context(), requestUserID(r), parentID)
+		children, next, err = a.nodes.ListChildrenPage(r.Context(), requestUserID(r), parentID, page)
 	}
 	if err != nil {
 		writeServiceError(w, err)
 		return
+	}
+	if next != "" {
+		w.Header().Set("X-Next-After", next)
 	}
 	out := make([]nodeResponse, 0, len(children))
 	for _, n := range children {
@@ -209,7 +227,7 @@ func (a *API) restoreNode(w http.ResponseWriter, r *http.Request) {
 
 func pathUUID(w http.ResponseWriter, r *http.Request, name string) (string, bool) {
 	id := r.PathValue(name)
-	if _, err := uuid.Parse(id); err != nil {
+	if !canonicalUUID(id) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid "+name)
 		return "", false
 	}

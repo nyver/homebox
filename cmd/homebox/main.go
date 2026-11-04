@@ -9,9 +9,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/homebox/homebox/internal/auth"
@@ -200,9 +202,17 @@ func serve(args []string) {
 	if err != nil {
 		fatal("initialize automatic maintenance: %v", err)
 	}
-	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
-	defer stopMaintenance()
-	go runAutomaticMaintenance(maintenanceCtx, maintenanceService, time.Duration(c.Maintenance.IntervalHours)*time.Hour)
+	// SIGINT/SIGTERM (Ctrl+C, `docker stop`) cancel this context: the
+	// server stops accepting connections and gives in-flight requests, such
+	// as an upload being committed, time to finish before the database is
+	// closed.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		runAutomaticMaintenance(ctx, maintenanceService, time.Duration(c.Maintenance.IntervalHours)*time.Hour)
+	}()
 	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService, sharing.New(db))
 	server := &http.Server{
 		Addr:              c.Address(),
@@ -214,26 +224,49 @@ func serve(args []string) {
 	}
 	log.Printf("HomeBox listening on %s", c.Address())
 
-	if c.Server.TLS.Enabled {
-		// Operator-supplied certificate (e.g. a direct Let's Encrypt cert
-		// without a reverse proxy in front). See §7.2.
-		err = server.ListenAndServeTLS(c.Server.TLS.CertFile, c.Server.TLS.KeyFile)
-	} else {
+	serveErr := make(chan error, 1)
+	go func() {
+		if c.Server.TLS.Enabled {
+			// Operator-supplied certificate (e.g. a direct Let's Encrypt cert
+			// without a reverse proxy in front). See §7.2.
+			serveErr <- server.ListenAndServeTLS(c.Server.TLS.CertFile, c.Server.TLS.KeyFile)
+			return
+		}
 		// Default "direct HTTP + custom port" deployment mode (§7.1): the
 		// server terminates TLS itself using a self-signed certificate tied
 		// to its identity key, trusted by clients via fingerprint pinning
 		// rather than a CA (ADR-008/ADR-009). There is no plaintext fallback.
 		tlsConfig, tlsErr := securetransport.BuildTLSConfig(identity)
 		if tlsErr != nil {
-			fatal("build secure transport: %v", tlsErr)
+			serveErr <- fmt.Errorf("build secure transport: %w", tlsErr)
+			return
 		}
 		server.TLSConfig = tlsConfig
-		err = server.ListenAndServeTLS("", "")
+		serveErr <- server.ListenAndServeTLS("", "")
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			stop()
+			<-maintenanceDone
+			db.Close()
+			fatal("serve: %v", err)
+		}
+	case <-ctx.Done():
+		log.Printf("HomeBox shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HomeBox shutdown did not finish cleanly: %v", err)
+		}
 	}
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		fatal("serve: %v", err)
-	}
+	<-maintenanceDone
 }
+
+// shutdownTimeout bounds how long a stopping server waits for in-flight
+// requests. It stays below Docker's default 10-second stop grace period.
+const shutdownTimeout = 8 * time.Second
 
 func runAutomaticMaintenance(ctx context.Context, service *maintenance.Service, interval time.Duration) {
 	run := func() {

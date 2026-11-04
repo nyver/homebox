@@ -538,7 +538,7 @@ void main() {
     expect(controller.transferDirection, isNull, reason: 'reset once idle');
   });
 
-  test('downloadFile and replaceFileContent refuse to start while another transfer is already busy', () async {
+  test('downloadFile and replaceFileContent wait for an in-flight transfer instead of failing', () async {
     final fakeServer = _FakeServer();
     final httpServer = await fakeServer.start();
     addTearDown(() => httpServer.close(force: true));
@@ -591,30 +591,36 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 1));
     }
 
-    expect(
-      await controller.replaceFileContent(existingEntry, second.path),
-      isFalse,
-    );
-    expect(controller.errorMessage, contains('already in progress'));
-    expect(
-      await controller.downloadFile(
-        existingEntry,
-        '${tempDir.path}/downloaded.bin',
-      ),
-      isFalse,
-    );
-    expect(controller.errorMessage, contains('already in progress'));
+    final completionOrder = <String>[];
+    final replaced = controller
+        .replaceFileContent(existingEntry, second.path)
+        .whenComplete(() => completionOrder.add('replace'));
+    final downloaded = controller
+        .downloadFile(existingEntry, '${tempDir.path}/downloaded.bin')
+        .whenComplete(() => completionOrder.add('download'));
+    expect(controller.queuedTransfers, 2);
 
     final result = await inFlight;
+    completionOrder.insert(0, 'upload');
     expect(
       result.succeeded,
       1,
       reason: 'the original in-flight upload must complete undisturbed',
     );
+    expect(await replaced, isTrue, reason: controller.errorMessage);
+    expect(await downloaded, isTrue, reason: controller.errorMessage);
+    expect(completionOrder, ['upload', 'replace', 'download']);
+    expect(controller.queuedTransfers, 0);
+    expect(controller.busy, isFalse);
+    expect(
+      await File('${tempDir.path}/downloaded.bin').readAsBytes(),
+      await existing.readAsBytes(),
+      reason: 'the queued download keeps the version it was requested for',
+    );
   });
 
   test(
-    'two downloadFile calls started back to back never both proceed',
+    'two downloadFile calls started back to back run one after the other',
     () async {
       final fakeServer = _FakeServer();
       final httpServer = await fakeServer.start();
@@ -651,21 +657,28 @@ void main() {
       );
       final entry = controller.entries.single;
 
-      // No await between these two calls: the busy claim must happen
-      // synchronously (before either call's first internal await), or both
-      // would observe `busy == false` and both proceed.
+      // No await between these two calls: each must claim its queue slot
+      // synchronously, or both would run at once.
       final first = controller.downloadFile(entry, '${tempDir.path}/first.txt');
       final second = controller.downloadFile(
         entry,
         '${tempDir.path}/second.txt',
       );
-      final results = await Future.wait([first, second]);
+      expect(controller.queuedTransfers, 2);
+      final order = <String>[];
+      final results = await Future.wait([
+        first.whenComplete(() => order.add('first')),
+        second.whenComplete(() => order.add('second')),
+      ]);
 
-      expect(
-        results.where((succeeded) => succeeded).length,
-        1,
-        reason: 'exactly one of the two concurrent calls should have run',
-      );
+      expect(results, [isTrue, isTrue], reason: controller.errorMessage);
+      expect(order, ['first', 'second']);
+      for (final name in ['first.txt', 'second.txt']) {
+        expect(
+          await File('${tempDir.path}/$name').readAsString(),
+          'shared by both calls',
+        );
+      }
     },
   );
 
