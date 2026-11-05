@@ -78,37 +78,34 @@ Future<(FakeNodeServer, FilesController)> _folderWithImages(
 }
 
 void main() {
-  test(
-    'previews beyond the concurrency limit are queued, cached, and never rebuild the whole list',
-    () async {
-      final (fakeServer, controller) = await _folderWithImages(12);
-      final entries = controller.entries;
-      var notifications = 0;
-      controller.addListener(() => notifications++);
-      final downloadsBefore = fakeServer.contentDownloadCount;
+  test('previews beyond the concurrency limit are queued, cached, and never rebuild the whole list', () async {
+    final (fakeServer, controller) = await _folderWithImages(12);
+    final entries = controller.entries;
+    var notifications = 0;
+    controller.addListener(() => notifications++);
+    final downloadsBefore = fakeServer.contentDownloadCount;
 
-      final previews = await Future.wait(entries.map(controller.imagePreview));
+    final previews = await Future.wait(entries.map(controller.imagePreview));
 
-      for (var i = 0; i < entries.length; i++) {
-        final expected = int.parse(
-          RegExp(r'photo-(\d+)').firstMatch(entries[i].name)!.group(1)!,
-        );
-        expect(previews[i], List.filled(64, expected));
-        expect(controller.cachedImagePreview(entries[i]), previews[i]);
-      }
-      expect(fakeServer.contentDownloadCount - downloadsBefore, 12);
-      expect(
-        notifications,
-        0,
-        reason: 'a finished thumbnail must not notify every list row',
+    for (var i = 0; i < entries.length; i++) {
+      final expected = int.parse(
+        RegExp(r'photo-(\d+)').firstMatch(entries[i].name)!.group(1)!,
       );
+      expect(previews[i], List.filled(64, expected));
+      expect(controller.cachedImagePreview(entries[i]), previews[i]);
+    }
+    expect(fakeServer.contentDownloadCount - downloadsBefore, 12);
+    expect(
+      notifications,
+      0,
+      reason: 'a finished thumbnail must not notify every list row',
+    );
 
-      // More images than the old 8-entry cache: a second look is served
-      // entirely from memory instead of downloading in a loop.
-      await Future.wait(entries.map(controller.imagePreview));
-      expect(fakeServer.contentDownloadCount - downloadsBefore, 12);
-    },
-  );
+    // More images than the old 8-entry cache: a second look is served
+    // entirely from memory instead of downloading in a loop.
+    await Future.wait(entries.map(controller.imagePreview));
+    expect(fakeServer.contentDownloadCount - downloadsBefore, 12);
+  });
 
   test(
     'a preview released before its download starts is dropped from the queue',

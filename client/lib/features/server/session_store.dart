@@ -19,7 +19,8 @@ final class PlatformSessionStorage implements SessionStorage {
   Future<String?> read(String key) => _storage.read(key: key);
 
   @override
-  Future<void> write(String key, String value) => _storage.write(key: key, value: value);
+  Future<void> write(String key, String value) =>
+      _storage.write(key: key, value: value);
 
   @override
   Future<void> delete(String key) => _storage.delete(key: key);
@@ -32,16 +33,19 @@ final class PlatformSessionStorage implements SessionStorage {
 /// deliberately not persisted here — it lives only in memory and is
 /// re-derived from the refresh token on startup.
 final class SessionStore {
-  SessionStore([SessionStorage? storage]) : _storage = storage ?? const PlatformSessionStorage();
+  SessionStore([SessionStorage? storage])
+    : _storage = storage ?? const PlatformSessionStorage();
 
-  static const String _refreshTokenKey = 'homebox.transport.session.refresh_token.v1';
+  static const String _refreshTokenKey =
+      'homebox.transport.session.refresh_token.v1';
   static const String _deviceIdKey = 'homebox.transport.session.device_id.v1';
 
   final SessionStorage _storage;
 
   Future<String?> loadRefreshToken() => _storage.read(_refreshTokenKey);
 
-  Future<void> saveRefreshToken(String token) => _storage.write(_refreshTokenKey, token);
+  Future<void> saveRefreshToken(String token) =>
+      _storage.write(_refreshTokenKey, token);
 
   Future<void> clearRefreshToken() => _storage.delete(_refreshTokenKey);
 

@@ -8,7 +8,10 @@ final class SyncStateStore {
   final Database _db;
 
   int lastSyncRevision(String serverId) {
-    final rows = _db.select('SELECT last_sync_revision FROM sync_state WHERE server_id = ?', [serverId]);
+    final rows = _db.select(
+      'SELECT last_sync_revision FROM sync_state WHERE server_id = ?',
+      [serverId],
+    );
     if (rows.isEmpty) return 0;
     return rows.first['last_sync_revision'] as int;
   }

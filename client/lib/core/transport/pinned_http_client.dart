@@ -78,9 +78,7 @@ final class ServerDiscovery {
     Duration timeout = const Duration(seconds: 20),
   }) async {
     String? seen;
-    final client = HttpClient(
-      context: SecurityContext(withTrustedRoots: false),
-    )
+    final client = HttpClient(context: SecurityContext(withTrustedRoots: false))
       ..connectionTimeout = timeout
       ..badCertificateCallback = (cert, host, port) {
         seen = ServerFingerprint.fromCertificateDer(cert.der);

@@ -1034,107 +1034,118 @@ void main() {
     );
   });
 
-  test('restoreFromTrash brings back a file together with its deleted folder', () async {
-    final fakeServer = _FakeServer();
-    final httpServer = await fakeServer.start();
-    addTearDown(() => httpServer.close(force: true));
-    final serverConnection = await _connectedAndSignedIn(httpServer);
-    addTearDown(serverConnection.dispose);
-    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(
-      userId: _FakeServer.userId,
-    );
-    recoverySecret.destroy();
-    final syncEngine = SyncEngine(
-      serverConnection: serverConnection,
-      localDatabase: LocalDatabase.openInMemory(),
-    );
-    addTearDown(syncEngine.dispose);
-    final controller = FilesController(
-      serverConnection: serverConnection,
-      vaultKeyStore: vaultKeyStore,
-      syncEngine: syncEngine,
-    );
-    addTearDown(controller.dispose);
+  test(
+    'restoreFromTrash brings back a file together with its deleted folder',
+    () async {
+      final fakeServer = _FakeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final recoverySecret = await vaultKeyStore.createVault(
+        userId: _FakeServer.userId,
+      );
+      recoverySecret.destroy();
+      final syncEngine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(syncEngine.dispose);
+      final controller = FilesController(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(controller.dispose);
 
-    expect(await controller.createFolder('Taxes'), isTrue);
-    await _awaitBackgroundSync(syncEngine);
-    await controller.refresh();
-    final folder = controller.entries.single;
-    controller.openFolder(folder);
-    await pumpEventQueue();
+      expect(await controller.createFolder('Taxes'), isTrue);
+      await _awaitBackgroundSync(syncEngine);
+      await controller.refresh();
+      final folder = controller.entries.single;
+      controller.openFolder(folder);
+      await pumpEventQueue();
 
-    final tempDir = await Directory.systemTemp.createTemp(
-      'homebox_files_test_',
-    );
-    addTearDown(() => tempDir.delete(recursive: true));
-    final sourceFile = File('${tempDir.path}/2025.pdf');
-    await sourceFile.writeAsBytes(utf8.encode('return'));
-    expect(await controller.uploadFile(sourceFile.path), isTrue);
-    final file = controller.entries.single;
+      final tempDir = await Directory.systemTemp.createTemp(
+        'homebox_files_test_',
+      );
+      addTearDown(() => tempDir.delete(recursive: true));
+      final sourceFile = File('${tempDir.path}/2025.pdf');
+      await sourceFile.writeAsBytes(utf8.encode('return'));
+      expect(await controller.uploadFile(sourceFile.path), isTrue);
+      final file = controller.entries.single;
 
-    expect(await controller.deleteNode(file), isTrue);
-    await _awaitBackgroundSync(syncEngine);
-    controller.goToRoot();
-    await pumpEventQueue();
-    await controller.refresh();
-    expect(await controller.deleteNode(controller.entries.single), isTrue);
-    await _awaitBackgroundSync(syncEngine);
+      expect(await controller.deleteNode(file), isTrue);
+      await _awaitBackgroundSync(syncEngine);
+      controller.goToRoot();
+      await pumpEventQueue();
+      await controller.refresh();
+      expect(await controller.deleteNode(controller.entries.single), isTrue);
+      await _awaitBackgroundSync(syncEngine);
 
-    final trash = await controller.trashEntries();
-    expect(trash.map((item) => item.entry.name), unorderedEquals(['Taxes', '2025.pdf']));
-    expect(
-      trash.singleWhere((item) => item.entry.name == '2025.pdf').location,
-      'Taxes',
-    );
+      final trash = await controller.trashEntries();
+      expect(
+        trash.map((item) => item.entry.name),
+        unorderedEquals(['Taxes', '2025.pdf']),
+      );
+      expect(
+        trash.singleWhere((item) => item.entry.name == '2025.pdf').location,
+        'Taxes',
+      );
 
-    final deletedFile = trash.singleWhere((item) => item.entry.name == '2025.pdf');
-    expect(
-      await controller.restoreFromTrash(deletedFile.entry),
-      isTrue,
-      reason: controller.errorMessage,
-    );
-    expect(await controller.trashEntries(), isEmpty);
-    expect(controller.entries.single.name, 'Taxes');
-    await _awaitBackgroundSync(syncEngine);
-    expect(fakeServer._nodes[folder.node.id]!['deletedAt'], isNull);
-    expect(fakeServer._nodes[file.node.id]!['deletedAt'], isNull);
-  });
+      final deletedFile = trash.singleWhere(
+        (item) => item.entry.name == '2025.pdf',
+      );
+      expect(
+        await controller.restoreFromTrash(deletedFile.entry),
+        isTrue,
+        reason: controller.errorMessage,
+      );
+      expect(await controller.trashEntries(), isEmpty);
+      expect(controller.entries.single.name, 'Taxes');
+      await _awaitBackgroundSync(syncEngine);
+      expect(fakeServer._nodes[folder.node.id]!['deletedAt'], isNull);
+      expect(fakeServer._nodes[file.node.id]!['deletedAt'], isNull);
+    },
+  );
 
-  test('restoreFromTrash refuses to create a second item with the same name', () async {
-    final fakeServer = _FakeServer();
-    final httpServer = await fakeServer.start();
-    addTearDown(() => httpServer.close(force: true));
-    final serverConnection = await _connectedAndSignedIn(httpServer);
-    addTearDown(serverConnection.dispose);
-    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final recoverySecret = await vaultKeyStore.createVault(
-      userId: _FakeServer.userId,
-    );
-    recoverySecret.destroy();
-    final syncEngine = SyncEngine(
-      serverConnection: serverConnection,
-      localDatabase: LocalDatabase.openInMemory(),
-    );
-    addTearDown(syncEngine.dispose);
-    final controller = FilesController(
-      serverConnection: serverConnection,
-      vaultKeyStore: vaultKeyStore,
-      syncEngine: syncEngine,
-    );
-    addTearDown(controller.dispose);
+  test(
+    'restoreFromTrash refuses to create a second item with the same name',
+    () async {
+      final fakeServer = _FakeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final recoverySecret = await vaultKeyStore.createVault(
+        userId: _FakeServer.userId,
+      );
+      recoverySecret.destroy();
+      final syncEngine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(syncEngine.dispose);
+      final controller = FilesController(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(controller.dispose);
 
-    expect(await controller.createFolder('Photos'), isTrue);
-    await _awaitBackgroundSync(syncEngine);
-    await controller.refresh();
-    expect(await controller.deleteNode(controller.entries.single), isTrue);
-    await _awaitBackgroundSync(syncEngine);
-    expect(await controller.createFolder('photos'), isTrue);
-    await _awaitBackgroundSync(syncEngine);
+      expect(await controller.createFolder('Photos'), isTrue);
+      await _awaitBackgroundSync(syncEngine);
+      await controller.refresh();
+      expect(await controller.deleteNode(controller.entries.single), isTrue);
+      await _awaitBackgroundSync(syncEngine);
+      expect(await controller.createFolder('photos'), isTrue);
+      await _awaitBackgroundSync(syncEngine);
 
-    final trashed = (await controller.trashEntries()).single.entry;
-    expect(await controller.restoreFromTrash(trashed), isFalse);
-    expect(controller.errorMessage, contains('same name'));
-    expect(await controller.trashEntries(), hasLength(1));
-  });
+      final trashed = (await controller.trashEntries()).single.entry;
+      expect(await controller.restoreFromTrash(trashed), isFalse);
+      expect(controller.errorMessage, contains('same name'));
+      expect(await controller.trashEntries(), hasLength(1));
+    },
+  );
 }

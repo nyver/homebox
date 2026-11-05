@@ -555,45 +555,42 @@ void main() {
     },
   );
 
-  test(
-    'scan never re-uploads the local copy of a file moved to Trash while a sync pass is running',
-    () async {
-      final h = await _SyncFolderHarness.create();
-      final sourceDir = await Directory.systemTemp.createTemp(
-        'homebox_trash_source_',
-      );
-      addTearDown(() => sourceDir.delete(recursive: true));
-      final source = File('${sourceDir.path}/photo.jpg');
-      await source.writeAsString('trashed picture');
-      expect(await h.files.uploadFile(source.path), isTrue);
-      expect(await h.files.createFolder('Album'), isTrue);
-      await _awaitBackgroundSync(h.engine);
-      await h.materializer.materialize(h.root.path);
-      expect(await File('${h.root.path}/photo.jpg').exists(), isTrue);
+  test('scan never re-uploads the local copy of a file moved to Trash while a sync pass is running', () async {
+    final h = await _SyncFolderHarness.create();
+    final sourceDir = await Directory.systemTemp.createTemp(
+      'homebox_trash_source_',
+    );
+    addTearDown(() => sourceDir.delete(recursive: true));
+    final source = File('${sourceDir.path}/photo.jpg');
+    await source.writeAsString('trashed picture');
+    expect(await h.files.uploadFile(source.path), isTrue);
+    expect(await h.files.createFolder('Album'), isTrue);
+    await _awaitBackgroundSync(h.engine);
+    await h.materializer.materialize(h.root.path);
+    expect(await File('${h.root.path}/photo.jpg').exists(), isTrue);
 
-      // Trash both while a folder pass would sit between its materialize()
-      // prune and the uploader's listing: the cache already says deleted,
-      // but the local copies are still on disk.
-      for (final entry in List.of(h.files.entries)) {
-        expect(await h.files.deleteNode(entry), isTrue);
-      }
-      await _awaitBackgroundSync(h.engine);
+    // Trash both while a folder pass would sit between its materialize()
+    // prune and the uploader's listing: the cache already says deleted,
+    // but the local copies are still on disk.
+    for (final entry in List.of(h.files.entries)) {
+      expect(await h.files.deleteNode(entry), isTrue);
+    }
+    await _awaitBackgroundSync(h.engine);
 
-      await h.uploader.scan(h.root.path);
-      expect(h.uploader.status, LocalUploadStatus.idle);
-      expect(
-        h.engine.nodeCache.listChildren(null),
-        isEmpty,
-        reason: 'a stale materialized copy must not come back as a new node',
-      );
+    await h.uploader.scan(h.root.path);
+    expect(h.uploader.status, LocalUploadStatus.idle);
+    expect(
+      h.engine.nodeCache.listChildren(null),
+      isEmpty,
+      reason: 'a stale materialized copy must not come back as a new node',
+    );
 
-      await h.materializer.materialize(h.root.path);
-      expect(await File('${h.root.path}/photo.jpg').exists(), isFalse);
-      expect(await Directory('${h.root.path}/Album').exists(), isFalse);
-      await h.uploader.scan(h.root.path);
-      expect(h.engine.nodeCache.listChildren(null), isEmpty);
-    },
-  );
+    await h.materializer.materialize(h.root.path);
+    expect(await File('${h.root.path}/photo.jpg').exists(), isFalse);
+    expect(await Directory('${h.root.path}/Album').exists(), isFalse);
+    await h.uploader.scan(h.root.path);
+    expect(h.engine.nodeCache.listChildren(null), isEmpty);
+  });
 
   test(
     'scan trusts an unchanged size and modification time instead of re-hashing',

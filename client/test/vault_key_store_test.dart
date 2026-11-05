@@ -61,60 +61,76 @@ void main() {
     },
   );
 
-  test('a Recovery Secret alone restores the exact vault on a clean device', () async {
-    final originStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final userId = generateUuidV4();
-    final recoverySecret = await originStore.createVault(userId: userId);
-    final originalVaultKey = await _bytesOf((await originStore.loadVaultKey())!);
-    final originalUmk = await _bytesOf((await originStore.loadUserMasterKey())!);
-    final bundle = (await originStore.sealRecoveryBundle(userId: userId))!;
-    // The server only ever relays the encoded bytes.
-    final relayed = RecoveryBundle.decode(bundle.encode());
+  test(
+    'a Recovery Secret alone restores the exact vault on a clean device',
+    () async {
+      final originStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final userId = generateUuidV4();
+      final recoverySecret = await originStore.createVault(userId: userId);
+      final originalVaultKey = await _bytesOf(
+        (await originStore.loadVaultKey())!,
+      );
+      final originalUmk = await _bytesOf(
+        (await originStore.loadUserMasterKey())!,
+      );
+      final bundle = (await originStore.sealRecoveryBundle(userId: userId))!;
+      // The server only ever relays the encoded bytes.
+      final relayed = RecoveryBundle.decode(bundle.encode());
 
-    final cleanStore = VaultKeyStore(MemoryVaultKeyStorage());
-    await cleanStore.restoreVaultFromRecovery(
-      userId: userId,
-      recoverySecret: recoverySecret,
-      bundle: relayed,
-    );
-
-    expect(await cleanStore.exists(), isTrue);
-    expect(await _bytesOf((await cleanStore.loadVaultKey())!), originalVaultKey);
-    expect(await _bytesOf((await cleanStore.loadUserMasterKey())!), originalUmk);
-    // A recovered device can in turn seal the same recovery material.
-    expect(await cleanStore.sealRecoveryBundle(userId: userId), isNotNull);
-    recoverySecret.destroy();
-  });
-
-  test('a wrong Recovery Secret or account leaves the clean device untouched', () async {
-    final originStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final userId = generateUuidV4();
-    final recoverySecret = await originStore.createVault(userId: userId);
-    final bundle = (await originStore.sealRecoveryBundle(userId: userId))!;
-
-    final wrongSecret = RecoverySecret.generate();
-    final cleanStore = VaultKeyStore(MemoryVaultKeyStorage());
-    await expectLater(
-      cleanStore.restoreVaultFromRecovery(
+      final cleanStore = VaultKeyStore(MemoryVaultKeyStorage());
+      await cleanStore.restoreVaultFromRecovery(
         userId: userId,
-        recoverySecret: wrongSecret,
-        bundle: bundle,
-      ),
-      throwsA(isA<SecretBoxAuthenticationError>()),
-    );
-    await expectLater(
-      cleanStore.restoreVaultFromRecovery(
-        userId: generateUuidV4(),
         recoverySecret: recoverySecret,
-        bundle: bundle,
-      ),
-      throwsA(isA<SecretBoxAuthenticationError>()),
-    );
-    expect(await cleanStore.exists(), isFalse);
-    expect(await cleanStore.loadUserMasterKey(), isNull);
-    wrongSecret.destroy();
-    recoverySecret.destroy();
-  });
+        bundle: relayed,
+      );
+
+      expect(await cleanStore.exists(), isTrue);
+      expect(
+        await _bytesOf((await cleanStore.loadVaultKey())!),
+        originalVaultKey,
+      );
+      expect(
+        await _bytesOf((await cleanStore.loadUserMasterKey())!),
+        originalUmk,
+      );
+      // A recovered device can in turn seal the same recovery material.
+      expect(await cleanStore.sealRecoveryBundle(userId: userId), isNotNull);
+      recoverySecret.destroy();
+    },
+  );
+
+  test(
+    'a wrong Recovery Secret or account leaves the clean device untouched',
+    () async {
+      final originStore = VaultKeyStore(MemoryVaultKeyStorage());
+      final userId = generateUuidV4();
+      final recoverySecret = await originStore.createVault(userId: userId);
+      final bundle = (await originStore.sealRecoveryBundle(userId: userId))!;
+
+      final wrongSecret = RecoverySecret.generate();
+      final cleanStore = VaultKeyStore(MemoryVaultKeyStorage());
+      await expectLater(
+        cleanStore.restoreVaultFromRecovery(
+          userId: userId,
+          recoverySecret: wrongSecret,
+          bundle: bundle,
+        ),
+        throwsA(isA<SecretBoxAuthenticationError>()),
+      );
+      await expectLater(
+        cleanStore.restoreVaultFromRecovery(
+          userId: generateUuidV4(),
+          recoverySecret: recoverySecret,
+          bundle: bundle,
+        ),
+        throwsA(isA<SecretBoxAuthenticationError>()),
+      );
+      expect(await cleanStore.exists(), isFalse);
+      expect(await cleanStore.loadUserMasterKey(), isNull);
+      wrongSecret.destroy();
+      recoverySecret.destroy();
+    },
+  );
 
   test('restoring refuses to replace an existing local vault', () async {
     final store = VaultKeyStore(MemoryVaultKeyStorage());
@@ -136,7 +152,9 @@ void main() {
   test('a provisioned device can issue a new Recovery Secret for the same Vault Key', () async {
     final userId = generateUuidV4();
     final provisionedStore = VaultKeyStore(MemoryVaultKeyStorage());
-    final vaultKey = SecretKeyData(List<int>.generate(32, (index) => 255 - index));
+    final vaultKey = SecretKeyData(
+      List<int>.generate(32, (index) => 255 - index),
+    );
     await provisionedStore.saveProvisionedVaultKey(vaultKey);
     // No User Master Key on a provisioned device, so nothing to seal yet.
     expect(await provisionedStore.sealRecoveryBundle(userId: userId), isNull);

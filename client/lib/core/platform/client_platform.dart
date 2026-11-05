@@ -11,4 +11,5 @@ String homeBoxDevicePlatformFor(TargetPlatform platform) => switch (platform) {
 };
 
 /// The protocol platform for the running HomeBox client.
-String get homeBoxDevicePlatform => homeBoxDevicePlatformFor(defaultTargetPlatform);
+String get homeBoxDevicePlatform =>
+    homeBoxDevicePlatformFor(defaultTargetPlatform);

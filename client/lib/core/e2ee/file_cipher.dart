@@ -272,14 +272,19 @@ List<Uint8List> splitChunkFrames(
   for (var i = 0; i < chunkCount; i++) {
     final isLast = i == chunkCount - 1;
     final frameLength = isLast ? blob.length - offset : fullFrameLength;
-    if (frameLength < homeBoxChunkMacLength || offset + frameLength > blob.length) {
-      throw const FormatException('Ciphertext blob length does not match its declared chunk count.');
+    if (frameLength < homeBoxChunkMacLength ||
+        offset + frameLength > blob.length) {
+      throw const FormatException(
+        'Ciphertext blob length does not match its declared chunk count.',
+      );
     }
     frames.add(Uint8List.sublistView(blob, offset, offset + frameLength));
     offset += frameLength;
   }
   if (offset != blob.length) {
-    throw const FormatException('Ciphertext blob has unexpected trailing bytes.');
+    throw const FormatException(
+      'Ciphertext blob has unexpected trailing bytes.',
+    );
   }
   return frames;
 }

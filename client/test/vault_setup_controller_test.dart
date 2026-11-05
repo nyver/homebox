@@ -29,17 +29,20 @@ void main() {
     reloaded.dispose();
   });
 
-  test('a second createVault call is a no-op once the vault is ready', () async {
-    final storage = MemoryVaultKeyStorage();
-    final controller = VaultSetupController(VaultKeyStore(storage));
-    final userId = generateUuidV4();
+  test(
+    'a second createVault call is a no-op once the vault is ready',
+    () async {
+      final storage = MemoryVaultKeyStorage();
+      final controller = VaultSetupController(VaultKeyStore(storage));
+      final userId = generateUuidV4();
 
-    final first = await controller.createVault(userId);
-    expect(first, isNotNull);
-    final second = await controller.createVault(userId);
-    expect(second, isNull);
-    expect(controller.status, VaultSetupStatus.ready);
+      final first = await controller.createVault(userId);
+      expect(first, isNotNull);
+      final second = await controller.createVault(userId);
+      expect(second, isNull);
+      expect(controller.status, VaultSetupStatus.ready);
 
-    controller.dispose();
-  });
+      controller.dispose();
+    },
+  );
 }

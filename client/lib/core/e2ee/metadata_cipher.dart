@@ -80,7 +80,9 @@ final class SensitiveNodeMetadata {
       throw const FormatException('Encrypted metadata has an invalid schema.');
     }
     if (plaintextSizeValue != null && plaintextSizeValue is! int) {
-      throw const FormatException('Encrypted metadata plaintext size is invalid.');
+      throw const FormatException(
+        'Encrypted metadata plaintext size is invalid.',
+      );
     }
     final List<Object?> rawLabels;
     if (labelsValue == null) {

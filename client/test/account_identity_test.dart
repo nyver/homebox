@@ -93,29 +93,32 @@ void main() {
     );
   });
 
-  test('a recovery bundle signature verifies under the account identity', () async {
-    final vaultKey = SecretKeyData(List<int>.generate(32, (index) => index));
-    final identity = await AccountIdentity.derive(
-      vaultKey: vaultKey,
-      accountId: accountId,
-    );
-    final bundle = utf8.encode('opaque bundle');
-    final signature = await identity.signRecoveryBundle(
-      accountId: accountId,
-      bundle: bundle,
-    );
-    final statement = await recoveryBundleStatement(
-      accountId: accountId,
-      bundle: bundle,
-    );
-    expect(
-      await Ed25519().verify(
-        statement,
-        signature: Signature(signature, publicKey: identity.publicKey),
-      ),
-      isTrue,
-    );
-    identity.destroy();
-    vaultKey.destroy();
-  });
+  test(
+    'a recovery bundle signature verifies under the account identity',
+    () async {
+      final vaultKey = SecretKeyData(List<int>.generate(32, (index) => index));
+      final identity = await AccountIdentity.derive(
+        vaultKey: vaultKey,
+        accountId: accountId,
+      );
+      final bundle = utf8.encode('opaque bundle');
+      final signature = await identity.signRecoveryBundle(
+        accountId: accountId,
+        bundle: bundle,
+      );
+      final statement = await recoveryBundleStatement(
+        accountId: accountId,
+        bundle: bundle,
+      );
+      expect(
+        await Ed25519().verify(
+          statement,
+          signature: Signature(signature, publicKey: identity.publicKey),
+        ),
+        isTrue,
+      );
+      identity.destroy();
+      vaultKey.destroy();
+    },
+  );
 }

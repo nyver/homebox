@@ -5,7 +5,9 @@ import 'package:homebox_client/core/e2ee/opaque_id.dart';
 
 void main() {
   test('generateUuidV4 produces distinct, well-formed v4 UUIDs', () {
-    final pattern = RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$');
+    final pattern = RegExp(
+      r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+    );
     final seen = <String>{};
     for (var i = 0; i < 100; i++) {
       final uuid = generateUuidV4();
@@ -29,7 +31,10 @@ void main() {
 
   test('uuidStringToBytes rejects malformed input', () {
     expect(() => uuidStringToBytes('not-a-uuid'), throwsFormatException);
-    expect(() => uuidStringToBytes('0f3a85b1-c370-ef0e-b221-9c6c2ea078d2ff'), throwsFormatException);
+    expect(
+      () => uuidStringToBytes('0f3a85b1-c370-ef0e-b221-9c6c2ea078d2ff'),
+      throwsFormatException,
+    );
   });
 
   test('bytesToUuidString rejects the wrong length', () {

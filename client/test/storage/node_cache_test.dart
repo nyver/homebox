@@ -4,7 +4,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/storage/local_database.dart';
 import 'package:homebox_client/core/storage/node_cache.dart';
 
-LocalNode _node(String id, {String? parentId, String nodeType = 'FILE', int revision = 1, bool pendingCreate = false, DateTime? deletedAt}) {
+LocalNode _node(
+  String id, {
+  String? parentId,
+  String nodeType = 'FILE',
+  int revision = 1,
+  bool pendingCreate = false,
+  DateTime? deletedAt,
+}) {
   final now = DateTime.utc(2026, 1, 1);
   return LocalNode(
     id: id,
@@ -27,7 +34,15 @@ void main() {
     addTearDown(db.dispose);
     final cache = NodeCache(db.db);
 
-    cache.upsert(_node('n1', parentId: 'root', nodeType: 'DIRECTORY', revision: 3, pendingCreate: true));
+    cache.upsert(
+      _node(
+        'n1',
+        parentId: 'root',
+        nodeType: 'DIRECTORY',
+        revision: 3,
+        pendingCreate: true,
+      ),
+    );
     final loaded = cache.getById('n1')!;
     expect(loaded.parentId, 'root');
     expect(loaded.nodeType, 'DIRECTORY');

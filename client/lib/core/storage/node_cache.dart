@@ -49,19 +49,22 @@ final class LocalNode {
 /// into [NodeCache] (`SyncEngine`, `FilesController`, and the local
 /// sync-folder uploader), so they can never drift into copying different
 /// subsets of fields.
-LocalNode localNodeFromServerNode(transport.NodeInfo node, {bool pendingCreate = false}) => LocalNode(
-      id: node.id,
-      parentId: node.parentId,
-      nodeType: node.nodeType,
-      metadataCiphertext: node.metadataCiphertext,
-      metadataKeyVersion: node.metadataKeyVersion,
-      currentVersionId: node.currentVersionId,
-      revision: node.revision,
-      createdAt: node.createdAt,
-      updatedAt: node.updatedAt,
-      deletedAt: node.deletedAt,
-      pendingCreate: pendingCreate,
-    );
+LocalNode localNodeFromServerNode(
+  transport.NodeInfo node, {
+  bool pendingCreate = false,
+}) => LocalNode(
+  id: node.id,
+  parentId: node.parentId,
+  nodeType: node.nodeType,
+  metadataCiphertext: node.metadataCiphertext,
+  metadataKeyVersion: node.metadataKeyVersion,
+  currentVersionId: node.currentVersionId,
+  revision: node.revision,
+  createdAt: node.createdAt,
+  updatedAt: node.updatedAt,
+  deletedAt: node.deletedAt,
+  pendingCreate: pendingCreate,
+);
 
 /// CRUD for the local `nodes` cache table (spec §13). Every method is
 /// synchronous: `package:sqlite3` is a synchronous FFI binding, and these
@@ -112,13 +115,20 @@ final class NodeCache {
 
   List<LocalNode> listChildren(String? parentId) {
     final rows = parentId == null
-        ? _db.select('SELECT * FROM nodes WHERE parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at')
-        : _db.select('SELECT * FROM nodes WHERE parent_id = ? AND deleted_at IS NULL ORDER BY created_at', [parentId]);
+        ? _db.select(
+            'SELECT * FROM nodes WHERE parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at',
+          )
+        : _db.select(
+            'SELECT * FROM nodes WHERE parent_id = ? AND deleted_at IS NULL ORDER BY created_at',
+            [parentId],
+          );
     return rows.map(_fromRow).toList(growable: false);
   }
 
   List<LocalNode> listTrash() {
-    final rows = _db.select('SELECT * FROM nodes WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC');
+    final rows = _db.select(
+      'SELECT * FROM nodes WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC',
+    );
     return rows.map(_fromRow).toList(growable: false);
   }
 
@@ -129,16 +139,18 @@ final class NodeCache {
   }
 
   LocalNode _fromRow(Row row) => LocalNode(
-        id: row['id'] as String,
-        parentId: row['parent_id'] as String?,
-        nodeType: row['node_type'] as String,
-        metadataCiphertext: row['metadata_ciphertext'] as Uint8List,
-        metadataKeyVersion: row['metadata_key_version'] as int,
-        currentVersionId: row['current_version_id'] as String?,
-        revision: row['revision'] as int,
-        createdAt: DateTime.parse(row['created_at'] as String),
-        updatedAt: DateTime.parse(row['updated_at'] as String),
-        deletedAt: row['deleted_at'] != null ? DateTime.parse(row['deleted_at'] as String) : null,
-        pendingCreate: (row['pending_create'] as int) != 0,
-      );
+    id: row['id'] as String,
+    parentId: row['parent_id'] as String?,
+    nodeType: row['node_type'] as String,
+    metadataCiphertext: row['metadata_ciphertext'] as Uint8List,
+    metadataKeyVersion: row['metadata_key_version'] as int,
+    currentVersionId: row['current_version_id'] as String?,
+    revision: row['revision'] as int,
+    createdAt: DateTime.parse(row['created_at'] as String),
+    updatedAt: DateTime.parse(row['updated_at'] as String),
+    deletedAt: row['deleted_at'] != null
+        ? DateTime.parse(row['deleted_at'] as String)
+        : null,
+    pendingCreate: (row['pending_create'] as int) != 0,
+  );
 }

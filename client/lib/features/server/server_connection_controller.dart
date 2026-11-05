@@ -305,7 +305,8 @@ final class ServerConnectionController extends ChangeNotifier {
       } else {
         // Preserve the durable token and current UI session. The next
         // authenticated operation retries refresh instead of forcing login.
-        _errorMessage = 'Could not refresh the saved session. ${describeError(e)}';
+        _errorMessage =
+            'Could not refresh the saved session. ${describeError(e)}';
         notifyListeners();
       }
       return false;
@@ -344,7 +345,8 @@ final class ServerConnectionController extends ChangeNotifier {
         await _sessionStore.clearRefreshToken();
         _setStatus(ServerConnectionStatus.connectedLoggedOut);
       } else {
-        _errorMessage = 'Could not restore the saved session. ${describeError(e)}';
+        _errorMessage =
+            'Could not restore the saved session. ${describeError(e)}';
         _setStatus(ServerConnectionStatus.failed);
       }
       return null;

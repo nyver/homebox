@@ -46,25 +46,28 @@ void main() {
     expect(decrypted.labels, metadata.labels);
   });
 
-  test('plaintext size is optional, for metadata encrypted before it existed', () async {
-    final withoutSize = SensitiveNodeMetadata(fileName: 'legacy.txt');
-    final encrypted = await cipher.encrypt(
-      metadata: withoutSize,
-      metadataKey: key,
-      keyVersion: 1,
-      nodeType: MetadataNodeType.file,
-      scopeId: scopeId,
-      nodeId: nodeId,
-    );
-    final decrypted = await cipher.decrypt(
-      envelope: EncryptedMetadataEnvelope.decode(encrypted.encode()),
-      metadataKey: key,
-      nodeType: MetadataNodeType.file,
-      scopeId: scopeId,
-      nodeId: nodeId,
-    );
-    expect(decrypted.plaintextSize, isNull);
-  });
+  test(
+    'plaintext size is optional, for metadata encrypted before it existed',
+    () async {
+      final withoutSize = SensitiveNodeMetadata(fileName: 'legacy.txt');
+      final encrypted = await cipher.encrypt(
+        metadata: withoutSize,
+        metadataKey: key,
+        keyVersion: 1,
+        nodeType: MetadataNodeType.file,
+        scopeId: scopeId,
+        nodeId: nodeId,
+      );
+      final decrypted = await cipher.decrypt(
+        envelope: EncryptedMetadataEnvelope.decode(encrypted.encode()),
+        metadataKey: key,
+        nodeType: MetadataNodeType.file,
+        scopeId: scopeId,
+        nodeId: nodeId,
+      );
+      expect(decrypted.plaintextSize, isNull);
+    },
+  );
 
   test('metadata cannot be moved to another node', () async {
     final encrypted = await cipher.encrypt(

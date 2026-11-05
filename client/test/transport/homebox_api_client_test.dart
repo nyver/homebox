@@ -21,20 +21,28 @@ void main() {
           request.response
             ..statusCode = 200
             ..headers.contentType = ContentType.json
-            ..write(jsonEncode({
-              'user': {'id': 'user-1', 'username': 'admin', 'role': 'ADMIN'},
-              'device': {'id': 'device-1', 'platform': 'WINDOWS'},
-              'accessToken': 'test-access-token',
-              'accessTokenExpiresAt': '2026-01-01T00:00:00Z',
-              'refreshToken': 'test-refresh-token',
-              'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
-            }));
+            ..write(
+              jsonEncode({
+                'user': {'id': 'user-1', 'username': 'admin', 'role': 'ADMIN'},
+                'device': {'id': 'device-1', 'platform': 'WINDOWS'},
+                'accessToken': 'test-access-token',
+                'accessTokenExpiresAt': '2026-01-01T00:00:00Z',
+                'refreshToken': 'test-refresh-token',
+                'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
+              }),
+            );
         } else if (request.uri.path == '/api/v1/users/me') {
           seenAuthorizationHeader = request.headers.value('authorization');
           request.response
             ..statusCode = 200
             ..headers.contentType = ContentType.json
-            ..write(jsonEncode({'id': 'user-1', 'username': 'admin', 'role': 'ADMIN'}));
+            ..write(
+              jsonEncode({
+                'id': 'user-1',
+                'username': 'admin',
+                'role': 'ADMIN',
+              }),
+            );
         }
         await request.response.close();
       });
@@ -42,7 +50,10 @@ void main() {
 
       final transport = PinnedHttpClient(fixtureServerFingerprint);
       addTearDown(transport.close);
-      final api = HomeBoxApiClient(baseUrl: Uri.parse('https://127.0.0.1:${server.port}'), transport: transport);
+      final api = HomeBoxApiClient(
+        baseUrl: Uri.parse('https://127.0.0.1:${server.port}'),
+        transport: transport,
+      );
 
       final session = await api.login(
         username: 'admin',
@@ -71,16 +82,25 @@ void main() {
         request.response
           ..statusCode = 401
           ..headers.contentType = ContentType.json
-          ..write(jsonEncode({
-            'error': {'code': 'AUTH_INVALID_CREDENTIALS', 'message': 'invalid username or password', 'requestId': 'req-1'},
-          }));
+          ..write(
+            jsonEncode({
+              'error': {
+                'code': 'AUTH_INVALID_CREDENTIALS',
+                'message': 'invalid username or password',
+                'requestId': 'req-1',
+              },
+            }),
+          );
         await request.response.close();
       });
       addTearDown(() => server.close(force: true));
 
       final transport = PinnedHttpClient(fixtureServerFingerprint);
       addTearDown(transport.close);
-      final api = HomeBoxApiClient(baseUrl: Uri.parse('https://127.0.0.1:${server.port}'), transport: transport);
+      final api = HomeBoxApiClient(
+        baseUrl: Uri.parse('https://127.0.0.1:${server.port}'),
+        transport: transport,
+      );
 
       try {
         await api.login(
@@ -110,7 +130,10 @@ void main() {
 
       final transport = PinnedHttpClient('0' * 64);
       addTearDown(transport.close);
-      final api = HomeBoxApiClient(baseUrl: Uri.parse('https://127.0.0.1:${server.port}'), transport: transport);
+      final api = HomeBoxApiClient(
+        baseUrl: Uri.parse('https://127.0.0.1:${server.port}'),
+        transport: transport,
+      );
 
       await expectLater(
         api.me('irrelevant-token'),

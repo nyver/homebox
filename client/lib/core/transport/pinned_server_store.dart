@@ -11,7 +11,9 @@ abstract interface class PinnedServerStorage {
 }
 
 final class PlatformPinnedServerStorage implements PinnedServerStorage {
-  const PlatformPinnedServerStorage([this._storage = const FlutterSecureStorage()]);
+  const PlatformPinnedServerStorage([
+    this._storage = const FlutterSecureStorage(),
+  ]);
 
   final FlutterSecureStorage _storage;
 
@@ -19,7 +21,8 @@ final class PlatformPinnedServerStorage implements PinnedServerStorage {
   Future<String?> read(String key) => _storage.read(key: key);
 
   @override
-  Future<void> write(String key, String value) => _storage.write(key: key, value: value);
+  Future<void> write(String key, String value) =>
+      _storage.write(key: key, value: value);
 
   @override
   Future<void> delete(String key) => _storage.delete(key: key);
@@ -34,7 +37,10 @@ final class PinnedServer {
   final String baseUrl;
   final String fingerprint;
 
-  Map<String, String> _toJson() => {'baseUrl': baseUrl, 'fingerprint': fingerprint};
+  Map<String, String> _toJson() => {
+    'baseUrl': baseUrl,
+    'fingerprint': fingerprint,
+  };
 
   static PinnedServer? _tryFromJson(Object? json) {
     if (json is! Map<String, dynamic>) return null;
@@ -49,7 +55,8 @@ final class PinnedServer {
 /// device are a possible later UX improvement; today's clients only ever
 /// connect to one HomeBox server at a time.
 final class PinnedServerStore {
-  PinnedServerStore([PinnedServerStorage? storage]) : _storage = storage ?? const PlatformPinnedServerStorage();
+  PinnedServerStore([PinnedServerStorage? storage])
+    : _storage = storage ?? const PlatformPinnedServerStorage();
 
   static const String _key = 'homebox.transport.pinned_server.v1';
 
@@ -65,7 +72,8 @@ final class PinnedServerStore {
     }
   }
 
-  Future<void> save(PinnedServer server) => _storage.write(_key, jsonEncode(server._toJson()));
+  Future<void> save(PinnedServer server) =>
+      _storage.write(_key, jsonEncode(server._toJson()));
 
   Future<void> clear() => _storage.delete(_key);
 }

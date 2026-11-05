@@ -43,7 +43,8 @@ final class VaultSetupController extends ChangeNotifier {
   /// show the user exactly once. Returns null on failure; see
   /// [errorMessage].
   Future<String?> createVault(String userId) async {
-    if (_status == VaultSetupStatus.creating || _status == VaultSetupStatus.ready) {
+    if (_status == VaultSetupStatus.creating ||
+        _status == VaultSetupStatus.ready) {
       return null;
     }
     _errorMessage = null;

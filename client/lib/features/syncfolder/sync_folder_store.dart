@@ -9,7 +9,9 @@ abstract interface class SyncFolderStorage {
 }
 
 final class PlatformSyncFolderStorage implements SyncFolderStorage {
-  const PlatformSyncFolderStorage([this._storage = const FlutterSecureStorage()]);
+  const PlatformSyncFolderStorage([
+    this._storage = const FlutterSecureStorage(),
+  ]);
 
   final FlutterSecureStorage _storage;
 
@@ -17,7 +19,8 @@ final class PlatformSyncFolderStorage implements SyncFolderStorage {
   Future<String?> read(String key) => _storage.read(key: key);
 
   @override
-  Future<void> write(String key, String value) => _storage.write(key: key, value: value);
+  Future<void> write(String key, String value) =>
+      _storage.write(key: key, value: value);
 
   @override
   Future<void> delete(String key) => _storage.delete(key: key);
@@ -27,7 +30,8 @@ final class PlatformSyncFolderStorage implements SyncFolderStorage {
 /// restarts. A single global setting, matching this client's single
 /// pinned-server/single-vault-per-account shape today.
 final class SyncFolderStore {
-  SyncFolderStore([SyncFolderStorage? storage]) : _storage = storage ?? const PlatformSyncFolderStorage();
+  SyncFolderStore([SyncFolderStorage? storage])
+    : _storage = storage ?? const PlatformSyncFolderStorage();
 
   static const String _key = 'homebox.syncfolder.path.v1';
 

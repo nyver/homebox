@@ -130,40 +130,43 @@ void main() {
     expect(store.listAll(), isEmpty);
   });
 
-  test('local size and modification time round-trip and match a file stat', () async {
-    final db = LocalDatabase.openInMemory();
-    addTearDown(db.dispose);
-    final store = MaterializedFilesStore(db.db);
-    final dir = await Directory.systemTemp.createTemp('homebox_stat_');
-    addTearDown(() => dir.delete(recursive: true));
-    final file = File('${dir.path}/a.txt');
-    await file.writeAsString('abc');
-    final stat = await file.stat();
+  test(
+    'local size and modification time round-trip and match a file stat',
+    () async {
+      final db = LocalDatabase.openInMemory();
+      addTearDown(db.dispose);
+      final store = MaterializedFilesStore(db.db);
+      final dir = await Directory.systemTemp.createTemp('homebox_stat_');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/a.txt');
+      await file.writeAsString('abc');
+      final stat = await file.stat();
 
-    store.upsert(
-      MaterializedFile(
-        nodeId: 'n1',
-        relativePath: 'a.txt',
-        contentVersionId: 'v1',
-        localSize: stat.size,
-        localModifiedAt: stat.modified,
-      ),
-    );
-    final loaded = store.getById('n1')!;
-    expect(loaded.localSize, 3);
-    expect(loaded.matchesLocalStat(stat), isTrue);
+      store.upsert(
+        MaterializedFile(
+          nodeId: 'n1',
+          relativePath: 'a.txt',
+          contentVersionId: 'v1',
+          localSize: stat.size,
+          localModifiedAt: stat.modified,
+        ),
+      );
+      final loaded = store.getById('n1')!;
+      expect(loaded.localSize, 3);
+      expect(loaded.matchesLocalStat(stat), isTrue);
 
-    await file.writeAsString('abcd');
-    expect(loaded.matchesLocalStat(await file.stat()), isFalse);
+      await file.writeAsString('abcd');
+      expect(loaded.matchesLocalStat(await file.stat()), isFalse);
 
-    // A record without a stat (legacy or Android) never skips hashing.
-    store.upsert(
-      const MaterializedFile(
-        nodeId: 'n1',
-        relativePath: 'a.txt',
-        contentVersionId: 'v1',
-      ),
-    );
-    expect(store.getById('n1')!.matchesLocalStat(stat), isFalse);
-  });
+      // A record without a stat (legacy or Android) never skips hashing.
+      store.upsert(
+        const MaterializedFile(
+          nodeId: 'n1',
+          relativePath: 'a.txt',
+          contentVersionId: 'v1',
+        ),
+      );
+      expect(store.getById('n1')!.matchesLocalStat(stat), isFalse);
+    },
+  );
 }

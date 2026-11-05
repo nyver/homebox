@@ -58,32 +58,31 @@ void main() {
     );
   });
 
-  testWidgets(
-    'the Sync page lets Android users choose a local sync folder',
-    (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.android;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+  testWidgets('the Sync page lets Android users choose a local sync folder', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
 
-      await tester.pumpWidget(_testApp());
-      await tester.pumpAndSettle();
+    await tester.pumpWidget(_testApp());
+    await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Sync'));
-      await tester.pumpAndSettle();
+    await tester.tap(find.text('Sync'));
+    await tester.pumpAndSettle();
 
-      expect(find.text('Local sync folder'), findsOneWidget);
-      expect(find.text('Choose'), findsOneWidget);
-      expect(find.text('Change'), findsNothing);
-      expect(
-        find.textContaining('Choose a folder to mirror server files'),
-        findsOneWidget,
-      );
+    expect(find.text('Local sync folder'), findsOneWidget);
+    expect(find.text('Choose'), findsOneWidget);
+    expect(find.text('Change'), findsNothing);
+    expect(
+      find.textContaining('Choose a folder to mirror server files'),
+      findsOneWidget,
+    );
 
-      // Reset inline rather than relying solely on addTearDown: the
-      // framework's post-test invariant check runs before registered
-      // tearDowns fire, so leaving this to addTearDown alone trips it.
-      debugDefaultTargetPlatformOverride = null;
-    },
-  );
+    // Reset inline rather than relying solely on addTearDown: the
+    // framework's post-test invariant check runs before registered
+    // tearDowns fire, so leaving this to addTearDown alone trips it.
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets('Settings prepares a device without unlocking vault', (
     tester,

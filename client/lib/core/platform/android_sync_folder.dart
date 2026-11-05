@@ -43,7 +43,8 @@ final class MethodChannelAndroidSyncFolder implements AndroidSyncFolder {
   final MethodChannel _channel;
 
   @override
-  Future<String?> selectFolder() => _channel.invokeMethod<String>('selectFolder');
+  Future<String?> selectFolder() =>
+      _channel.invokeMethod<String>('selectFolder');
 
   @override
   Future<void> createDirectory({
