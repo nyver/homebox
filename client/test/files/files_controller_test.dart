@@ -185,6 +185,12 @@ final class _FakeServer {
       } else {
         _writeJson(request, 200, node);
       }
+    } else if (method == 'POST' && path.endsWith('/restore')) {
+      final id = request.uri.pathSegments[request.uri.pathSegments.length - 2];
+      final node = _nodes[id]!;
+      node['deletedAt'] = null;
+      node['revision'] = (node['revision'] as int) + 1;
+      _writeJson(request, 200, node);
     } else if (method == 'POST' && path == '/api/v1/uploads') {
       final body = jsonDecode(
         await utf8.decoder.bind(request).join(),
@@ -243,6 +249,8 @@ final class _FakeServer {
         'keyVersion': 1,
         'revision': newRevision,
         'chunkCount': session['chunkCount'],
+        'createdAt': DateTime.now().toUtc().toIso8601String(),
+        'ciphertextSize': _blobs[fileVersionId]!.length,
       });
       node['currentVersionId'] = fileVersionId;
       node['metadataCiphertext'] = session['metadataCiphertext'];
@@ -941,5 +949,192 @@ void main() {
     final result = await controller.downloadFile(uploaded, destinationPath);
     expect(result, isFalse);
     expect(await File(destinationPath).exists(), isFalse);
+  });
+
+  test('version history lists versions and restoring an old one makes it current again', () async {
+    final fakeServer = _FakeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(controller.dispose);
+
+    final tempDir = await Directory.systemTemp.createTemp(
+      'homebox_files_test_',
+    );
+    addTearDown(() => tempDir.delete(recursive: true));
+    final sourceFile = File('${tempDir.path}/notes.kdbx');
+    await sourceFile.writeAsBytes(utf8.encode('first database'));
+    expect(await controller.uploadFile(sourceFile.path), isTrue);
+    await sourceFile.writeAsBytes(utf8.encode('second database, edited'));
+    expect(
+      await controller.replaceFileContent(
+        controller.entries.single,
+        sourceFile.path,
+      ),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    final entry = controller.entries.single;
+
+    final versions = await controller.fileVersions(entry);
+    expect(versions, isNotNull, reason: controller.errorMessage);
+    expect(versions, hasLength(2));
+    expect(versions!.first.isCurrent, isTrue);
+    expect(versions.last.isCurrent, isFalse);
+    expect(versions.last.plaintextSize, 'first database'.length);
+
+    // An older version has no plaintext hash in the current metadata; its
+    // download is authenticated by AEAD alone and must still round-trip.
+    final oldCopy = '${tempDir.path}/old-copy.kdbx';
+    expect(
+      await controller.downloadFileVersion(entry, versions.last, oldCopy),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    expect(await File(oldCopy).readAsString(), 'first database');
+
+    expect(
+      await controller.restoreFileVersion(entry, versions.last),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    expect(
+      fakeServer._fileVersions[entry.node.id],
+      hasLength(3),
+      reason: 'a restore adds a new version instead of rewriting history',
+    );
+    final restored = controller.entries.single;
+    expect(restored.metadata.plaintextSize, 'first database'.length);
+    final current = '${tempDir.path}/current.kdbx';
+    expect(await controller.downloadFile(restored, current), isTrue);
+    expect(await File(current).readAsString(), 'first database');
+    expect(
+      await controller.restoreFileVersion(
+        restored,
+        (await controller.fileVersions(restored))!.first,
+      ),
+      isFalse,
+      reason: 'the current version cannot be restored onto itself',
+    );
+  });
+
+  test('restoreFromTrash brings back a file together with its deleted folder', () async {
+    final fakeServer = _FakeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(controller.dispose);
+
+    expect(await controller.createFolder('Taxes'), isTrue);
+    await _awaitBackgroundSync(syncEngine);
+    await controller.refresh();
+    final folder = controller.entries.single;
+    controller.openFolder(folder);
+    await pumpEventQueue();
+
+    final tempDir = await Directory.systemTemp.createTemp(
+      'homebox_files_test_',
+    );
+    addTearDown(() => tempDir.delete(recursive: true));
+    final sourceFile = File('${tempDir.path}/2025.pdf');
+    await sourceFile.writeAsBytes(utf8.encode('return'));
+    expect(await controller.uploadFile(sourceFile.path), isTrue);
+    final file = controller.entries.single;
+
+    expect(await controller.deleteNode(file), isTrue);
+    await _awaitBackgroundSync(syncEngine);
+    controller.goToRoot();
+    await pumpEventQueue();
+    await controller.refresh();
+    expect(await controller.deleteNode(controller.entries.single), isTrue);
+    await _awaitBackgroundSync(syncEngine);
+
+    final trash = await controller.trashEntries();
+    expect(trash.map((item) => item.entry.name), unorderedEquals(['Taxes', '2025.pdf']));
+    expect(
+      trash.singleWhere((item) => item.entry.name == '2025.pdf').location,
+      'Taxes',
+    );
+
+    final deletedFile = trash.singleWhere((item) => item.entry.name == '2025.pdf');
+    expect(
+      await controller.restoreFromTrash(deletedFile.entry),
+      isTrue,
+      reason: controller.errorMessage,
+    );
+    expect(await controller.trashEntries(), isEmpty);
+    expect(controller.entries.single.name, 'Taxes');
+    await _awaitBackgroundSync(syncEngine);
+    expect(fakeServer._nodes[folder.node.id]!['deletedAt'], isNull);
+    expect(fakeServer._nodes[file.node.id]!['deletedAt'], isNull);
+  });
+
+  test('restoreFromTrash refuses to create a second item with the same name', () async {
+    final fakeServer = _FakeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+    final recoverySecret = await vaultKeyStore.createVault(
+      userId: _FakeServer.userId,
+    );
+    recoverySecret.destroy();
+    final syncEngine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(syncEngine.dispose);
+    final controller = FilesController(
+      serverConnection: serverConnection,
+      vaultKeyStore: vaultKeyStore,
+      syncEngine: syncEngine,
+    );
+    addTearDown(controller.dispose);
+
+    expect(await controller.createFolder('Photos'), isTrue);
+    await _awaitBackgroundSync(syncEngine);
+    await controller.refresh();
+    expect(await controller.deleteNode(controller.entries.single), isTrue);
+    await _awaitBackgroundSync(syncEngine);
+    expect(await controller.createFolder('photos'), isTrue);
+    await _awaitBackgroundSync(syncEngine);
+
+    final trashed = (await controller.trashEntries()).single.entry;
+    expect(await controller.restoreFromTrash(trashed), isFalse);
+    expect(controller.errorMessage, contains('same name'));
+    expect(await controller.trashEntries(), hasLength(1));
   });
 }

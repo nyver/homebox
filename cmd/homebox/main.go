@@ -25,6 +25,7 @@ import (
 	"github.com/homebox/homebox/internal/maintenance"
 	"github.com/homebox/homebox/internal/nodes"
 	"github.com/homebox/homebox/internal/provisioning"
+	"github.com/homebox/homebox/internal/recovery"
 	"github.com/homebox/homebox/internal/securetransport"
 	"github.com/homebox/homebox/internal/serveridentity"
 	"github.com/homebox/homebox/internal/sharing"
@@ -128,12 +129,7 @@ func runMaintenance(args []string) {
 		fatal("open database: %v", err)
 	}
 	defer db.Close()
-	service, err := maintenance.New(
-		db,
-		c.Storage.Path,
-		time.Duration(c.Maintenance.OrphanBlobGraceHours)*time.Hour,
-		time.Duration(c.Maintenance.TrashRetentionDays)*24*time.Hour,
-	)
+	service, err := maintenance.New(db, c.Storage.Path, maintenancePolicy(c))
 	if err != nil {
 		fatal("initialize maintenance: %v", err)
 	}
@@ -141,8 +137,8 @@ func runMaintenance(args []string) {
 	if err != nil {
 		fatal("run maintenance: %v", err)
 	}
-	fmt.Printf("Maintenance complete: expired uploads=%d, access tokens=%d, refresh tokens=%d, idempotency operations=%d, expired Trash items=%d, unreferenced blobs=%d, orphan blob files=%d.\n",
-		result.ExpiredUploads, result.ExpiredAccessTokens, result.ExpiredRefreshTokens, result.ExpiredOperations, result.ExpiredTrashItems, result.UnreferencedBlobs, result.OrphanBlobFiles)
+	fmt.Printf("Maintenance complete: expired uploads=%d, access tokens=%d, refresh tokens=%d, idempotency operations=%d, expired Trash items=%d, pruned file versions=%d, unreferenced blobs=%d, orphan blob files=%d.\n",
+		result.ExpiredUploads, result.ExpiredAccessTokens, result.ExpiredRefreshTokens, result.ExpiredOperations, result.ExpiredTrashItems, result.PrunedFileVersions, result.UnreferencedBlobs, result.OrphanBlobFiles)
 }
 
 func serve(args []string) {
@@ -193,12 +189,7 @@ func serve(args []string) {
 	if err != nil {
 		fatal("initialize upload storage: %v", err)
 	}
-	maintenanceService, err := maintenance.New(
-		db,
-		c.Storage.Path,
-		time.Duration(c.Maintenance.OrphanBlobGraceHours)*time.Hour,
-		time.Duration(c.Maintenance.TrashRetentionDays)*24*time.Hour,
-	)
+	maintenanceService, err := maintenance.New(db, c.Storage.Path, maintenancePolicy(c))
 	if err != nil {
 		fatal("initialize automatic maintenance: %v", err)
 	}
@@ -213,7 +204,7 @@ func serve(args []string) {
 		defer close(maintenanceDone)
 		runAutomaticMaintenance(ctx, maintenanceService, time.Duration(c.Maintenance.IntervalHours)*time.Hour)
 	}()
-	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService, sharing.New(db))
+	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService, sharing.New(db), recovery.New(db))
 	server := &http.Server{
 		Addr:              c.Address(),
 		Handler:           httpserver.New(api),
@@ -268,6 +259,15 @@ func serve(args []string) {
 // requests. It stays below Docker's default 10-second stop grace period.
 const shutdownTimeout = 8 * time.Second
 
+func maintenancePolicy(c config.Config) maintenance.Policy {
+	return maintenance.Policy{
+		OrphanBlobGrace:  time.Duration(c.Maintenance.OrphanBlobGraceHours) * time.Hour,
+		TrashRetention:   time.Duration(c.Maintenance.TrashRetentionDays) * 24 * time.Hour,
+		MaxFileVersions:  c.Maintenance.MaxFileVersions,
+		VersionRetention: time.Duration(c.Maintenance.VersionRetentionDays) * 24 * time.Hour,
+	}
+}
+
 func runAutomaticMaintenance(ctx context.Context, service *maintenance.Service, interval time.Duration) {
 	run := func() {
 		result, err := service.Run(ctx)
@@ -277,8 +277,8 @@ func runAutomaticMaintenance(ctx context.Context, service *maintenance.Service, 
 			}
 			return
 		}
-		log.Printf("Automatic maintenance complete: expired uploads=%d, access tokens=%d, refresh tokens=%d, idempotency operations=%d, expired Trash items=%d, unreferenced blobs=%d, orphan blob files=%d",
-			result.ExpiredUploads, result.ExpiredAccessTokens, result.ExpiredRefreshTokens, result.ExpiredOperations, result.ExpiredTrashItems, result.UnreferencedBlobs, result.OrphanBlobFiles)
+		log.Printf("Automatic maintenance complete: expired uploads=%d, access tokens=%d, refresh tokens=%d, idempotency operations=%d, expired Trash items=%d, pruned file versions=%d, unreferenced blobs=%d, orphan blob files=%d",
+			result.ExpiredUploads, result.ExpiredAccessTokens, result.ExpiredRefreshTokens, result.ExpiredOperations, result.ExpiredTrashItems, result.PrunedFileVersions, result.UnreferencedBlobs, result.OrphanBlobFiles)
 	}
 	run()
 	ticker := time.NewTicker(interval)

@@ -69,6 +69,11 @@ type Config struct {
 		OrphanBlobGraceHours int `yaml:"orphan_blob_grace_hours"`
 		TrashRetentionDays   int `yaml:"trash_retention_days"`
 		IntervalHours        int `yaml:"interval_hours"`
+		// MaxFileVersions bounds how many versions of one file are kept,
+		// including the current one; VersionRetentionDays removes older
+		// non-current versions sooner. The current version is never removed.
+		MaxFileVersions      int `yaml:"max_file_versions"`
+		VersionRetentionDays int `yaml:"version_retention_days"`
 	} `yaml:"maintenance"`
 }
 
@@ -95,6 +100,8 @@ func Defaults() Config {
 	c.Maintenance.OrphanBlobGraceHours = 168
 	c.Maintenance.TrashRetentionDays = 3
 	c.Maintenance.IntervalHours = 1
+	c.Maintenance.MaxFileVersions = 10
+	c.Maintenance.VersionRetentionDays = 30
 	return c
 }
 
@@ -170,6 +177,12 @@ func (c Config) Validate() error {
 	}
 	if c.Maintenance.IntervalHours < 1 {
 		return errors.New("maintenance.interval_hours must be positive")
+	}
+	if c.Maintenance.MaxFileVersions < 1 {
+		return errors.New("maintenance.max_file_versions must be positive")
+	}
+	if c.Maintenance.VersionRetentionDays < 1 {
+		return errors.New("maintenance.version_retention_days must be positive")
 	}
 	return nil
 }

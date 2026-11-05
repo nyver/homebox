@@ -23,6 +23,7 @@ import (
 	"github.com/homebox/homebox/internal/auth"
 	"github.com/homebox/homebox/internal/nodes"
 	"github.com/homebox/homebox/internal/provisioning"
+	"github.com/homebox/homebox/internal/recovery"
 	"github.com/homebox/homebox/internal/sharing"
 	"github.com/homebox/homebox/internal/sync"
 	"github.com/homebox/homebox/internal/uploads"
@@ -39,15 +40,18 @@ type API struct {
 	sync         *sync.Service
 	uploads      *uploads.Service
 	shares       *sharing.Service
+	recovery     *recovery.Service
 }
 
-func New(authService *auth.Service, provisioningService *provisioning.Service, nodesService *nodes.Service, syncService *sync.Service, uploadsService *uploads.Service, sharingService *sharing.Service) http.Handler {
-	api := &API{auth: authService, provisioning: provisioningService, nodes: nodesService, sync: syncService, uploads: uploadsService, shares: sharingService}
+func New(authService *auth.Service, provisioningService *provisioning.Service, nodesService *nodes.Service, syncService *sync.Service, uploadsService *uploads.Service, sharingService *sharing.Service, recoveryService *recovery.Service) http.Handler {
+	api := &API{auth: authService, provisioning: provisioningService, nodes: nodesService, sync: syncService, uploads: uploadsService, shares: sharingService, recovery: recoveryService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", api.login)
 	mux.HandleFunc("POST /api/v1/auth/refresh", api.refresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", api.logout)
 	mux.Handle("GET /api/v1/users/me", api.authenticated(api.getMe))
+	mux.Handle("GET /api/v1/users/me/recovery", api.authenticated(api.getRecoveryBundle))
+	mux.Handle("PUT /api/v1/users/me/recovery", api.authenticated(api.putRecoveryBundle))
 	mux.Handle("GET /api/v1/users/{id}/share-devices", api.authenticated(api.listShareDevices))
 	mux.Handle("POST /api/v1/shares", api.authenticated(api.createShare))
 	mux.Handle("GET /api/v1/shares/incoming", api.authenticated(api.listIncomingShares))
@@ -582,6 +586,11 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no key envelope is available yet")
 	case errors.Is(err, provisioning.ErrIdentityConflict):
 		writeError(w, http.StatusConflict, "DEVICE_IDENTITY_CONFLICT", "account identity does not match existing device certificates")
+
+	case errors.Is(err, recovery.ErrNotFound):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no recovery bundle is stored for this account")
+	case errors.Is(err, recovery.ErrIdentityConflict):
+		writeError(w, http.StatusConflict, "DEVICE_IDENTITY_CONFLICT", "recovery bundle is not signed by this account's identity")
 
 	case errors.Is(err, sharing.ErrNotFound), errors.Is(err, sharing.ErrTargetNotFound):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "share or recipient was not found")

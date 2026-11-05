@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
@@ -77,5 +78,44 @@ void main() {
       ),
       startsWith('homebox://pair-device?v=1&id=$deviceId&kv=1&key='),
     );
+  });
+
+  test('recovery bundle statement matches the server vector', () async {
+    // Same fixed vector as internal/deviceauth/recovery_test.go.
+    final statement = await recoveryBundleStatement(
+      accountId: '00112233-4455-6677-8899-aabbccddeeff',
+      bundle: utf8.encode('bundle'),
+    );
+    expect(
+      statement.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(),
+      '4842585242000100112233445566778899aabbccddeeff'
+      '1e6ed65d77d6364eeaed5a745ba5c4985ae2b700dd85d7cf7f027bdf294a33fc',
+    );
+  });
+
+  test('a recovery bundle signature verifies under the account identity', () async {
+    final vaultKey = SecretKeyData(List<int>.generate(32, (index) => index));
+    final identity = await AccountIdentity.derive(
+      vaultKey: vaultKey,
+      accountId: accountId,
+    );
+    final bundle = utf8.encode('opaque bundle');
+    final signature = await identity.signRecoveryBundle(
+      accountId: accountId,
+      bundle: bundle,
+    );
+    final statement = await recoveryBundleStatement(
+      accountId: accountId,
+      bundle: bundle,
+    );
+    expect(
+      await Ed25519().verify(
+        statement,
+        signature: Signature(signature, publicKey: identity.publicKey),
+      ),
+      isTrue,
+    );
+    identity.destroy();
+    vaultKey.destroy();
   });
 }

@@ -159,7 +159,43 @@ final class AccountIdentity {
     }
   }
 
+  /// Signs [bundle] as this account's recovery bundle. The server accepts a
+  /// bundle only when it is signed by the identity it already trusts, so a
+  /// session without the Vault Key cannot replace a working bundle.
+  Future<Uint8List> signRecoveryBundle({
+    required String accountId,
+    required List<int> bundle,
+  }) async {
+    final statement = await recoveryBundleStatement(
+      accountId: accountId,
+      bundle: bundle,
+    );
+    final signed = await _algorithm.sign(statement, keyPair: _keyPair);
+    return Uint8List.fromList(signed.bytes);
+  }
+
   void destroy() => _keyPair.destroy();
+}
+
+/// Canonical bytes signed for a recovery bundle upload; mirrors the server's
+/// `deviceauth.RecoveryBundleStatement`.
+Future<Uint8List> recoveryBundleStatement({
+  required String accountId,
+  required List<int> bundle,
+}) async {
+  if (bundle.isEmpty) {
+    throw ArgumentError.value(bundle.length, 'bundle.length');
+  }
+  final accountIdBytes = uuidStringToBytes(accountId);
+  final digest = await Sha256().hash(bundle);
+  final result = Uint8List(5 + 2 + 16 + 32);
+  result.setAll(0, const [0x48, 0x42, 0x58, 0x52, 0x42]); // HBXRB
+  ByteData.sublistView(result)
+      .setUint16(5, homeBoxDeviceKeySignatureVersion, Endian.big);
+  result.setAll(7, accountIdBytes);
+  result.setAll(23, digest.bytes);
+  accountIdBytes.fillRange(0, accountIdBytes.length, 0);
+  return result;
 }
 
 Uint8List deviceKeyStatement({

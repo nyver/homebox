@@ -4,8 +4,10 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'key_envelope.dart';
 import 'opaque_id.dart';
 import 'recovery.dart';
+import 'recovery_bundle.dart';
 
 /// The key version this client always uses for its personal vault key.
 /// Rotation (issuing v2, v3, ...) is a later milestone (§10.11); nothing
@@ -49,8 +51,8 @@ final class PlatformVaultKeyStorage implements VaultKeyStorage {
 /// storage layer is what provides at-rest confidentiality here, so wrapping
 /// the Vault Key with the UMK a second time before persisting it locally
 /// would add no real protection. The `KeyEnvelope`/UMK-wrapping format
-/// (ADR-011) is instead used for what it's actually for: the Recovery
-/// Package, and delivering the Vault Key to a *different* device.
+/// (ADR-011) is instead used for what it's actually for: the server-held
+/// [RecoveryBundle], and delivering the Vault Key to a *different* device.
 final class VaultKeyStore {
   VaultKeyStore([VaultKeyStorage? storage])
     : _storage = storage ?? const PlatformVaultKeyStorage();
@@ -117,30 +119,129 @@ final class VaultKeyStore {
     }
   }
 
-  /// Restores a vault from a Recovery Package + Recovery Secret (spec
-  /// §10.12/ADR-013), for a clean device that has no local vault yet. This
-  /// recovers the UMK but not the original Vault Key: only the account's
-  /// existing trusted devices possess it, so a clean-device recovery must
-  /// still go through provisioning (ADR-012) to actually unlock content —
-  /// this method alone leaves the vault key slot empty.
-  Future<void> restoreUserMasterKeyFromRecovery({
+  /// Seals this device's recovery material into the [RecoveryBundle] the
+  /// server keeps: the Recovery Package plus the Vault Key wrapped by the User
+  /// Master Key. Returns null on a device without a User Master Key (one that
+  /// was provisioned by another trusted device); such a device can still
+  /// issue a fresh Recovery Secret through [prepareNewRecoverySecret].
+  Future<RecoveryBundle?> sealRecoveryBundle({required String userId}) async {
+    final recoveryPackage = await loadRecoveryPackage();
+    final userMasterKey = await loadUserMasterKey();
+    final vaultKey = await loadVaultKey();
+    final userIdBytes = uuidStringToBytes(userId);
+    try {
+      if (recoveryPackage == null ||
+          userMasterKey == null ||
+          vaultKey == null) {
+        return null;
+      }
+      return RecoveryBundle(
+        recoveryPackage: recoveryPackage,
+        wrappedVaultKey: await _wrapVaultKey(
+          userMasterKey,
+          vaultKey,
+          userIdBytes,
+        ),
+      );
+    } finally {
+      userMasterKey?.destroy();
+      vaultKey?.destroy();
+      userIdBytes.fillRange(0, userIdBytes.length, 0);
+    }
+  }
+
+  /// Generates a new Recovery Secret, User Master Key, and the bundle that
+  /// protects this vault's existing Vault Key with them, without persisting
+  /// anything. The caller uploads [PreparedRecovery.bundle] first and calls
+  /// [savePreparedRecovery] only once the server accepted it, so a failed
+  /// upload never leaves this device holding a secret the server doesn't.
+  Future<PreparedRecovery> prepareNewRecoverySecret({
+    required String userId,
+  }) async {
+    final vaultKey = await loadVaultKey();
+    if (vaultKey == null) {
+      throw StateError('This device does not have an unlocked vault key.');
+    }
+    final userIdBytes = uuidStringToBytes(userId);
+    final userMasterKey = SecretKeyData.random(
+      length: 32,
+      debugLabel: 'HomeBox User Master Key',
+    );
+    final recoverySecret = RecoverySecret.generate();
+    try {
+      final recoveryPackage = await RecoveryPackageCipher().create(
+        recoverySecret: recoverySecret,
+        userMasterKey: userMasterKey,
+        userId: userIdBytes,
+      );
+      final bundle = RecoveryBundle(
+        recoveryPackage: recoveryPackage,
+        wrappedVaultKey: await _wrapVaultKey(
+          userMasterKey,
+          vaultKey,
+          userIdBytes,
+        ),
+      );
+      return PreparedRecovery._(recoverySecret, bundle, userMasterKey);
+    } catch (_) {
+      recoverySecret.destroy();
+      userMasterKey.destroy();
+      rethrow;
+    } finally {
+      vaultKey.destroy();
+      userIdBytes.fillRange(0, userIdBytes.length, 0);
+    }
+  }
+
+  /// Persists the recovery material of a [prepareNewRecoverySecret] result
+  /// whose bundle the server has accepted.
+  Future<void> savePreparedRecovery(PreparedRecovery prepared) async {
+    await _persistSecretKey(_userMasterKeyStorageKey, prepared._userMasterKey);
+    await _storage.write(
+      _recoveryPackageStorageKey,
+      base64Encode(prepared.bundle.recoveryPackage.encode()),
+    );
+  }
+
+  /// Restores this account's vault on a clean device from the server-held
+  /// [bundle] and the user's [recoverySecret] (spec §10.12, ADR-013). The
+  /// Recovery Secret opens the User Master Key, which in turn unwraps the
+  /// Vault Key, so no other trusted device is needed. A wrong secret fails
+  /// AEAD authentication before anything is written.
+  Future<void> restoreVaultFromRecovery({
     required String userId,
     required RecoverySecret recoverySecret,
-    required RecoveryPackage recoveryPackage,
+    required RecoveryBundle bundle,
   }) async {
-    final userMasterKey = await RecoveryPackageCipher().restore(
-      recoverySecret: recoverySecret,
-      recoveryPackage: recoveryPackage,
-      userId: uuidStringToBytes(userId),
-    );
+    if (await exists()) {
+      throw StateError('A vault already exists on this device.');
+    }
+    final userIdBytes = uuidStringToBytes(userId);
+    SecretKey? userMasterKey;
+    SecretKey? vaultKey;
     try {
+      userMasterKey = await RecoveryPackageCipher().restore(
+        recoverySecret: recoverySecret,
+        recoveryPackage: bundle.recoveryPackage,
+        userId: userIdBytes,
+      );
+      vaultKey = await KeyEnvelopeCipher().unwrapKey(
+        wrappingKey: userMasterKey,
+        envelope: bundle.wrappedVaultKey,
+        scopeId: userIdBytes,
+        subjectId: userIdBytes,
+      );
       await _persistSecretKey(_userMasterKeyStorageKey, userMasterKey);
       await _storage.write(
         _recoveryPackageStorageKey,
-        base64Encode(recoveryPackage.encode()),
+        base64Encode(bundle.recoveryPackage.encode()),
       );
+      // Written last: [exists] reports a vault only once it is complete.
+      await _persistSecretKey(_vaultKeyStorageKey, vaultKey);
     } finally {
-      userMasterKey.destroy();
+      userMasterKey?.destroy();
+      vaultKey?.destroy();
+      userIdBytes.fillRange(0, userIdBytes.length, 0);
     }
   }
 
@@ -173,6 +274,19 @@ final class VaultKeyStore {
     await _storage.delete(_recoveryPackageStorageKey);
   }
 
+  Future<KeyEnvelope> _wrapVaultKey(
+    SecretKey userMasterKey,
+    SecretKey vaultKey,
+    Uint8List userIdBytes,
+  ) => KeyEnvelopeCipher().wrapKey(
+    wrappingKey: userMasterKey,
+    keyToWrap: vaultKey,
+    purpose: KeyEnvelopePurpose.vaultKey,
+    keyVersion: homeBoxPersonalVaultKeyVersion,
+    scopeId: userIdBytes,
+    subjectId: userIdBytes,
+  );
+
   Future<SecretKey?> _loadSecretKey(String storageKey) async {
     final encoded = await _storage.read(storageKey);
     if (encoded == null) return null;
@@ -191,5 +305,21 @@ final class VaultKeyStore {
     } finally {
       bytes.fillRange(0, bytes.length, 0);
     }
+  }
+}
+
+/// A new Recovery Secret and the bundle it protects, prepared by
+/// [VaultKeyStore.prepareNewRecoverySecret] but not yet persisted. Call
+/// [destroy] once the secret has been shown to the user.
+final class PreparedRecovery {
+  PreparedRecovery._(this.recoverySecret, this.bundle, this._userMasterKey);
+
+  final RecoverySecret recoverySecret;
+  final RecoveryBundle bundle;
+  final SecretKeyData _userMasterKey;
+
+  void destroy() {
+    recoverySecret.destroy();
+    _userMasterKey.destroy();
   }
 }

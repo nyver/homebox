@@ -38,3 +38,5 @@ sync:
 
 maintenance:
   orphan_blob_grace_hours: 168
+  max_file_versions: 10
+  version_retention_days: 30

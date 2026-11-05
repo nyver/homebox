@@ -1,9 +1,11 @@
-// Package deviceauth defines the canonical statement signed by a HomeBox
-// account identity when it authorizes an X25519 device key.
+// Package deviceauth defines the canonical statements signed by a HomeBox
+// account identity: authorizing an X25519 device key, and publishing the
+// account's encrypted recovery bundle.
 package deviceauth
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 
@@ -12,7 +14,10 @@ import (
 
 const SignatureVersion = 1
 
-var ErrInvalidCertificate = errors.New("invalid device key certificate")
+var (
+	ErrInvalidCertificate = errors.New("invalid device key certificate")
+	ErrInvalidSignature   = errors.New("invalid account identity signature")
+)
 
 // Statement returns the versioned, unambiguous bytes covered by the account
 // Ed25519 signature. UUIDs are encoded as 16 raw bytes so alternative textual
@@ -48,6 +53,35 @@ func Verify(accountPublicKey, signature []byte, userID, deviceID string, keyVers
 	statement, err := Statement(userID, deviceID, keyVersion, devicePublicKey)
 	if err != nil || !ed25519.Verify(ed25519.PublicKey(accountPublicKey), statement, signature) {
 		return ErrInvalidCertificate
+	}
+	return nil
+}
+
+// RecoveryBundleStatement returns the bytes an account identity signs to
+// publish an opaque recovery bundle. Binding the account ID stops a bundle
+// signed for one account from being accepted for another.
+func RecoveryBundleStatement(userID string, bundle []byte) ([]byte, error) {
+	userUUID, err := uuid.Parse(userID)
+	if err != nil || len(bundle) == 0 {
+		return nil, ErrInvalidSignature
+	}
+	digest := sha256.Sum256(bundle)
+	statement := make([]byte, 5+2+16+32)
+	copy(statement, "HBXRB")
+	binary.BigEndian.PutUint16(statement[5:7], SignatureVersion)
+	copy(statement[7:23], userUUID[:])
+	copy(statement[23:55], digest[:])
+	return statement, nil
+}
+
+// VerifyRecoveryBundle checks that accountPublicKey signed bundle for userID.
+func VerifyRecoveryBundle(accountPublicKey, signature []byte, userID string, bundle []byte) error {
+	if len(accountPublicKey) != ed25519.PublicKeySize || len(signature) != ed25519.SignatureSize {
+		return ErrInvalidSignature
+	}
+	statement, err := RecoveryBundleStatement(userID, bundle)
+	if err != nil || !ed25519.Verify(ed25519.PublicKey(accountPublicKey), statement, signature) {
+		return ErrInvalidSignature
 	}
 	return nil
 }

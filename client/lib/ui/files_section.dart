@@ -647,11 +647,15 @@ final class _FilesSectionState extends State<_FilesSection> {
     BuildContext context,
     FilesController controller,
     AndroidFileSaver saver,
-    FileEntry entry,
-  ) async {
+    FileEntry entry, {
+    Future<bool> Function(String path)? downloadTo,
+  }) async {
     final tempDir = await getTemporaryDirectory();
     final tempFile = File('${tempDir.path}/download_${entry.node.id}');
-    final downloaded = await controller.downloadFile(entry, tempFile.path);
+    final downloaded =
+        await (downloadTo ?? (path) => controller.downloadFile(entry, path))(
+          tempFile.path,
+        );
     if (!downloaded) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -703,6 +707,135 @@ final class _FilesSectionState extends State<_FilesSection> {
         ),
       );
     }
+  }
+
+  Future<void> _openTrash(BuildContext context) async {
+    final controller = widget.controller;
+    if (controller == null) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => _TrashPage(controller: controller),
+      ),
+    );
+  }
+
+  Future<void> _showVersionHistory(
+    BuildContext context,
+    FileEntry entry,
+  ) async {
+    final controller = widget.controller;
+    if (controller == null || entry.isDirectory) return;
+    final action = await showDialog<_VersionAction>(
+      context: context,
+      builder: (context) =>
+          _VersionHistoryDialog(controller: controller, entry: entry),
+    );
+    if (action == null || !context.mounted) return;
+    switch (action) {
+      case _SaveVersion(:final version):
+        await _saveFileVersion(context, controller, entry, version);
+      case _RestoreVersion(:final version):
+        await _restoreFileVersion(context, controller, entry, version);
+    }
+  }
+
+  Future<void> _saveFileVersion(
+    BuildContext context,
+    FilesController controller,
+    FileEntry entry,
+    FileVersionEntry version,
+  ) async {
+    final saver = widget.androidFileSaver;
+    if (saver != null) {
+      await _downloadFileWithAndroidSaveDialog(
+        context,
+        controller,
+        saver,
+        entry,
+        downloadTo: (path) =>
+            controller.downloadFileVersion(entry, version, path),
+      );
+      return;
+    }
+    final destination = await getSaveLocation(suggestedName: entry.name);
+    if (destination == null) return;
+    final ok = await controller.downloadFileVersion(
+      entry,
+      version,
+      destination.path,
+    );
+    if (ok) {
+      widget.onDownloadCompleted(
+        fileName: entry.name,
+        location: destination.path,
+      );
+    } else if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(controller.errorMessage ?? 'Download failed.')),
+      );
+    }
+  }
+
+  Future<void> _restoreFileVersion(
+    BuildContext context,
+    FilesController controller,
+    FileEntry entry,
+    FileVersionEntry version,
+  ) async {
+    final createdAt = version.createdAt;
+    final when = createdAt == null
+        ? ''
+        : ' (${_formatLocalDateTime(createdAt)})';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          _localized(
+            context,
+            en: 'Restore this version?',
+            ru: 'Восстановить эту версию?',
+          ),
+        ),
+        content: Text(
+          _localized(
+            context,
+            en: 'The version$when becomes the current content of "${entry.name}". The content it replaces stays in the version history.',
+            ru: 'Версия$when станет текущим содержимым «${entry.name}». Заменённое содержимое останется в истории версий.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_localized(context, en: 'Restore', ru: 'Восстановить')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final ok = await controller.restoreFileVersion(entry, version);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? _localized(
+                  context,
+                  en: 'Restored the selected version of "${entry.name}".',
+                  ru: 'Выбранная версия «${entry.name}» восстановлена.',
+                )
+              : controller.errorMessage ??
+                    _localized(
+                      context,
+                      en: 'Could not restore this version.',
+                      ru: 'Не удалось восстановить версию.',
+                    ),
+        ),
+      ),
+    );
   }
 
   Future<void> _renameEntry(BuildContext context, FileEntry entry) async {
@@ -849,9 +982,7 @@ final class _FilesSectionState extends State<_FilesSection> {
                 title: Text(entry.name),
                 subtitle: entry.isDirectory
                     ? null
-                    : Text(
-                        _fileEntrySubtitle(entry, controller.entriesAsOf),
-                      ),
+                    : Text(_fileEntrySubtitle(entry, controller.entriesAsOf)),
                 onTap: entry.isDirectory
                     ? () => controller.openFolder(entry)
                     : () => _openOrDownloadFile(context, entry),
@@ -862,6 +993,7 @@ final class _FilesSectionState extends State<_FilesSection> {
                     'open_file_location' => _openFileLocation(context, entry),
                     'share' => _shareFile(context, entry),
                     'replace' => _replaceContent(context, entry),
+                    'versions' => _showVersionHistory(context, entry),
                     'rename' => _renameEntry(context, entry),
                     'delete' => _deleteEntry(context, entry),
                     _ => null,
@@ -894,6 +1026,17 @@ final class _FilesSectionState extends State<_FilesSection> {
                       const PopupMenuItem(
                         value: 'replace',
                         child: Text('Replace content…'),
+                      ),
+                    if (!entry.isDirectory)
+                      PopupMenuItem(
+                        value: 'versions',
+                        child: Text(
+                          _localized(
+                            context,
+                            en: 'Version history…',
+                            ru: 'История версий…',
+                          ),
+                        ),
                       ),
                     const PopupMenuItem(value: 'rename', child: Text('Rename')),
                     const PopupMenuItem(
@@ -933,6 +1076,11 @@ final class _FilesSectionState extends State<_FilesSection> {
                           ),
                         )
                         .toList(growable: false),
+                  ),
+                  IconButton(
+                    onPressed: () => _openTrash(context),
+                    icon: const Icon(Icons.delete_outline),
+                    tooltip: _localized(context, en: 'Trash', ru: 'Корзина'),
                   ),
                   if (controller.canGoUp)
                     Row(

@@ -38,7 +38,7 @@ func TestRunUsesTwoPassGracePeriodForUnreferencedAndOrphanBlobs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(storage, filepath.FromSlash(orphanPath)), []byte("orphan ciphertext"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	service, err := New(db, storage, time.Hour, 72*time.Hour)
+	service, err := New(db, storage, testPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestRunCleansExpiredControlRecordsAndUploadCiphertext(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(uploadDir, "0.chunk"), []byte("temporary ciphertext"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	service, err := New(db, storage, time.Hour, 72*time.Hour)
+	service, err := New(db, storage, testPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestRunPermanentlyDeletesExpiredTrashSubtree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service, err := New(db, storage, time.Hour, 72*time.Hour)
+	service, err := New(db, storage, testPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,5 +247,105 @@ func TestRunPermanentlyDeletesExpiredTrashSubtree(t *testing.T) {
 	assertCount("SELECT COUNT(*) FROM sync_changes WHERE operation='PURGE' AND node_id IN (?,?)", 2, rootID, childID)
 	if _, err := os.Stat(uploadDir); !os.IsNotExist(err) {
 		t.Fatalf("expired Trash upload directory still exists: %v", err)
+	}
+}
+
+func testPolicy() Policy {
+	return Policy{
+		OrphanBlobGrace:  time.Hour,
+		TrashRetention:   72 * time.Hour,
+		MaxFileVersions:  10,
+		VersionRetention: 30 * 24 * time.Hour,
+	}
+}
+
+func TestRunPrunesOldNonCurrentFileVersions(t *testing.T) {
+	storage := t.TempDir()
+	db, err := database.Open(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	userID, deviceID := uuid.NewString(), uuid.NewString()
+	created := "2025-12-01T00:00:00Z"
+	if _, err := db.Exec(`INSERT INTO users (id,username,username_norm,password_hash,role,status,created_at,updated_at)
+		VALUES (?,'owner','owner','hash','USER','ACTIVE',?,?)`, userID, created, created); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO devices (id,user_id,name,platform,e2ee_public_key,e2ee_key_version,created_at,last_seen_at)
+		VALUES (?,?,'device','OTHER',X'01',1,?,?)`, deviceID, userID, created, created); err != nil {
+		t.Fatal(err)
+	}
+	insertNode := func(nodeID, currentVersionID string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO nodes (id,owner_id,parent_id,node_type,metadata_ciphertext,metadata_key_version,current_version_id,revision,created_at,updated_at)
+			VALUES (?,?,NULL,'FILE',X'01',1,?,1,?,?)`, nodeID, userID, currentVersionID, created, created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blobOf := map[string]string{}
+	insertVersion := func(nodeID, versionID, createdAt string) {
+		t.Helper()
+		blobID := uuid.NewString()
+		blobOf[versionID] = blobID
+		if _, err := db.Exec(`INSERT INTO blobs (id,ciphertext_size,storage_rel_path,ciphertext_sha256,format_version,chunk_count,created_at)
+			VALUES (?,1,?,'digest',1,1,?)`, blobID, "blobs/"+blobID+".hbxblob", createdAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO file_versions (id,node_id,blob_id,e2ee_header,wrapped_file_key,key_scope_id,key_version,created_at,created_by_device_id,revision)
+			VALUES (?,?,?,X'01',X'01',?,1,?,?,1)`, versionID, nodeID, blobID, userID, createdAt, deviceID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The current version is deliberately the oldest: a restore or a clock
+	// skew can make it so, and it must never be pruned.
+	busyFile, current := uuid.NewString(), uuid.NewString()
+	newest, second, third, ancient := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	insertNode(busyFile, current)
+	insertVersion(busyFile, current, "2025-12-15T00:00:00Z")
+	insertVersion(busyFile, newest, "2026-03-01T00:00:00Z")
+	insertVersion(busyFile, second, "2026-02-28T00:00:00Z")
+	insertVersion(busyFile, third, "2026-02-27T00:00:00Z")
+	insertVersion(busyFile, ancient, "2025-12-01T00:00:00Z")
+
+	// Below the count limit, but older than the retention period.
+	quietFile, quietCurrent, quietOld := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	insertNode(quietFile, quietCurrent)
+	insertVersion(quietFile, quietCurrent, "2026-03-01T00:00:00Z")
+	insertVersion(quietFile, quietOld, "2026-01-15T00:00:00Z")
+
+	policy := testPolicy()
+	policy.MaxFileVersions = 3
+	service, err := New(db, storage, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC) }
+	result, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PrunedFileVersions != 3 {
+		t.Fatalf("pruned file versions = %d, want 3", result.PrunedFileVersions)
+	}
+	for _, kept := range []string{current, newest, second, quietCurrent} {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM file_versions WHERE id=?", kept).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("version %s was pruned but must be kept", kept)
+		}
+	}
+	for _, pruned := range []string{third, ancient, quietOld} {
+		var marked int
+		if err := db.QueryRow("SELECT COUNT(*) FROM gc_blob_candidates WHERE blob_id=?", blobOf[pruned]).Scan(&marked); err != nil {
+			t.Fatal(err)
+		}
+		if marked != 1 {
+			t.Fatalf("ciphertext of pruned version %s did not enter blob GC", pruned)
+		}
 	}
 }

@@ -6,12 +6,15 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../core/e2ee/file_cipher.dart' show homeBoxChunkMacLength;
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
+import '../../core/e2ee/portable_name.dart';
 import '../../core/e2ee/vault_key_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/storage/pending_operations_store.dart';
@@ -55,6 +58,33 @@ final class FileEntry {
 
   bool get isDirectory => node.isDirectory;
   String get name => metadata.fileName;
+}
+
+/// A soft-deleted file or folder that can still be restored from Trash.
+final class TrashEntry {
+  const TrashEntry({required this.entry, required this.location});
+
+  final FileEntry entry;
+
+  /// The readable path of the folder it was deleted from; empty for the root.
+  final String location;
+}
+
+/// One stored version of a file, as listed by [FilesController.fileVersions].
+final class FileVersionEntry {
+  const FileVersionEntry({
+    required this.id,
+    required this.isCurrent,
+    this.createdAt,
+    this.plaintextSize,
+  });
+
+  final String id;
+  final bool isCurrent;
+  final DateTime? createdAt;
+
+  /// Derived from the ciphertext size: every chunk adds one AEAD tag.
+  final int? plaintextSize;
 }
 
 /// The outcome of one user-initiated batch of file uploads.
@@ -755,7 +785,11 @@ final class FilesController extends ChangeNotifier {
     );
   }
 
-  Future<bool> _replaceFileContent(FileEntry entry, String localPath) async {
+  Future<bool> _replaceFileContent(
+    FileEntry entry,
+    String localPath, {
+    void Function(double progress)? onProgress,
+  }) async {
     try {
       final ctx = await _requireContext();
       if (ctx == null) return false;
@@ -793,7 +827,7 @@ final class FilesController extends ChangeNotifier {
         plaintextLength: plaintextLength,
         expectedPlaintextSha256: plaintextHash,
         metadataCiphertext: metadataCiphertext,
-        onProgress: _setProgress,
+        onProgress: onProgress ?? _setProgress,
       );
       // Completion publishes the new version and encrypted metadata in one
       // server transaction, so the content can never retain the old hash.
@@ -847,6 +881,286 @@ final class FilesController extends ChangeNotifier {
       notifyListeners();
       return false;
     }
+  }
+
+  /// Lists this account's Trash from the local cache, most recently deleted
+  /// first, so it also works offline. Like [refresh], an item this device
+  /// cannot decrypt is skipped rather than failing the whole list.
+  Future<List<TrashEntry>> trashEntries() async {
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      notifyListeners();
+      return const [];
+    }
+    final folderNames = <String, String?>{};
+    final result = <TrashEntry>[];
+    for (final node in _syncEngine.nodeCache.listTrash()) {
+      try {
+        final metadata = await _decryptMetadata(node, ctx);
+        result.add(
+          TrashEntry(
+            entry: FileEntry(node: node, metadata: metadata),
+            location: await _readablePath(node.parentId, ctx, folderNames),
+          ),
+        );
+      } catch (_) {
+        // Broad on purpose, as in refresh(): see its comment.
+      }
+    }
+    return result;
+  }
+
+  /// Restores [entry] from Trash through the durable outbox, together with
+  /// any deleted folders above it, so the item is reachable again. Refuses
+  /// when a live item with the same name now occupies one of those places:
+  /// two same-named siblings could not both be mirrored to a sync folder.
+  Future<bool> restoreFromTrash(FileEntry entry) async {
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      notifyListeners();
+      return false;
+    }
+    try {
+      final cache = _syncEngine.nodeCache;
+      // Collected innermost first and restored outermost first, so each
+      // node lands in a parent that is already live again.
+      final deletedChain = <LocalNode>[];
+      final visited = <String>{};
+      LocalNode? node = cache.getById(entry.node.id) ?? entry.node;
+      while (node != null && visited.add(node.id)) {
+        if (node.isDeleted) deletedChain.add(node);
+        final parentId = node.parentId;
+        node = parentId == null ? null : cache.getById(parentId);
+      }
+      final toRestore = deletedChain.reversed.toList(growable: false);
+      for (final deleted in toRestore) {
+        await _ensureNameIsFree(deleted, ctx);
+      }
+      final now = DateTime.now().toUtc();
+      for (final deleted in toRestore) {
+        cache.upsert(
+          LocalNode(
+            id: deleted.id,
+            parentId: deleted.parentId,
+            nodeType: deleted.nodeType,
+            metadataCiphertext: deleted.metadataCiphertext,
+            metadataKeyVersion: deleted.metadataKeyVersion,
+            currentVersionId: deleted.currentVersionId,
+            revision: deleted.revision,
+            createdAt: deleted.createdAt,
+            updatedAt: now,
+            pendingCreate: deleted.pendingCreate,
+          ),
+        );
+        _syncEngine.pendingOperations.enqueue(
+          PendingOperation(
+            id: generateUuidV4(),
+            operationId: generateUuidV4(),
+            type: PendingOperationType.restoreNode,
+            nodeId: deleted.id,
+            payload: const {},
+            createdAt: now,
+            retryCount: 0,
+            status: PendingOperationStatus.pending,
+          ),
+        );
+      }
+      unawaited(_syncEngine.runOnce());
+      await refresh();
+      return true;
+    } catch (e) {
+      // Broad on purpose, as in refresh(): see its comment.
+      _errorMessage = describeError(e);
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<void> _ensureNameIsFree(LocalNode node, _UploadContext ctx) async {
+    final name = (await _decryptMetadata(node, ctx)).fileName;
+    final key = PortableName.comparisonKey(name);
+    for (final sibling in _syncEngine.nodeCache.listChildren(node.parentId)) {
+      if (sibling.id == node.id) continue;
+      final String siblingName;
+      try {
+        siblingName = (await _decryptMetadata(sibling, ctx)).fileName;
+      } catch (_) {
+        continue;
+      }
+      if (PortableName.comparisonKey(siblingName) == key) {
+        throw StateError(
+          '"$name" cannot be restored because an item with the same name '
+          'already exists there. Rename or move that item first.',
+        );
+      }
+    }
+  }
+
+  /// The readable path of [folderId] such as "Documents/Taxes", decrypting
+  /// each ancestor's name at most once per [names] cache.
+  Future<String> _readablePath(
+    String? folderId,
+    _UploadContext ctx,
+    Map<String, String?> names,
+  ) async {
+    final segments = <String>[];
+    final visited = <String>{};
+    var id = folderId;
+    while (id != null && visited.add(id)) {
+      final node = _syncEngine.nodeCache.getById(id);
+      if (node == null) break;
+      if (!names.containsKey(id)) {
+        try {
+          names[id] = (await _decryptMetadata(node, ctx)).fileName;
+        } catch (_) {
+          names[id] = null;
+        }
+      }
+      segments.add(names[id] ?? '…');
+      id = node.parentId;
+    }
+    return segments.reversed.join('/');
+  }
+
+  /// Lists every stored version of [entry], newest first (spec §27.1).
+  /// Returns null and sets [errorMessage] when the server cannot be reached.
+  Future<List<FileVersionEntry>?> fileVersions(FileEntry entry) async {
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      notifyListeners();
+      return null;
+    }
+    try {
+      final versions = await ctx.api.listFileVersions(
+        ctx.accessToken,
+        entry.node.id,
+      );
+      // The server's node, not the local cache: another device may have
+      // replaced the content since the last sync pass.
+      final node = await ctx.api.getNode(ctx.accessToken, entry.node.id);
+      return [
+        for (final version in versions)
+          FileVersionEntry(
+            id: version.id,
+            isCurrent: version.id == node.currentVersionId,
+            createdAt: version.createdAt,
+            plaintextSize: switch (version.ciphertextSize) {
+              null => null,
+              final size => math.max(
+                0,
+                size - version.chunkCount * homeBoxChunkMacLength,
+              ),
+            },
+          ),
+      ];
+    } catch (e) {
+      // Broad on purpose, as in refresh(): see its comment.
+      _errorMessage = describeError(e);
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Decrypts one specific [version] of [entry] to [destinationPath]. Only
+  /// the current version has a plaintext hash in the encrypted metadata;
+  /// older versions rely on per-chunk AEAD, which binds every chunk to its
+  /// version ID, its position, and the total chunk count, so a truncated or
+  /// substituted blob still fails to decrypt.
+  Future<bool> downloadFileVersion(
+    FileEntry entry,
+    FileVersionEntry version,
+    String destinationPath,
+  ) => _runTransfer(FileTransferDirection.download, () async {
+    try {
+      await _downloadVersionTo(entry, version, destinationPath, _setProgress);
+      return true;
+    } catch (e) {
+      // Broad on purpose, as in refresh(): see its comment.
+      _errorMessage = describeError(e);
+      notifyListeners();
+      return false;
+    }
+  });
+
+  /// Makes [version] the current content of [entry] again by uploading its
+  /// decrypted bytes as a new version (spec §27.1: a restore never rewrites
+  /// history), so the version it replaces stays in the history too.
+  Future<bool> restoreFileVersion(FileEntry entry, FileVersionEntry version) {
+    if (entry.isDirectory || version.isCurrent) return Future.value(false);
+    return _runTransfer(FileTransferDirection.upload, () async {
+      Directory? workDirectory;
+      try {
+        workDirectory = await Directory.systemTemp.createTemp(
+          'homebox-restore-',
+        );
+        final restoredPath =
+            '${workDirectory.path}${Platform.pathSeparator}${entry.name}';
+        try {
+          await _downloadVersionTo(
+            entry,
+            version,
+            restoredPath,
+            (progress) => _setProgress(progress / 2),
+          );
+        } catch (e) {
+          // Broad on purpose, as in refresh(): see its comment.
+          _errorMessage = describeError(e);
+          notifyListeners();
+          return false;
+        }
+        // The newest cached node and its own metadata, so a rename synced
+        // since the dialog opened is kept instead of reverted by the upload.
+        final latest = await _latestEntry(entry);
+        return await _replaceFileContent(
+          latest,
+          restoredPath,
+          onProgress: (progress) => _setProgress(0.5 + progress / 2),
+        );
+      } finally {
+        try {
+          await workDirectory?.delete(recursive: true);
+        } on FileSystemException {
+          // The OS clears a leftover temp copy with its temp directory.
+        }
+      }
+    });
+  }
+
+  Future<FileEntry> _latestEntry(FileEntry entry) async {
+    final latest = _syncEngine.nodeCache.getById(entry.node.id);
+    final ctx = await _requireContext();
+    if (latest == null || ctx == null) return entry;
+    return FileEntry(
+      node: latest,
+      metadata: await _decryptMetadata(latest, ctx),
+    );
+  }
+
+  Future<void> _downloadVersionTo(
+    FileEntry entry,
+    FileVersionEntry version,
+    String destinationPath,
+    void Function(double progress) onProgress,
+  ) async {
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      throw StateError(_errorMessage ?? 'Sign in and unlock the vault first.');
+    }
+    await downloadAndDecryptFileToPath(
+      api: ctx.api,
+      accessToken: ctx.accessToken,
+      vaultKey: ctx.vaultKey,
+      vaultId: ctx.vaultId,
+      nodeId: entry.node.id,
+      expectedVersionId: version.id,
+      destinationPath: destinationPath,
+      // The metadata hash describes exactly the version the cached node
+      // points at; any other version is authenticated by AEAD alone.
+      expectedPlaintextSha256: version.id == entry.node.currentVersionId
+          ? entry.metadata.plaintextSha256
+          : null,
+      onProgress: onProgress,
+    );
   }
 
   Future<Uint8List?> _downloadImagePreview(FileEntry entry) async {

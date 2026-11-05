@@ -277,14 +277,16 @@ type FileVersion struct {
 	// AEAD tag, so knowing the count is enough to infer the last chunk's
 	// length from the total blob size.
 	ChunkCount int
+	// CiphertextSize is the stored blob size, which the server knows anyway.
+	CiphertextSize int64
 }
 
 // ListVersions returns every version of a node, newest first. Callers must
 // authorize access to the owning node themselves first (see
 // internal/nodes.Service.Get) — this performs no authorization of its own.
 func (s *Service) ListVersions(ctx context.Context, nodeID string) ([]FileVersion, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT f.id,f.node_id,f.blob_id,f.e2ee_header,f.wrapped_file_key,f.key_scope_id,f.key_version,f.created_at,f.created_by_device_id,f.revision,b.chunk_count
-		FROM file_versions f JOIN blobs b ON b.id = f.blob_id WHERE f.node_id = ? ORDER BY f.created_at DESC`, nodeID)
+	rows, err := s.db.QueryContext(ctx, `SELECT f.id,f.node_id,f.blob_id,f.e2ee_header,f.wrapped_file_key,f.key_scope_id,f.key_version,f.created_at,f.created_by_device_id,f.revision,b.chunk_count,b.ciphertext_size
+		FROM file_versions f JOIN blobs b ON b.id = f.blob_id WHERE f.node_id = ? ORDER BY f.created_at DESC, f.id DESC`, nodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +295,7 @@ func (s *Service) ListVersions(ctx context.Context, nodeID string) ([]FileVersio
 	for rows.Next() {
 		var v FileVersion
 		var createdAt string
-		if err := rows.Scan(&v.ID, &v.NodeID, &v.BlobID, &v.E2EEHeader, &v.WrappedFileKey, &v.KeyScopeID, &v.KeyVersion, &createdAt, &v.CreatedByDeviceID, &v.Revision, &v.ChunkCount); err != nil {
+		if err := rows.Scan(&v.ID, &v.NodeID, &v.BlobID, &v.E2EEHeader, &v.WrappedFileKey, &v.KeyScopeID, &v.KeyVersion, &createdAt, &v.CreatedByDeviceID, &v.Revision, &v.ChunkCount, &v.CiphertextSize); err != nil {
 			return nil, err
 		}
 		if v.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {

@@ -251,6 +251,8 @@ final class FileVersionInfo {
     required this.keyVersion,
     required this.revision,
     required this.chunkCount,
+    this.createdAt,
+    this.ciphertextSize,
   });
 
   final String id;
@@ -266,6 +268,26 @@ final class FileVersionInfo {
   /// individual frames on decrypt — every chunk but the last is exactly
   /// the fixed plaintext chunk size (ADR-010) plus its AEAD tag.
   final int chunkCount;
+
+  /// When this version was uploaded. Null only from a server that predates
+  /// the field.
+  final DateTime? createdAt;
+
+  /// The stored ciphertext size; the plaintext is slightly smaller.
+  final int? ciphertextSize;
+}
+
+/// The account's opaque recovery bundle as stored by the server.
+final class RecoveryBundleRecord {
+  const RecoveryBundleRecord({
+    required this.bundle,
+    required this.updatedAt,
+    required this.updatedByDeviceId,
+  });
+
+  final Uint8List bundle;
+  final DateTime updatedAt;
+  final String updatedByDeviceId;
 }
 
 final class UploadSessionInfo {
@@ -519,6 +541,44 @@ final class HomeBoxApiClient {
       ),
     );
   }
+
+  /// Returns this account's recovery bundle, or null when none is stored.
+  Future<RecoveryBundleRecord?> getRecoveryBundle(String accessToken) async {
+    final Map<String, dynamic> json;
+    try {
+      json = await _getJson(
+        '/api/v1/users/me/recovery',
+        accessToken: accessToken,
+      );
+    } on HomeBoxApiException catch (e) {
+      if (e.statusCode == HttpStatus.notFound) return null;
+      rethrow;
+    }
+    return RecoveryBundleRecord(
+      bundle: base64Decode(json['bundle'] as String),
+      updatedAt: DateTime.parse(json['updatedAt'] as String),
+      updatedByDeviceId: json['updatedByDeviceId'] as String,
+    );
+  }
+
+  /// Stores or replaces this account's recovery bundle. [signature] is the
+  /// account identity's signature over the bundle (see
+  /// `AccountIdentity.signRecoveryBundle`).
+  Future<void> putRecoveryBundle(
+    String accessToken, {
+    required Uint8List bundle,
+    required Uint8List accountIdentityPublicKey,
+    required Uint8List signature,
+  }) => _send(
+    'PUT',
+    '/api/v1/users/me/recovery',
+    accessToken: accessToken,
+    body: {
+      'bundle': base64Encode(bundle),
+      'accountIdentityPublicKey': base64Encode(accountIdentityPublicKey),
+      'signature': base64Encode(signature),
+    },
+  );
 
   // --- nodes ---
 
@@ -840,6 +900,10 @@ final class HomeBoxApiClient {
             keyVersion: e['keyVersion'] as int,
             revision: e['revision'] as int,
             chunkCount: e['chunkCount'] as int,
+            createdAt: e['createdAt'] == null
+                ? null
+                : DateTime.parse(e['createdAt'] as String),
+            ciphertextSize: e['ciphertextSize'] as int?,
           );
         })
         .toList(growable: false);

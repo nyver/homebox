@@ -20,6 +20,8 @@ var migrations = []migration{
 	{7, "trash_retention_index", migration0007TrashRetentionIndex},
 	{8, "authenticated_device_keys", migration0008AuthenticatedDeviceKeys},
 	{9, "hot_path_indexes_and_token_rotation", migration0009HotPathIndexesAndTokenRotation},
+	{10, "recovery_bundles", migration0010RecoveryBundles},
+	{11, "file_version_retention_index", migration0011FileVersionRetentionIndex},
 }
 
 const migration0001InitialSchema = `
@@ -188,4 +190,24 @@ CREATE INDEX IF NOT EXISTS idx_refresh_tokens_device ON refresh_tokens(device_id
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_blob ON upload_sessions(blob_id);
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_file_version ON upload_sessions(file_version_id);
 ALTER TABLE refresh_tokens ADD COLUMN rotated_to TEXT;
+`
+
+// migration0010RecoveryBundles stores each account's client-encrypted
+// recovery bundle (its Recovery Package plus the Vault Key wrapped by the
+// User Master Key) so a Recovery Secret alone can restore a clean device.
+// The bundle is opaque: decrypting it requires the Recovery Secret, which
+// never reaches the server. The account-identity signature lets the server
+// refuse a replacement from a session that does not hold the Vault Key.
+const migration0010RecoveryBundles = `
+CREATE TABLE IF NOT EXISTS recovery_bundles (
+  user_id TEXT PRIMARY KEY REFERENCES users(id), bundle BLOB NOT NULL,
+  account_identity_public_key BLOB NOT NULL, signature BLOB NOT NULL,
+  updated_at TEXT NOT NULL, updated_by_device_id TEXT NOT NULL REFERENCES devices(id)
+);
+`
+
+// migration0011FileVersionRetentionIndex keeps the per-file version
+// retention scan and the version-history listing ordered by an index.
+const migration0011FileVersionRetentionIndex = `
+CREATE INDEX IF NOT EXISTS idx_file_versions_node_created ON file_versions(node_id, created_at);
 `

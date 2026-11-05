@@ -218,6 +218,7 @@ type fileVersionResponse struct {
 	CreatedByDeviceID string `json:"createdByDeviceId"`
 	Revision          int64  `json:"revision"`
 	ChunkCount        int    `json:"chunkCount"`
+	CiphertextSize    int64  `json:"ciphertextSize"`
 }
 
 // listFileVersions returns every encrypted version descriptor for a node,
@@ -250,6 +251,7 @@ func (a *API) listFileVersions(w http.ResponseWriter, r *http.Request) {
 			WrappedFileKey: base64.StdEncoding.EncodeToString(v.WrappedFileKey), KeyScopeID: v.KeyScopeID,
 			KeyVersion: v.KeyVersion, CreatedAt: v.CreatedAt.Format(time.RFC3339Nano),
 			CreatedByDeviceID: v.CreatedByDeviceID, Revision: v.Revision, ChunkCount: v.ChunkCount,
+			CiphertextSize: v.CiphertextSize,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

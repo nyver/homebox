@@ -21,28 +21,44 @@ type Result struct {
 	ExpiredRefreshTokens int64
 	ExpiredOperations    int64
 	ExpiredTrashItems    int
+	PrunedFileVersions   int64
 	UnreferencedBlobs    int
 	OrphanBlobFiles      int
 }
 
-type Service struct {
-	db             *sql.DB
-	storagePath    string
-	gracePeriod    time.Duration
-	trashRetention time.Duration
-	now            func() time.Time
+// Policy configures how long maintenance keeps reclaimable server state.
+type Policy struct {
+	// OrphanBlobGrace is how long ciphertext must stay unreachable before
+	// a second pass may delete it.
+	OrphanBlobGrace time.Duration
+	// TrashRetention is how long a soft-deleted node stays restorable.
+	TrashRetention time.Duration
+	// MaxFileVersions bounds the versions kept per file, current included.
+	MaxFileVersions int
+	// VersionRetention removes non-current versions older than this even
+	// when fewer than MaxFileVersions exist.
+	VersionRetention time.Duration
 }
 
-func New(db *sql.DB, storagePath string, gracePeriod, trashRetention time.Duration) (*Service, error) {
-	if db == nil || storagePath == "" || gracePeriod <= 0 || trashRetention <= 0 {
-		return nil, errors.New("database, storage path, positive grace period, and positive Trash retention are required")
+type Service struct {
+	db          *sql.DB
+	storagePath string
+	policy      Policy
+	now         func() time.Time
+}
+
+func New(db *sql.DB, storagePath string, policy Policy) (*Service, error) {
+	if db == nil || storagePath == "" {
+		return nil, errors.New("database and storage path are required")
+	}
+	if policy.OrphanBlobGrace <= 0 || policy.TrashRetention <= 0 || policy.MaxFileVersions < 1 || policy.VersionRetention <= 0 {
+		return nil, errors.New("maintenance policy durations and version limit must be positive")
 	}
 	return &Service{
-		db:             db,
-		storagePath:    storagePath,
-		gracePeriod:    gracePeriod,
-		trashRetention: trashRetention,
-		now:            time.Now,
+		db:          db,
+		storagePath: storagePath,
+		policy:      policy,
+		now:         time.Now,
 	}, nil
 }
 
@@ -65,6 +81,9 @@ func (s *Service) Run(ctx context.Context) (Result, error) {
 		return Result{}, err
 	}
 	result.ExpiredTrashItems = trashItems
+	if result.PrunedFileVersions, err = s.pruneFileVersions(ctx, now); err != nil {
+		return Result{}, err
+	}
 	unreferenced, err := s.collectUnreferencedBlobs(ctx, now)
 	if err != nil {
 		return Result{}, err
@@ -88,7 +107,7 @@ const trashSubtreeCTE = `WITH RECURSIVE subtree(id,owner_id) AS (
 // complete subtree in one transaction. Blob rows deliberately remain: once
 // their file versions are gone, the existing two-pass GC safely reclaims them.
 func (s *Service) cleanupExpiredTrash(ctx context.Context, now time.Time) (int, error) {
-	cutoff := now.Add(-s.trashRetention).Format(time.RFC3339Nano)
+	cutoff := now.Add(-s.policy.TrashRetention).Format(time.RFC3339Nano)
 	rows, err := s.db.QueryContext(ctx, "SELECT id FROM nodes WHERE deleted_at <= ? ORDER BY deleted_at", cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("list expired Trash entries: %w", err)
@@ -196,6 +215,26 @@ func (s *Service) cleanupExpiredTrash(ctx context.Context, now time.Time) (int, 
 	return deleted, nil
 }
 
+// pruneFileVersions applies the version retention policy (spec §27.1). A
+// file's current version is never a candidate; among the others, the newest
+// MaxFileVersions-1 are kept unless they are older than VersionRetention.
+// Only version records are removed here: their ciphertext then becomes
+// unreferenced and goes through the same two-pass blob GC as Trash purges.
+func (s *Service) pruneFileVersions(ctx context.Context, now time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM file_versions WHERE id IN (
+		SELECT id FROM (
+			SELECT f.id, f.created_at,
+				ROW_NUMBER() OVER (PARTITION BY f.node_id ORDER BY f.created_at DESC, f.id DESC) AS older_rank
+			FROM file_versions f JOIN nodes n ON n.id = f.node_id
+			WHERE n.current_version_id IS NOT NULL AND f.id != n.current_version_id
+		) WHERE older_rank >= ? OR created_at < ?
+	)`, s.policy.MaxFileVersions, now.Add(-s.policy.VersionRetention).Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("prune old file versions: %w", err)
+	}
+	return result.RowsAffected()
+}
+
 func (s *Service) cleanupExpired(ctx context.Context, now time.Time) (Result, error) {
 	result := Result{}
 	var err error
@@ -300,7 +339,7 @@ func (s *Service) collectUnreferencedBlobs(ctx context.Context, now time.Time) (
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT c.blob_id,b.storage_rel_path FROM gc_blob_candidates c
 		JOIN blobs b ON b.id=c.blob_id
-		WHERE c.marked_at <= ? AND NOT EXISTS (SELECT 1 FROM file_versions f WHERE f.blob_id=b.id)`, now.Add(-s.gracePeriod).Format(time.RFC3339Nano))
+		WHERE c.marked_at <= ? AND NOT EXISTS (SELECT 1 FROM file_versions f WHERE f.blob_id=b.id)`, now.Add(-s.policy.OrphanBlobGrace).Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, fmt.Errorf("list eligible blob candidates: %w", err)
 	}
@@ -385,7 +424,7 @@ func (s *Service) collectOrphanBlobFiles(ctx context.Context, now time.Time) (in
 			return 0, fmt.Errorf("mark orphan ciphertext blob: %w", err)
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT storage_rel_path FROM gc_orphan_blob_files WHERE marked_at <= ?", now.Add(-s.gracePeriod).Format(time.RFC3339Nano))
+	rows, err := s.db.QueryContext(ctx, "SELECT storage_rel_path FROM gc_orphan_blob_files WHERE marked_at <= ?", now.Add(-s.policy.OrphanBlobGrace).Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}

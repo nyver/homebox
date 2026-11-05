@@ -32,9 +32,11 @@ import 'features/syncfolder/local_folder_uploader.dart';
 import 'features/syncfolder/sync_folder_materializer.dart';
 import 'features/syncfolder/sync_folder_store.dart';
 import 'features/syncfolder/sync_folder_watcher.dart';
+import 'features/vault/recovery_controller.dart';
 import 'features/vault/vault_setup_controller.dart';
 import 'core/transport/homebox_api_client.dart' as transport;
 
+part 'ui/file_history.dart';
 part 'ui/files_section.dart';
 part 'ui/settings_section.dart';
 part 'ui/shell_widgets.dart';
@@ -166,6 +168,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   late final ServerConnectionController _serverConnectionController;
   late final VaultKeyStore _vaultKeyStore;
   late final VaultSetupController _vaultSetupController;
+  late final RecoveryController _recoveryController;
   late final SyncFolderStore _syncFolderStore;
   late final SyncFolderWatcher _syncFolderWatcher;
   late final CameraPhotoPicker _cameraPhotoPicker;
@@ -210,6 +213,10 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         ServerConnectionController(deviceIdentityStore: _deviceIdentityStore);
     _vaultKeyStore = widget.vaultKeyStore ?? VaultKeyStore();
     _vaultSetupController = VaultSetupController(_vaultKeyStore);
+    _recoveryController = RecoveryController(
+      vaultKeyStore: _vaultKeyStore,
+      serverConnection: _serverConnectionController,
+    );
     _deviceProvisioningController = DeviceProvisioningController(
       deviceIdentityStore: _deviceIdentityStore,
       vaultKeyStore: _vaultKeyStore,
@@ -689,6 +696,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _syncFolderWatcher.dispose();
     _syncEngine?.dispose();
     _vaultSetupController.dispose();
+    _recoveryController.dispose();
     _deviceProvisioningController.dispose();
     _deviceSetupController.dispose();
     _serverConnectionController.dispose();
@@ -834,6 +842,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       deviceProvisioningController: _deviceProvisioningController,
       serverConnectionController: _serverConnectionController,
       vaultSetupController: _vaultSetupController,
+      recoveryController: _recoveryController,
       onVaultProvisioned: _onVaultProvisioned,
       filesController: _filesController,
       syncEngine: _syncEngine,

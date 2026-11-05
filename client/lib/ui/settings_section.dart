@@ -6,6 +6,7 @@ class _SettingsSection extends StatelessWidget {
     required this.deviceProvisioningController,
     required this.serverConnectionController,
     required this.vaultSetupController,
+    required this.recoveryController,
     required this.onVaultProvisioned,
     required this.localeController,
   });
@@ -14,6 +15,7 @@ class _SettingsSection extends StatelessWidget {
   final DeviceProvisioningController deviceProvisioningController;
   final ServerConnectionController serverConnectionController;
   final VaultSetupController vaultSetupController;
+  final RecoveryController recoveryController;
   final Future<void> Function() onVaultProvisioned;
   final AppLocaleController localeController;
 
@@ -46,6 +48,13 @@ class _SettingsSection extends StatelessWidget {
           controller: vaultSetupController,
           serverConnectionController: serverConnectionController,
           deviceProvisioningController: deviceProvisioningController,
+          recoveryController: recoveryController,
+          onVaultProvisioned: onVaultProvisioned,
+        ),
+        _RecoveryCard(
+          controller: recoveryController,
+          serverConnectionController: serverConnectionController,
+          vaultSetupController: vaultSetupController,
         ),
         const _AutostartCard(),
       ],
@@ -915,11 +924,15 @@ final class _VaultSetupCard extends StatelessWidget {
     required this.controller,
     required this.serverConnectionController,
     required this.deviceProvisioningController,
+    required this.recoveryController,
+    required this.onVaultProvisioned,
   });
 
   final VaultSetupController controller;
   final ServerConnectionController serverConnectionController;
   final DeviceProvisioningController deviceProvisioningController;
+  final RecoveryController recoveryController;
+  final Future<void> Function() onVaultProvisioned;
 
   Future<void> _createVault(BuildContext context) async {
     final userId = serverConnectionController.session?.user.id;
@@ -971,7 +984,7 @@ final class _VaultSetupCard extends StatelessWidget {
     // exists and its Recovery Secret must still be shown either way.
     final selfApproved = await deviceProvisioningController.selfApprove();
     if (!context.mounted) return;
-    await _showRecoverySecret(context, secret);
+    await _showRecoverySecretDialog(context, secret);
     if (!selfApproved && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -985,68 +998,120 @@ final class _VaultSetupCard extends StatelessWidget {
     }
   }
 
-  Future<void> _showRecoverySecret(BuildContext context, String secret) =>
-      showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) {
-          var confirmedSaved = false;
-          // A single StatefulBuilder wraps the whole dialog so toggling the
-          // checkbox also rebuilds the "Done" button's enabled state — two
-          // separate StatefulBuilders (one per widget) would each keep their
-          // own rebuild scope and never see the other's state change.
-          return StatefulBuilder(
-            builder: (context, setState) => AlertDialog(
-              title: const Text('Save your Recovery Secret'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'This is shown only once. Without it — and without another trusted device — your files can never be recovered.',
-                  ),
-                  const SizedBox(height: 12),
-                  SelectableText(
-                    secret,
-                    style: const TextStyle(
-                      fontFeatures: [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  CheckboxListTile(
-                    value: confirmedSaved,
-                    contentPadding: EdgeInsets.zero,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    onChanged: (value) =>
-                        setState(() => confirmedSaved = value ?? false),
-                    title: const Text(
-                      'I have saved this Recovery Secret somewhere safe.',
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton.icon(
-                  onPressed: () =>
-                      Clipboard.setData(ClipboardData(text: secret)),
-                  icon: const Icon(Icons.copy_outlined),
-                  label: const Text('Copy'),
-                ),
-                FilledButton(
-                  onPressed: confirmedSaved
-                      ? () => Navigator.pop(context)
-                      : null,
-                  child: const Text('Done'),
-                ),
-              ],
+  Future<void> _restoreVault(BuildContext context) async {
+    if (serverConnectionController.session == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _localized(
+              context,
+              en: 'Sign in to the account you want to recover first.',
+              ru: 'Сначала войдите в аккаунт, который нужно восстановить.',
             ),
-          );
-        },
+          ),
+        ),
       );
+      return;
+    }
+    final secretController = TextEditingController();
+    final secret = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          _localized(
+            context,
+            en: 'Restore with Recovery Secret',
+            ru: 'Восстановить по Recovery Secret',
+          ),
+        ),
+        content: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                _localized(
+                  context,
+                  en: 'Enter the Recovery Secret you saved when the vault was created. It unlocks the existing vault on this device without another trusted device.',
+                  ru: 'Введите Recovery Secret, сохранённый при создании vault. Он разблокирует существующий vault на этом устройстве без другого доверенного устройства.',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: secretController,
+                autofocus: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                style: const TextStyle(fontFamily: 'monospace'),
+                decoration: const InputDecoration(
+                  labelText: 'Recovery Secret',
+                  hintText: 'HBXR1-…',
+                ),
+                onSubmitted: (value) => Navigator.pop(context, value),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, secretController.text),
+            child: Text(_localized(context, en: 'Restore', ru: 'Восстановить')),
+          ),
+        ],
+      ),
+    );
+    // Not disposed here: the dialog's exit animation may still rebuild the
+    // field, matching how the sign-in dialog leaves its controllers to GC.
+    if (secret == null || secret.trim().isEmpty) return;
+    final restored = await recoveryController.restoreVault(secret);
+    if (!context.mounted) return;
+    if (!restored) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            recoveryController.errorMessage ??
+                _localized(
+                  context,
+                  en: 'Could not restore the vault.',
+                  ru: 'Не удалось восстановить vault.',
+                ),
+          ),
+        ),
+      );
+      return;
+    }
+    // Like a newly created vault, a recovered device holds the Vault Key
+    // without ever having been approved, so it certifies itself.
+    final selfApproved = await deviceProvisioningController.selfApprove();
+    await onVaultProvisioned();
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          selfApproved
+              ? _localized(
+                  context,
+                  en: 'Vault restored. This device is unlocked and approved.',
+                  ru: 'Vault восстановлен. Это устройство разблокировано и подтверждено.',
+                )
+              : _localized(
+                  context,
+                  en: 'Vault restored, but this device could not record its approval: ${deviceProvisioningController.errorMessage ?? 'unknown error'}.',
+                  ru: 'Vault восстановлен, но устройство не смогло записать своё подтверждение: ${deviceProvisioningController.errorMessage ?? 'неизвестная ошибка'}.',
+                ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: controller,
+    animation: Listenable.merge([controller, recoveryController]),
     builder: (context, _) {
       final subtitle = switch (controller.status) {
         VaultSetupStatus.checking => 'Checking for an existing vault…',
@@ -1056,16 +1121,20 @@ final class _VaultSetupCard extends StatelessWidget {
         VaultSetupStatus.failed =>
           controller.errorMessage ?? 'Vault storage is unavailable.',
       };
+      final restoring =
+          controller.status == VaultSetupStatus.locked &&
+          recoveryController.busy;
       final trailing = switch (controller.status) {
         VaultSetupStatus.checking ||
         VaultSetupStatus.creating => const SizedBox.square(
           dimension: 22,
           child: CircularProgressIndicator(strokeWidth: 2),
         ),
-        VaultSetupStatus.locked => FilledButton(
-          onPressed: () => _createVault(context),
-          child: const Text('Create vault'),
+        VaultSetupStatus.locked when restoring => const SizedBox.square(
+          dimension: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
         ),
+        VaultSetupStatus.locked => null,
         VaultSetupStatus.ready => const Icon(Icons.check_circle_outline),
         VaultSetupStatus.failed => TextButton(
           onPressed: controller.initialize,
@@ -1073,9 +1142,293 @@ final class _VaultSetupCard extends StatelessWidget {
         ),
       };
       return Card(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.enhanced_encryption_outlined),
+              title: const Text('Personal vault'),
+              subtitle: Text(subtitle),
+              trailing: trailing,
+              isThreeLine: true,
+            ),
+            if (controller.status == VaultSetupStatus.locked)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: restoring
+                          ? null
+                          : () => _restoreVault(context),
+                      icon: const Icon(Icons.key_outlined),
+                      label: Text(
+                        _localized(
+                          context,
+                          en: 'Restore with Recovery Secret',
+                          ru: 'Восстановить по Recovery Secret',
+                        ),
+                      ),
+                    ),
+                    FilledButton(
+                      onPressed: restoring ? null : () => _createVault(context),
+                      child: const Text('Create vault'),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+Future<void> _showRecoverySecretDialog(BuildContext context, String secret) =>
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        var confirmedSaved = false;
+        // A single StatefulBuilder wraps the whole dialog so toggling the
+        // checkbox also rebuilds the "Done" button's enabled state — two
+        // separate StatefulBuilders (one per widget) would each keep their
+        // own rebuild scope and never see the other's state change.
+        return StatefulBuilder(
+          builder: (context, setState) => AlertDialog(
+            title: const Text('Save your Recovery Secret'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'This is shown only once. Without it — and without another trusted device — your files can never be recovered.',
+                ),
+                const SizedBox(height: 12),
+                SelectableText(
+                  secret,
+                  style: const TextStyle(
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                CheckboxListTile(
+                  value: confirmedSaved,
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  onChanged: (value) =>
+                      setState(() => confirmedSaved = value ?? false),
+                  title: const Text(
+                    'I have saved this Recovery Secret somewhere safe.',
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton.icon(
+                onPressed: () => Clipboard.setData(ClipboardData(text: secret)),
+                icon: const Icon(Icons.copy_outlined),
+                label: const Text('Copy'),
+              ),
+              FilledButton(
+                onPressed: confirmedSaved ? () => Navigator.pop(context) : null,
+                child: const Text('Done'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+/// Shows whether the server holds this account's recovery bundle, uploads
+/// it automatically from the device that created the vault, and lets any
+/// unlocked device issue a new Recovery Secret.
+final class _RecoveryCard extends StatefulWidget {
+  const _RecoveryCard({
+    required this.controller,
+    required this.serverConnectionController,
+    required this.vaultSetupController,
+  });
+
+  final RecoveryController controller;
+  final ServerConnectionController serverConnectionController;
+  final VaultSetupController vaultSetupController;
+
+  @override
+  State<_RecoveryCard> createState() => _RecoveryCardState();
+}
+
+final class _RecoveryCardState extends State<_RecoveryCard> {
+  bool _wasAvailable = false;
+
+  bool get _available =>
+      widget.serverConnectionController.status ==
+          ServerConnectionStatus.authenticated &&
+      widget.vaultSetupController.status == VaultSetupStatus.ready;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.serverConnectionController.addListener(_onPrerequisitesChanged);
+    widget.vaultSetupController.addListener(_onPrerequisitesChanged);
+    _onPrerequisitesChanged();
+  }
+
+  @override
+  void dispose() {
+    widget.serverConnectionController.removeListener(_onPrerequisitesChanged);
+    widget.vaultSetupController.removeListener(_onPrerequisitesChanged);
+    super.dispose();
+  }
+
+  /// Checks the server copy once each time this device becomes signed in
+  /// with an unlocked vault, rather than on every connection notification.
+  void _onPrerequisitesChanged() {
+    final available = _available;
+    if (available && !_wasAvailable) unawaited(widget.controller.refresh());
+    _wasAvailable = available;
+  }
+
+  Future<void> _createNewSecret(BuildContext context) async {
+    final replacing =
+        widget.controller.status == RecoveryBackupStatus.protected;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          _localized(
+            context,
+            en: 'Create a new Recovery Secret?',
+            ru: 'Создать новый Recovery Secret?',
+          ),
+        ),
+        content: Text(
+          replacing
+              ? _localized(
+                  context,
+                  en: 'The new secret replaces the current one: the old Recovery Secret will no longer restore this vault from the server. A server backup made earlier can still be opened with the old secret.',
+                  ru: 'Новый секрет заменит текущий: старый Recovery Secret больше не восстановит vault с сервера. Ранее сделанную резервную копию сервера по-прежнему можно открыть старым секретом.',
+                )
+              : _localized(
+                  context,
+                  en: 'HomeBox stores an encrypted recovery copy on the server that only this new secret can open. Save it somewhere safe and offline.',
+                  ru: 'HomeBox сохранит на сервере зашифрованную копию для восстановления, которую сможет открыть только этот новый секрет. Сохраните его в надёжном месте вне устройства.',
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_localized(context, en: 'Create', ru: 'Создать')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final secret = await widget.controller.createNewRecoverySecret();
+    if (!context.mounted) return;
+    if (secret == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            widget.controller.errorMessage ??
+                _localized(
+                  context,
+                  en: 'Could not create a Recovery Secret.',
+                  ru: 'Не удалось создать Recovery Secret.',
+                ),
+          ),
+        ),
+      );
+      return;
+    }
+    await _showRecoverySecretDialog(context, secret);
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([
+      widget.controller,
+      widget.serverConnectionController,
+      widget.vaultSetupController,
+    ]),
+    builder: (context, _) {
+      if (!_available) return const SizedBox.shrink();
+      final controller = widget.controller;
+      final updatedAt = controller.updatedAt;
+      final (icon, subtitle) = switch (controller.status) {
+        RecoveryBackupStatus.unknown || RecoveryBackupStatus.checking => (
+          Icons.key_outlined,
+          _localized(
+            context,
+            en: 'Checking the recovery backup…',
+            ru: 'Проверка резервной копии для восстановления…',
+          ),
+        ),
+        RecoveryBackupStatus.protected => (
+          Icons.verified_outlined,
+          _localized(
+            context,
+            en: 'An encrypted recovery copy is stored on the server${updatedAt == null ? '' : ' (updated ${_formatLocalDateTime(updatedAt)})'}. With your Recovery Secret you can restore this vault on a new device even if every trusted device is lost.',
+            ru: 'Зашифрованная копия для восстановления хранится на сервере${updatedAt == null ? '' : ' (обновлена ${_formatLocalDateTime(updatedAt)})'}. По Recovery Secret vault можно восстановить на новом устройстве, даже если потеряны все доверенные устройства.',
+          ),
+        ),
+        RecoveryBackupStatus.unprotected => (
+          Icons.warning_amber_outlined,
+          _localized(
+            context,
+            en: 'The server has no recovery copy yet. Create a Recovery Secret so the vault can be restored without another trusted device.',
+            ru: 'На сервере ещё нет копии для восстановления. Создайте Recovery Secret, чтобы vault можно было восстановить без другого доверенного устройства.',
+          ),
+        ),
+        RecoveryBackupStatus.failed => (
+          Icons.error_outline,
+          controller.errorMessage ??
+              _localized(
+                context,
+                en: 'Could not check the recovery backup.',
+                ru: 'Не удалось проверить резервную копию.',
+              ),
+        ),
+      };
+      final Widget? trailing = controller.busy
+          ? const SizedBox.square(
+              dimension: 22,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : switch (controller.status) {
+              RecoveryBackupStatus.failed => TextButton(
+                onPressed: controller.refresh,
+                child: Text(_localized(context, en: 'Retry', ru: 'Повторить')),
+              ),
+              RecoveryBackupStatus.unprotected => FilledButton(
+                onPressed: () => _createNewSecret(context),
+                child: Text(
+                  _localized(
+                    context,
+                    en: 'Create secret',
+                    ru: 'Создать секрет',
+                  ),
+                ),
+              ),
+              RecoveryBackupStatus.protected => TextButton(
+                onPressed: () => _createNewSecret(context),
+                child: Text(
+                  _localized(context, en: 'New secret', ru: 'Новый секрет'),
+                ),
+              ),
+              _ => null,
+            };
+      return Card(
         child: ListTile(
-          leading: const Icon(Icons.enhanced_encryption_outlined),
-          title: const Text('Personal vault'),
+          leading: Icon(icon),
+          title: const Text('Recovery Secret'),
           subtitle: Text(subtitle),
           trailing: trailing,
           isThreeLine: true,

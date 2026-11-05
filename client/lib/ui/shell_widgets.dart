@@ -387,6 +387,7 @@ class _SectionContent extends StatelessWidget {
     required this.deviceProvisioningController,
     required this.serverConnectionController,
     required this.vaultSetupController,
+    required this.recoveryController,
     required this.onVaultProvisioned,
     required this.filesController,
     required this.syncEngine,
@@ -414,6 +415,7 @@ class _SectionContent extends StatelessWidget {
   final DeviceProvisioningController deviceProvisioningController;
   final ServerConnectionController serverConnectionController;
   final VaultSetupController vaultSetupController;
+  final RecoveryController recoveryController;
   final Future<void> Function() onVaultProvisioned;
   final FilesController? filesController;
   final SyncEngine? syncEngine;
@@ -461,6 +463,7 @@ class _SectionContent extends StatelessWidget {
       deviceProvisioningController: deviceProvisioningController,
       serverConnectionController: serverConnectionController,
       vaultSetupController: vaultSetupController,
+      recoveryController: recoveryController,
       onVaultProvisioned: onVaultProvisioned,
       localeController: localeController,
     ),
