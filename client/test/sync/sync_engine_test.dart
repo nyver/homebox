@@ -416,67 +416,143 @@ void main() {
     expect(laterReady.single.lastErrorCode, 'INTERNAL_ERROR');
   });
 
+  test('a pull never overwrites a node whose own mutation is still waiting to be pushed', () async {
+    final fakeServer = FakeNodeServer();
+    final httpServer = await fakeServer.start();
+    addTearDown(() => httpServer.close(force: true));
+    final serverConnection = await _connectedAndSignedIn(httpServer);
+    addTearDown(serverConnection.dispose);
+    // Live on the server and still unseen by this engine's change cursor,
+    // so the next pull will try to refresh it.
+    fakeServer.remoteCreate(id: 'node-1');
+    final engine = SyncEngine(
+      serverConnection: serverConnection,
+      localDatabase: LocalDatabase.openInMemory(),
+    );
+    addTearDown(engine.dispose);
+    final now = DateTime.now().toUtc();
+    engine.nodeCache.upsert(
+      LocalNode(
+        id: 'node-1',
+        parentId: null,
+        nodeType: 'DIRECTORY',
+        metadataCiphertext: Uint8List.fromList(utf8.encode('m')),
+        metadataKeyVersion: 1,
+        currentVersionId: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: now,
+        pendingCreate: false,
+      ),
+    );
+    // Queued Move to Trash that this pass's push phase does not attempt
+    // (here: still in its backoff window).
+    engine.pendingOperations.enqueue(
+      PendingOperation(
+        id: 'queued-delete',
+        operationId: 'op-queued-delete',
+        type: PendingOperationType.deleteNode,
+        nodeId: 'node-1',
+        payload: const {},
+        baseRevision: 1,
+        createdAt: now,
+        retryCount: 1,
+        nextRetryAt: now.add(const Duration(minutes: 5)),
+        status: PendingOperationStatus.pending,
+      ),
+    );
+
+    await engine.runOnce();
+
+    expect(engine.status, SyncStatus.idle, reason: engine.errorMessage);
+    expect(
+      engine.nodeCache.getById('node-1')!.isDeleted,
+      isTrue,
+      reason: 'the optimistic Trash must survive until its push runs',
+    );
+    expect(
+      engine.pendingOperations.getById('queued-delete')!.status,
+      PendingOperationStatus.pending,
+    );
+  });
+
   test(
-    'a pull never overwrites a node whose own mutation is still waiting to be pushed',
+    'a pull fetches a node changed several times in one page only once',
     () async {
       final fakeServer = FakeNodeServer();
       final httpServer = await fakeServer.start();
       addTearDown(() => httpServer.close(force: true));
       final serverConnection = await _connectedAndSignedIn(httpServer);
       addTearDown(serverConnection.dispose);
-      // Live on the server and still unseen by this engine's change cursor,
-      // so the next pull will try to refresh it.
-      fakeServer.remoteCreate(id: 'node-1');
+
+      final writer = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(writer.dispose);
+      writer.pendingOperations.enqueue(_createOp('node-1'));
+      await writer.runOnce();
+      fakeServer.recordRemoteUpdates('node-1', 3);
+
+      // A fresh device replays the whole history: one CREATE, three UPDATEs.
+      final reader = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(reader.dispose);
+      final before = fakeServer.nodeGetRequestCount;
+      await reader.runOnce();
+
+      expect(reader.status, SyncStatus.idle);
+      expect(reader.nodeCache.getById('node-1')?.revision, 4);
+      expect(fakeServer.nodeGetRequestCount - before, 1);
+    },
+  );
+
+  test(
+    'a restore waits for its trashed parent folder to be restored first',
+    () async {
+      final fakeServer = FakeNodeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      fakeServer.remoteCreate(id: 'folder');
+      fakeServer.remoteCreate(id: 'file', parentId: 'folder', nodeType: 'FILE');
+      fakeServer.remoteDelete('file');
+      fakeServer.remoteDelete('folder');
       final engine = SyncEngine(
         serverConnection: serverConnection,
         localDatabase: LocalDatabase.openInMemory(),
       );
       addTearDown(engine.dispose);
-      final now = DateTime.now().toUtc();
-      engine.nodeCache.upsert(
-        LocalNode(
-          id: 'node-1',
-          parentId: null,
-          nodeType: 'DIRECTORY',
-          metadataCiphertext: Uint8List.fromList(utf8.encode('m')),
-          metadataKeyVersion: 1,
-          currentVersionId: null,
-          revision: 1,
-          createdAt: now,
-          updatedAt: now,
-          deletedAt: now,
-          pendingCreate: false,
-        ),
-      );
-      // Queued Move to Trash that this pass's push phase does not attempt
-      // (here: still in its backoff window).
-      engine.pendingOperations.enqueue(
-        PendingOperation(
-          id: 'queued-delete',
-          operationId: 'op-queued-delete',
-          type: PendingOperationType.deleteNode,
-          nodeId: 'node-1',
-          payload: const {},
-          baseRevision: 1,
-          createdAt: now,
-          retryCount: 1,
-          nextRetryAt: now.add(const Duration(minutes: 5)),
-          status: PendingOperationStatus.pending,
-        ),
-      );
-
       await engine.runOnce();
 
-      expect(engine.status, SyncStatus.idle, reason: engine.errorMessage);
-      expect(
-        engine.nodeCache.getById('node-1')!.isDeleted,
-        isTrue,
-        reason: 'the optimistic Trash must survive until its push runs',
+      PendingOperation restore(String nodeId, DateTime createdAt) =>
+          PendingOperation(
+            id: 'restore-$nodeId',
+            operationId: 'op-restore-$nodeId',
+            type: PendingOperationType.restoreNode,
+            nodeId: nodeId,
+            payload: const {},
+            createdAt: createdAt,
+            retryCount: 0,
+            status: PendingOperationStatus.pending,
+          );
+      // Queued child-first: the parent's restore must still reach the server
+      // first, or the server would move the file to the root.
+      final now = DateTime.now();
+      engine.pendingOperations.enqueue(restore('file', now));
+      engine.pendingOperations.enqueue(
+        restore('folder', now.add(const Duration(milliseconds: 1))),
       );
-      expect(
-        engine.pendingOperations.getById('queued-delete')!.status,
-        PendingOperationStatus.pending,
-      );
+      await engine.runOnce();
+      await engine.runOnce();
+
+      expect(fakeServer.restoredNodeIds, ['folder', 'file']);
+      expect(engine.nodeCache.getById('file')?.parentId, 'folder');
+      expect(engine.nodeCache.getById('file')?.isDeleted, isFalse);
     },
   );
 }

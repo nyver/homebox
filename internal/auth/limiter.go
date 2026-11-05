@@ -152,7 +152,8 @@ func (l *attemptLimiter) size() int {
 	return len(l.entries)
 }
 
-// loginBackoff grows with consecutive failures for one username: harmless
+// loginBackoff grows with consecutive failures for one username from one
+// client address: harmless
 // for a genuine typo (the first couple of attempts are unthrottled) while
 // making sustained password guessing increasingly expensive in wall-clock
 // time on top of Argon2id's own per-attempt cost.
@@ -166,6 +167,22 @@ func loginBackoff(consecutiveFailures int) time.Duration {
 		return 10 * time.Second
 	default:
 		return time.Minute
+	}
+}
+
+// accountBackoff throttles one username across every client address. It is
+// deliberately mild: anyone can fail logins for a known username, so its
+// longest wait is what such a stranger can impose on the real owner, while it
+// still caps a guessing campaign distributed over many addresses at a couple
+// of Argon2id-checked attempts per minute.
+func accountBackoff(consecutiveFailures int) time.Duration {
+	switch {
+	case consecutiveFailures < 20:
+		return 0
+	case consecutiveFailures < 50:
+		return 5 * time.Second
+	default:
+		return 30 * time.Second
 	}
 }
 

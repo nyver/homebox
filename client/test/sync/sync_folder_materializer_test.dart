@@ -463,4 +463,72 @@ void main() {
       'New',
     );
   });
+
+  test(
+    'a folder whose metadata cannot be decrypted keeps its local copies',
+    () async {
+      final fakeServer = FakeNodeServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+      final serverConnection = await _connectedAndSignedIn(httpServer);
+      addTearDown(serverConnection.dispose);
+      final vaultKeyStore = VaultKeyStore(MemoryVaultKeyStorage());
+      (await vaultKeyStore.createVault(userId: FakeNodeServer.userId))
+          .destroy();
+      final syncEngine = SyncEngine(
+        serverConnection: serverConnection,
+        localDatabase: LocalDatabase.openInMemory(),
+      );
+      addTearDown(syncEngine.dispose);
+      final filesController = FilesController(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(filesController.dispose);
+      final materializer = SyncFolderMaterializer(
+        serverConnection: serverConnection,
+        vaultKeyStore: vaultKeyStore,
+        syncEngine: syncEngine,
+      );
+      addTearDown(materializer.dispose);
+      final rootDir = await Directory.systemTemp.createTemp(
+        'homebox_syncfolder_undecryptable_',
+      );
+      addTearDown(() => rootDir.delete(recursive: true));
+      final sourceDir = await Directory.systemTemp.createTemp(
+        'homebox_syncfolder_undecryptable_source_',
+      );
+      addTearDown(() => sourceDir.delete(recursive: true));
+
+      expect(await filesController.createFolder('Docs'), isTrue);
+      await _awaitBackgroundSync(syncEngine);
+      final folder = filesController.entries.single;
+      filesController.openFolder(folder);
+      await pumpEventQueue();
+      final sourceFile = File('${sourceDir.path}/note.txt');
+      await sourceFile.writeAsString('keep me');
+      expect(
+        await filesController.uploadFile(sourceFile.path),
+        isTrue,
+        reason: filesController.errorMessage,
+      );
+      await materializer.materialize(rootDir.path);
+      final mirrored = File('${rootDir.path}/Docs/note.txt');
+      expect(await mirrored.readAsString(), 'keep me');
+
+      // The folder still exists on the server, but this device can no longer
+      // read its name (e.g. it lacks a newer metadata key version).
+      fakeServer.replaceMetadataWithUndecryptable(folder.node.id);
+      await syncEngine.runOnce();
+      await materializer.materialize(rootDir.path);
+
+      expect(
+        await mirrored.exists(),
+        isTrue,
+        reason: 'an unreadable folder is not a remote deletion',
+      );
+      expect(await mirrored.readAsString(), 'keep me');
+    },
+  );
 }

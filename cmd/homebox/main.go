@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -179,7 +180,11 @@ func serve(args []string) {
 	if err != nil {
 		fatal("load server identity: %v", err)
 	}
-	log.Printf("HomeBox server identity fingerprint: %s", identity.Fingerprint())
+	tlsConfig, servedFingerprint, err := serverTLSConfig(c, identity)
+	if err != nil {
+		fatal("build secure transport: %v", err)
+	}
+	log.Printf("HomeBox server identity fingerprint: %s", servedFingerprint)
 
 	authService := auth.New(db, c.Limits.MaxUsers, c.AccessTokenTTL())
 	provisioningService := provisioning.New(db)
@@ -208,6 +213,7 @@ func serve(args []string) {
 	server := &http.Server{
 		Addr:              c.Address(),
 		Handler:           httpserver.New(api),
+		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       c.HTTPReadTimeout(),
 		IdleTimeout:       60 * time.Second,
@@ -217,22 +223,8 @@ func serve(args []string) {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		if c.Server.TLS.Enabled {
-			// Operator-supplied certificate (e.g. a direct Let's Encrypt cert
-			// without a reverse proxy in front). See §7.2.
-			serveErr <- server.ListenAndServeTLS(c.Server.TLS.CertFile, c.Server.TLS.KeyFile)
-			return
-		}
-		// Default "direct HTTP + custom port" deployment mode (§7.1): the
-		// server terminates TLS itself using a self-signed certificate tied
-		// to its identity key, trusted by clients via fingerprint pinning
-		// rather than a CA (ADR-008/ADR-009). There is no plaintext fallback.
-		tlsConfig, tlsErr := securetransport.BuildTLSConfig(identity)
-		if tlsErr != nil {
-			serveErr <- fmt.Errorf("build secure transport: %w", tlsErr)
-			return
-		}
-		server.TLSConfig = tlsConfig
+		// The certificate is already in server.TLSConfig; there is no
+		// plaintext fallback in any mode.
 		serveErr <- server.ListenAndServeTLS("", "")
 	}()
 
@@ -253,6 +245,22 @@ func serve(args []string) {
 		}
 	}
 	<-maintenanceDone
+}
+
+// serverTLSConfig returns the TLS 1.3 configuration the server listens with
+// and the fingerprint clients must pin for it. By default (§7.1) the server
+// terminates TLS itself with a self-signed certificate tied to its identity
+// key (ADR-008/ADR-009). With server.tls enabled it serves the operator's
+// certificate instead (§7.2), whose own P-256 key is then what clients pin.
+func serverTLSConfig(c config.Config, identity serveridentity.Identity) (*tls.Config, string, error) {
+	if c.Server.TLS.Enabled {
+		return securetransport.LoadOperatorTLSConfig(c.Server.TLS.CertFile, c.Server.TLS.KeyFile)
+	}
+	tlsConfig, err := securetransport.BuildTLSConfig(identity)
+	if err != nil {
+		return nil, "", err
+	}
+	return tlsConfig, identity.Fingerprint(), nil
 }
 
 // shutdownTimeout bounds how long a stopping server waits for in-flight
@@ -303,9 +311,25 @@ func fingerprint(args []string) {
 	if err != nil {
 		fatal("load config: %v", err)
 	}
+	if c.Server.TLS.Enabled {
+		_, fingerprint, err := securetransport.LoadOperatorTLSConfig(c.Server.TLS.CertFile, c.Server.TLS.KeyFile)
+		if err != nil {
+			fatal("load operator TLS certificate: %v", err)
+		}
+		fmt.Fprintln(os.Stderr, "homebox: server.tls is enabled; this is the fingerprint of the operator certificate's key. Renew the certificate with the same key, or clients must verify a new fingerprint.")
+		fmt.Println(fingerprint)
+		return
+	}
+	keyPath := serveridentity.KeyPath(c.Storage.Path)
+	_, statErr := os.Stat(keyPath)
 	identity, err := serveridentity.LoadOrCreate(c.Storage.Path)
 	if err != nil {
 		fatal("load server identity: %v", err)
+	}
+	if errors.Is(statErr, os.ErrNotExist) {
+		// Expected before the first server start; with a mistyped --config
+		// it would silently mint an identity no client has pinned.
+		fmt.Fprintln(os.Stderr, "homebox: created a new server identity at", keyPath)
 	}
 	fmt.Println(identity.Fingerprint())
 }

@@ -100,6 +100,7 @@ type Session struct {
 	RefreshTokenExpiresAt time.Time
 
 	refreshTokenID string
+	accessTokenID  string
 }
 
 // Login verifies the account password, registers or re-validates the
@@ -123,10 +124,16 @@ func (s *Service) Login(ctx context.Context, clientAddr, username, password stri
 		return Session{}, ErrRateLimited
 	}
 	defer s.addressLimiter.end(clientAddr)
-	if !s.loginLimiter.begin(normalized, now) {
+	if !s.accountLimiter.begin(normalized, now) {
 		return Session{}, ErrRateLimited
 	}
-	defer s.loginLimiter.end(normalized)
+	defer s.accountLimiter.end(normalized)
+	// Usernames never contain "|" (see normalizeUsername).
+	attemptKey := normalized + "|" + clientAddr
+	if !s.loginLimiter.begin(attemptKey, now) {
+		return Session{}, ErrRateLimited
+	}
+	defer s.loginLimiter.end(attemptKey)
 
 	// The password is verified before any transaction is opened: Argon2id
 	// takes a noticeable fraction of a second and 64 MiB, and holding a
@@ -150,7 +157,8 @@ func (s *Service) Login(ctx context.Context, clientAddr, username, password stri
 		return Session{}, err
 	}
 	if !userFound || !passwordValid {
-		s.loginLimiter.recordFailure(normalized, now)
+		s.loginLimiter.recordFailure(attemptKey, now)
+		s.accountLimiter.recordFailure(normalized, now)
 		s.addressLimiter.recordFailure(clientAddr, now)
 		return Session{}, ErrInvalidCredentials
 	}
@@ -190,7 +198,8 @@ func (s *Service) Login(ctx context.Context, clientAddr, username, password stri
 	if err := tx.Commit(); err != nil {
 		return Session{}, err
 	}
-	s.loginLimiter.recordSuccess(normalized)
+	s.loginLimiter.recordSuccess(attemptKey)
+	s.accountLimiter.recordSuccess(normalized)
 	s.addressLimiter.recordSuccess(clientAddr)
 	return session, nil
 }
@@ -294,22 +303,51 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, er
 		now.Format(time.RFC3339Nano), session.refreshTokenID, deviceID, session.refreshTokenID); err != nil {
 		return Session{}, err
 	}
+	// The device's earlier access tokens are superseded too. They are cut
+	// short rather than deleted so requests already in flight with them can
+	// still finish.
+	supersededUntil := now.Add(refreshRetryGrace).Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, "UPDATE access_tokens SET expires_at = ? WHERE device_id = ? AND id != ? AND expires_at > ?",
+		supersededUntil, deviceID, session.accessTokenID, supersededUntil); err != nil {
+		return Session{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Session{}, err
 	}
 	return session, nil
 }
 
-// Logout revokes a single refresh token. It is intentionally not an error to
-// log out with an already-revoked or unknown token.
+// Logout ends the session a refresh token belongs to: the token itself and
+// every access token of its device, so a copied bearer token stops working
+// immediately instead of at its expiry. It is intentionally not an error to
+// log out with an already-revoked or unknown token; such a token cannot end
+// the device's current session.
 func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	if refreshToken == "" {
 		return nil
 	}
 	hash := TokenHash(refreshToken)
-	_, err := s.db.ExecContext(ctx, "UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
-		s.now().UTC().Format(time.RFC3339Nano), hash[:])
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var deviceID string
+	err = tx.QueryRowContext(ctx, "SELECT device_id FROM refresh_tokens WHERE token_hash = ? AND revoked_at IS NULL", hash[:]).Scan(&deviceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ?",
+		s.now().UTC().Format(time.RFC3339Nano), hash[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM access_tokens WHERE device_id = ?", deviceID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Authenticate validates a bearer access token and returns the identity it
@@ -564,13 +602,14 @@ func (s *Service) issueTokens(ctx context.Context, tx *sql.Tx, now time.Time, us
 		return Session{}, err
 	}
 	refreshTokenID := uuid.NewString()
+	accessTokenID := uuid.NewString()
 	accessHash := TokenHash(accessToken)
 	refreshHash := TokenHash(refreshToken)
 	accessExpires := now.Add(s.accessTokenTTL)
 	refreshExpires := now.Add(refreshTokenTTL)
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO access_tokens (id,user_id,device_id,token_hash,created_at,expires_at) VALUES (?,?,?,?,?,?)`,
-		uuid.NewString(), user.ID, device.ID, accessHash[:], now.Format(time.RFC3339Nano), accessExpires.Format(time.RFC3339Nano)); err != nil {
+		accessTokenID, user.ID, device.ID, accessHash[:], now.Format(time.RFC3339Nano), accessExpires.Format(time.RFC3339Nano)); err != nil {
 		return Session{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO refresh_tokens (id,user_id,device_id,token_hash,created_at,expires_at) VALUES (?,?,?,?,?,?)`,
@@ -582,6 +621,7 @@ func (s *Service) issueTokens(ctx context.Context, tx *sql.Tx, now time.Time, us
 		AccessToken: accessToken, AccessTokenExpiresAt: accessExpires,
 		RefreshToken: refreshToken, RefreshTokenExpiresAt: refreshExpires,
 		refreshTokenID: refreshTokenID,
+		accessTokenID:  accessTokenID,
 	}, nil
 }
 

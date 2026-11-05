@@ -206,3 +206,49 @@ func toUpper(value string) string {
 	}
 	return string(out)
 }
+
+func TestCreateCapsOpenSessionsPerDevice(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	userID, deviceID, nodeID := seedFileNode(t, ctx, db)
+	s, err := New(db, dir, 100, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRevision := int64(0)
+	create := func() (Session, error) {
+		return s.Create(ctx, CreateInput{UserID: userID, DeviceID: deviceID, TargetNodeID: nodeID, FileVersionID: uuid.NewString(), BlobID: uuid.NewString(),
+			ExpectedRevision: &expectedRevision, ChunkSize: 10, ChunkCount: 1, MetadataKeyVersion: 1,
+			MetadataCiphertext: []byte("m"), WrappedFileKey: []byte("k"), E2EEHeader: []byte("h")})
+	}
+	var first Session
+	for i := 0; i < MaxOpenSessionsPerDevice; i++ {
+		session, err := create()
+		if err != nil {
+			t.Fatalf("session %d: %v", i, err)
+		}
+		if i == 0 {
+			first = session
+		}
+	}
+	if _, err := create(); err != ErrTooManyUploads {
+		t.Fatalf("error=%v, want %v", err, ErrTooManyUploads)
+	}
+	// An aborted session no longer holds temporary storage.
+	if err := s.Abort(ctx, userID, deviceID, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := create(); err != nil {
+		t.Fatalf("a slot freed by Abort must be reusable: %v", err)
+	}
+	// Abandoned sessions stop counting once they expire.
+	s.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	if _, err := create(); err != nil {
+		t.Fatalf("expired sessions must not count toward the cap: %v", err)
+	}
+}

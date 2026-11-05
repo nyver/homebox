@@ -339,6 +339,91 @@ func TestLogoutRevokesTheRefreshToken(t *testing.T) {
 	if _, err := s.Refresh(ctx, session.RefreshToken); err != ErrTokenInvalid {
 		t.Fatalf("error=%v, want %v", err, ErrTokenInvalid)
 	}
+	if _, _, err := s.Authenticate(ctx, session.AccessToken); err != ErrTokenInvalid {
+		t.Fatalf("logout must end the access token immediately: error=%v", err)
+	}
+}
+
+func TestLogoutWithARotatedTokenKeepsTheCurrentSession(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	mustBootstrap(t, s, "admin", "correct horse battery staple")
+	first, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.Refresh(ctx, first.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Logout(ctx, first.RefreshToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Authenticate(ctx, current.AccessToken); err != nil {
+		t.Fatalf("an already rotated token must not end the current session: %v", err)
+	}
+}
+
+func TestRefreshCutsShortThePreviousAccessToken(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	mustBootstrap(t, s, "admin", "correct horse battery staple")
+	base := time.Now()
+	s.now = func() time.Time { return base }
+	first, err := s.Login(ctx, "", "admin", "correct horse battery staple", testDevice(uuid.NewString()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Refresh(ctx, first.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Authenticate(ctx, first.AccessToken); err != nil {
+		t.Fatalf("an in-flight request with the previous access token must still succeed: %v", err)
+	}
+	s.now = func() time.Time { return base.Add(refreshRetryGrace + time.Second) }
+	if _, _, err := s.Authenticate(ctx, first.AccessToken); err != ErrTokenInvalid {
+		t.Fatalf("the superseded access token must expire after the grace period: error=%v", err)
+	}
+	if _, _, err := s.Authenticate(ctx, second.AccessToken); err != nil {
+		t.Fatalf("the new access token must stay valid: %v", err)
+	}
+}
+
+func TestFailuresFromAnotherAddressDoNotLockOutTheOwner(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	mustBootstrap(t, s, "admin", "correct horse battery staple")
+	base := time.Now()
+	s.now = func() time.Time { return base }
+	for i := 0; i < 8; i++ {
+		_, err := s.Login(ctx, "203.0.113.9", "admin", "wrong password", testDevice(uuid.NewString()))
+		if err != ErrInvalidCredentials && err != ErrRateLimited {
+			t.Fatalf("attempt %d: error=%v", i, err)
+		}
+	}
+	if _, err := s.Login(ctx, "203.0.113.9", "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != ErrRateLimited {
+		t.Fatalf("the failing address must be throttled: error=%v", err)
+	}
+	if _, err := s.Login(ctx, "198.51.100.20", "admin", "correct horse battery staple", testDevice(uuid.NewString())); err != nil {
+		t.Fatalf("the owner signing in from another address must not be locked out: %v", err)
+	}
+}
+
+func TestAccountLimiterBoundsGuessesSpreadAcrossAddresses(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	mustBootstrap(t, s, "admin", "correct horse battery staple")
+	base := time.Now()
+	s.now = func() time.Time { return base }
+	for i := 0; i < 20; i++ {
+		if _, err := s.Login(ctx, fmt.Sprintf("192.0.2.%d", i), "admin", "wrong password", testDevice(uuid.NewString())); err != ErrInvalidCredentials {
+			t.Fatalf("attempt %d: error=%v", i, err)
+		}
+	}
+	if _, err := s.Login(ctx, "192.0.2.200", "admin", "wrong password", testDevice(uuid.NewString())); err != ErrRateLimited {
+		t.Fatalf("a distributed guessing run must be throttled per account: error=%v", err)
+	}
 }
 
 func TestRevokedDeviceLosesAccessAndCannotRefresh(t *testing.T) {

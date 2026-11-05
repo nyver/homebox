@@ -1,7 +1,10 @@
 import 'dart:io';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
+import 'package:homebox_client/core/e2ee/device_provisioning.dart';
+import 'package:homebox_client/core/e2ee/opaque_id.dart';
 import 'package:homebox_client/core/e2ee/vault_key_store.dart';
 import 'package:homebox_client/core/transport/homebox_api_client.dart'
     as transport;
@@ -202,4 +205,48 @@ void main() {
     trustedKey.destroy();
     targetKey.destroy();
   });
+
+  test(
+    'collectProvisioning refuses an uncertified legacy v1 envelope',
+    () async {
+      final fakeServer = FakeDeviceServer();
+      final httpServer = await fakeServer.start();
+      addTearDown(() => httpServer.close(force: true));
+
+      // Anyone who can sign in to the account (or a malicious server) can
+      // address an envelope to a pending device; only a certified v2 envelope
+      // proves it came from a device that holds the real Vault Key.
+      final attacker = await _connectedAndSignedIn(httpServer);
+      final target = await _connectedAndSignedIn(httpServer);
+      addTearDown(attacker.serverConnection.dispose);
+      addTearDown(target.serverConnection.dispose);
+      final targetIdentity = await target.deviceIdentityStore.load();
+      final targetId = target.serverConnection.session!.device.id;
+      final legacy = await DeviceProvisioningCipher().create(
+        vaultKey: SecretKeyData(List<int>.filled(32, 7)),
+        keyVersion: homeBoxPersonalVaultKeyVersion,
+        vaultId: uuidStringToBytes(FakeDeviceServer.userId),
+        recipientDeviceId: uuidStringToBytes(targetId),
+        recipientPublicKey: targetIdentity!.publicKey,
+      );
+      expect(legacy.protocolVersion, homeBoxLegacyDeviceProvisioningVersion);
+      await attacker.serverConnection.api!.uploadKeyEnvelope(
+        attacker.serverConnection.session!.accessToken,
+        targetDeviceId: targetId,
+        vaultId: FakeDeviceServer.userId,
+        keyVersion: homeBoxPersonalVaultKeyVersion,
+        ciphertext: legacy.encode(),
+      );
+
+      final targetVault = VaultKeyStore(MemoryVaultKeyStorage());
+      final targetController = _controllerFor(
+        target,
+        vaultKeyStore: targetVault,
+      );
+      addTearDown(targetController.dispose);
+      expect(await targetController.collectProvisioning(), isFalse);
+      expect(targetController.status, DeviceProvisioningStatus.failed);
+      expect(await targetVault.exists(), isFalse);
+    },
+  );
 }

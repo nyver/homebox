@@ -89,13 +89,25 @@ final class SyncFolderMaterializer extends ChangeNotifier {
   /// the whole pass — it is simply retried on the next call.
   Future<void> materialize(String rootPath) async {
     if (_running) return;
+    // Claimed before the first await, so a second caller arriving while the
+    // session is being refreshed cannot start an overlapping pass.
+    _running = true;
     final api = _serverConnection.api;
     // Not _serverConnection.session directly — see FilesController's
     // _requireContext for why (mobile OSes suspend background timers).
-    final session = await _serverConnection.ensureFreshSession();
-    final vaultKey = await _vaultKeyStore.loadVaultKey();
-    if (api == null || session == null || vaultKey == null) return;
-    _running = true;
+    final transport.HomeBoxSession? session;
+    final SecretKey? vaultKey;
+    try {
+      session = await _serverConnection.ensureFreshSession();
+      vaultKey = await _vaultKeyStore.loadVaultKey();
+    } catch (_) {
+      _running = false;
+      rethrow;
+    }
+    if (api == null || session == null || vaultKey == null) {
+      _running = false;
+      return;
+    }
     _clearTransferProgress();
     _setStatus(SyncFolderStatus.materializing);
     try {
@@ -141,16 +153,21 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     required List<String> fileErrors,
   }) async {
     for (final node in _syncEngine.nodeCache.listChildren(parentId)) {
+      // Seen means "still exists on the server", whether or not it can be
+      // shown: only nodes absent from the cache may lose their local copy.
+      seenNodeIds.add(node.id);
       final SensitiveNodeMetadata metadata;
       try {
         metadata = await _decryptMetadata(node, vaultKey, vaultId);
       } catch (_) {
         // Can't decrypt or parse this node's metadata (wrong/missing key
         // version, malformed envelope) - skip it, matching how
-        // FilesController.refresh treats the same failure.
+        // FilesController.refresh treats the same failure. Its subtree is not
+        // walked either, so keep every descendant's existing local copy
+        // rather than pruning it as if it had been deleted remotely.
+        _markSubtreeSeen(node.id, seenNodeIds);
         continue;
       }
-      seenNodeIds.add(node.id);
       final childRelativePath = relativePath.isEmpty
           ? metadata.fileName
           : '$relativePath/${metadata.fileName}';
@@ -192,6 +209,17 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           vaultId: vaultId,
           fileErrors: fileErrors,
         );
+      }
+    }
+  }
+
+  void _markSubtreeSeen(String nodeId, Set<String> seenNodeIds) {
+    final pending = [nodeId];
+    while (pending.isNotEmpty) {
+      for (final child in _syncEngine.nodeCache.listChildren(
+        pending.removeLast(),
+      )) {
+        if (seenNodeIds.add(child.id)) pending.add(child.id);
       }
     }
   }

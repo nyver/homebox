@@ -84,6 +84,11 @@ func (a *API) putUploadChunk(w http.ResponseWriter, r *http.Request) {
 	body := http.MaxBytesReader(w, r.Body, maxChunkBodyBytes)
 	ciphertext, err := io.ReadAll(body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "UPLOAD_CHUNK_INVALID", "chunk exceeds the maximum ciphertext chunk size")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "UPLOAD_CHUNK_INVALID", "could not read chunk body")
 		return
 	}

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/homebox/homebox/internal/uploads"
 )
 
 func TestFullNodeUploadDownloadAndSyncFlow(t *testing.T) {
@@ -182,5 +184,15 @@ func TestFullNodeUploadDownloadAndSyncFlow(t *testing.T) {
 			t.Fatalf("sync changes are not strictly increasing: %#v", changes)
 		}
 		lastRevision = revision
+	}
+}
+
+func TestOversizedChunkBodyIsRejectedAsTooLarge(t *testing.T) {
+	s := startTestServer(t)
+	session := loginDevice(t, s, "admin", "67676767-6767-6767-6767-676767676767")
+	oversized := make([]byte, uploads.MaxChunkCiphertextSize+1)
+	resp, body := s.doRaw(t, http.MethodPut, "/api/v1/uploads/70000000-0000-0000-0000-000000000001/chunks/0", oversized, session["accessToken"].(string))
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized chunk status=%d body=%s, want 413", resp.StatusCode, body)
 	}
 }

@@ -311,21 +311,23 @@ final class DeviceProvisioningController extends ChangeNotifier {
       }
       vaultId = uuidStringToBytes(context.userId);
       deviceId = uuidStringToBytes(context.deviceId);
+      // Only certified provisioning v2 is accepted. A legacy v1 envelope
+      // carries no proof that it came from a device holding the Vault Key,
+      // so anyone with the account password (or a malicious server) could
+      // use one to plant a Vault Key of their own choosing on this device.
+      if (envelope.protocolVersion != homeBoxDeviceProvisioningVersion) {
+        throw const FormatException(
+          'This approval uses an outdated, unauthenticated format. Approve this device again from a trusted device.',
+        );
+      }
       final authentication = stored.deviceKeyAuthentication;
-      if (envelope.protocolVersion == homeBoxDeviceProvisioningVersion &&
-          authentication == null) {
+      if (authentication == null) {
         throw const FormatException(
           'Provisioning v2 is missing its device key certificate.',
         );
       }
-      final certificate = authentication == null
-          ? null
-          : _certificateFromTransport(authentication);
-      final certificateBinding =
-          certificate == null ||
-              envelope.protocolVersion == homeBoxLegacyDeviceProvisioningVersion
-          ? null
-          : await deviceCertificateBinding(certificate);
+      final certificate = _certificateFromTransport(authentication);
+      final certificateBinding = await deviceCertificateBinding(certificate);
       vaultKey = await _cipher.open(
         envelope: envelope,
         recipientKeyPair: identity.keyPair,
@@ -333,22 +335,20 @@ final class DeviceProvisioningController extends ChangeNotifier {
         recipientDeviceId: deviceId,
         certificateBinding: certificateBinding,
       );
-      if (certificate != null) {
-        accountIdentity = await AccountIdentity.derive(
-          vaultKey: vaultKey,
-          accountId: context.userId,
+      accountIdentity = await AccountIdentity.derive(
+        vaultKey: vaultKey,
+        accountId: context.userId,
+      );
+      final valid = await accountIdentity.verifyDevice(
+        certificate: certificate,
+        accountId: context.userId,
+        deviceId: context.deviceId,
+        devicePublicKey: identity.publicKey.bytes,
+      );
+      if (!valid) {
+        throw const FormatException(
+          'The device key certificate is invalid. The server may have substituted a device key.',
         );
-        final valid = await accountIdentity.verifyDevice(
-          certificate: certificate,
-          accountId: context.userId,
-          deviceId: context.deviceId,
-          devicePublicKey: identity.publicKey.bytes,
-        );
-        if (!valid) {
-          throw const FormatException(
-            'The device key certificate is invalid. The server may have substituted a device key.',
-          );
-        }
       }
       await _vaultKeyStore.saveProvisionedVaultKey(vaultKey);
       _setStatus(DeviceProvisioningStatus.ready);

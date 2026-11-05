@@ -109,7 +109,7 @@ final class PendingOperationsStore {
       '''
       SELECT * FROM pending_operations
       WHERE status = ? AND (next_retry_at IS NULL OR next_retry_at <= ?)
-      ORDER BY created_at
+      ORDER BY created_at, rowid
       ''',
       [PendingOperationStatus.pending.wireValue, now.toUtc().toIso8601String()],
     );
@@ -146,6 +146,15 @@ final class PendingOperationsStore {
   /// backoff on an earlier operation (e.g. a CREATE) must not let a later
   /// one (e.g. an UPDATE enqueued right after it) jump ahead and run
   /// against a node the server doesn't know about yet — see SyncEngine.
+  /// Whether [nodeId] still has a restore waiting to reach the server.
+  bool hasUnfinishedRestoreForNode(String nodeId) {
+    final rows = _db.select(
+      "SELECT 1 FROM pending_operations WHERE node_id = ? AND type = ? AND status IN ('PENDING', 'RUNNING', 'BLOCKED') LIMIT 1",
+      [nodeId, PendingOperationType.restoreNode.wireValue],
+    );
+    return rows.isNotEmpty;
+  }
+
   bool hasEarlierUnfinishedOperationForNode(
     String nodeId,
     DateTime strictlyBefore,

@@ -134,3 +134,30 @@ func PinnedClientConfig(fingerprint string) (*tls.Config, error) {
 		},
 	}, nil
 }
+
+// LoadOperatorTLSConfig loads an operator-supplied certificate (server.tls
+// enabled) and returns its TLS 1.3 server config together with the
+// fingerprint clients must pin. Clients pin a P-256 public key rather than
+// trusting a certificate authority, so any other key type is rejected here
+// instead of producing a server no client can connect to. The fingerprint is
+// that of the certificate's key, not of keys/server_identity.key, and it
+// changes whenever the certificate is renewed with a new key.
+func LoadOperatorTLSConfig(certFile, keyFile string) (*tls.Config, string, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, "", fmt.Errorf("load operator TLS certificate: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return nil, "", fmt.Errorf("parse operator TLS certificate: %w", err)
+	}
+	pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, "", errors.New("operator TLS certificate must use an ECDSA P-256 key: clients pin a P-256 public key")
+	}
+	fingerprint, err := serveridentity.FingerprintFromPublicKey(pub)
+	if err != nil {
+		return nil, "", fmt.Errorf("operator TLS certificate must use an ECDSA P-256 key: %w", err)
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}}, fingerprint, nil
+}

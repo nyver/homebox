@@ -28,6 +28,7 @@ var (
 	ErrRevisionConflict  = errors.New("node revision conflict")
 	ErrTargetNodeMissing = errors.New("target file node not found")
 	ErrIDConflict        = errors.New("blob or file version id is already in use")
+	ErrTooManyUploads    = errors.New("too many open upload sessions for this device")
 )
 
 const (
@@ -38,6 +39,12 @@ const (
 	// maxChunkCount bounds the per-upload bookkeeping a client can make the
 	// server allocate. A maximum-size file needs 125 chunks of 4 MiB.
 	maxChunkCount = 1 << 16
+	// MaxOpenSessionsPerDevice bounds how much temporary ciphertext one
+	// device can make the server hold: every open session may grow to the
+	// configured file size limit. Clients upload one file at a time and abort
+	// failed sessions, so this is far above normal use; abandoned sessions
+	// stop counting once they expire.
+	MaxOpenSessionsPerDevice = 64
 )
 
 type Service struct {
@@ -124,6 +131,14 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Session, error) {
 	}
 	if inUse {
 		return Session{}, ErrIDConflict
+	}
+	var openSessions int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_sessions
+		WHERE device_id=? AND status='OPEN' AND expires_at > ?`, in.DeviceID, now.Format(time.RFC3339Nano)).Scan(&openSessions); err != nil {
+		return Session{}, err
+	}
+	if openSessions >= MaxOpenSessionsPerDevice {
+		return Session{}, ErrTooManyUploads
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO upload_sessions
 		(id,user_id,device_id,target_node_id,file_version_id,blob_id,expected_revision,chunk_size,chunk_count,max_ciphertext_size,metadata_ciphertext,metadata_key_version,wrapped_file_key,e2ee_header,status,created_at,expires_at)
@@ -364,6 +379,18 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 	defer tx.Rollback()
 	if result, found, err := replayCompletion(ctx, tx, in); err != nil || found {
 		return result, err
+	}
+	// Re-checked under the write lock: maintenance may have expired the
+	// session (and removed its chunks) while the blob was being assembled.
+	var status string
+	if err := tx.QueryRowContext(ctx, "SELECT status FROM upload_sessions WHERE id=?", uploadID).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return CompleteResult{}, ErrInvalidState
+		}
+		return CompleteResult{}, err
+	}
+	if status != "OPEN" {
+		return CompleteResult{}, ErrInvalidState
 	}
 	var ownerID string
 	var currentRevision int64

@@ -31,7 +31,7 @@ type Identity struct {
 }
 
 func LoadOrCreate(storagePath string) (Identity, error) {
-	keyPath := filepath.Join(storagePath, "keys", "server_identity.key")
+	keyPath := KeyPath(storagePath)
 	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
 		return Identity{}, fmt.Errorf("create identity directory: %w", err)
 	}
@@ -58,10 +58,47 @@ func LoadOrCreate(storagePath string) (Identity, error) {
 	if err != nil {
 		return Identity{}, fmt.Errorf("encode server identity: %w", err)
 	}
-	if err := os.WriteFile(keyPath, []byte(base64.RawStdEncoding.EncodeToString(der)), fileMode); err != nil {
+	if err := writeKeyFile(keyPath, []byte(base64.RawStdEncoding.EncodeToString(der))); err != nil {
 		return Identity{}, fmt.Errorf("write server identity: %w", err)
 	}
 	return newIdentity(privateKey)
+}
+
+// KeyPath returns where LoadOrCreate keeps the identity key for storagePath.
+func KeyPath(storagePath string) string {
+	return filepath.Join(storagePath, "keys", "server_identity.key")
+}
+
+// writeKeyFile writes the key to a temporary file, flushes it, and only then
+// renames it into place, so a crash can never leave a truncated key that
+// would stop the server from starting (and change its pinned fingerprint).
+// A key that appeared concurrently is never overwritten.
+func writeKeyFile(path string, data []byte) error {
+	temp, err := os.CreateTemp(filepath.Dir(path), ".server_identity-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(fileMode); err != nil && !errors.Is(err, errors.ErrUnsupported) {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return errors.New("a server identity key appeared concurrently; refusing to overwrite it")
+	}
+	return os.Rename(tempPath, path)
 }
 
 func newIdentity(privateKey *ecdsa.PrivateKey) (Identity, error) {

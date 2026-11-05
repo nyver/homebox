@@ -40,6 +40,8 @@ final class FakeNodeServer {
   int contentDownloadCount = 0;
   int deleteRequestCount = 0;
   int ownedRootListRequestCount = 0;
+  int nodeGetRequestCount = 0;
+  final List<String> restoredNodeIds = [];
 
   Future<HttpServer> start() => startFixtureServer(_handle);
 
@@ -137,6 +139,7 @@ final class FakeNodeServer {
       return;
     }
     if (method == 'GET' && path.startsWith('/api/v1/nodes/')) {
+      nodeGetRequestCount++;
       final id = path.substring('/api/v1/nodes/'.length);
       final node = _nodes[id];
       if (node == null) {
@@ -343,6 +346,12 @@ final class FakeNodeServer {
         });
         return;
       }
+      restoredNodeIds.add(id);
+      // Like the real server: a node whose folder is still in Trash is
+      // restored to the root instead of staying hidden.
+      if (_hasDeletedAncestor(node['parentId'] as String?)) {
+        node['parentId'] = null;
+      }
       node['deletedAt'] = null;
       node['revision'] = _recordChange(id, 'RESTORE');
       _writeJson(request, 200, node);
@@ -380,6 +389,39 @@ final class FakeNodeServer {
   void corruptBlob(String nodeId) {
     final versionId = _nodes[nodeId]!['currentVersionId'] as String;
     _blobs[versionId]![0] ^= 0xff;
+  }
+
+  bool _hasDeletedAncestor(String? parentId) {
+    final seen = <String>{};
+    for (var id = parentId; id != null && seen.add(id);) {
+      final parent = _nodes[id];
+      if (parent == null || parent['deletedAt'] != null) return true;
+      id = parent['parentId'] as String?;
+    }
+    return false;
+  }
+
+  /// Simulates another device moving [nodeId] to Trash.
+  void remoteDelete(String nodeId) {
+    _nodes[nodeId]!['deletedAt'] = '2026-01-01T00:00:00Z';
+    _nodes[nodeId]!['revision'] = _recordChange(nodeId, 'DELETE');
+  }
+
+  /// Records [count] more server-side UPDATE changes for [nodeId] without
+  /// altering it, like a history of renames another device made.
+  void recordRemoteUpdates(String nodeId, int count) {
+    for (var i = 0; i < count; i++) {
+      _nodes[nodeId]!['revision'] = _recordChange(nodeId, 'UPDATE');
+    }
+  }
+
+  /// Replaces [nodeId]'s encrypted metadata with bytes no client can
+  /// decrypt, e.g. a key version this device does not have yet.
+  void replaceMetadataWithUndecryptable(String nodeId) {
+    _nodes[nodeId]!['metadataCiphertext'] = base64Encode(
+      List<int>.filled(64, 0x5a),
+    );
+    _nodes[nodeId]!['revision'] = _recordChange(nodeId, 'UPDATE');
   }
 
   Map<String, dynamic> _newNode({

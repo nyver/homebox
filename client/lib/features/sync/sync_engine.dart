@@ -245,6 +245,16 @@ final class SyncEngine extends ChangeNotifier {
         // reordering into a mutation on a node the server doesn't have.
         continue;
       }
+      final parentId = op.type == PendingOperationType.restoreNode
+          ? nodeCache.getById(op.nodeId)?.parentId
+          : null;
+      if (parentId != null &&
+          pendingOperations.hasUnfinishedRestoreForNode(parentId)) {
+        // The server restores a node whose folder is still in Trash to the
+        // root, so a parent folder's own restore must land first. A parent
+        // restore that failed permanently no longer blocks this one.
+        continue;
+      }
       await _pushOne(api, accessToken, scopeId, op);
     }
   }
@@ -601,15 +611,21 @@ final class SyncEngine extends ChangeNotifier {
         after: after,
         pageSize: 200,
       );
-      for (final change in page.changes) {
-        final nodeId = change.nodeId;
+      // A refresh reads the node's *current* state, so a node changed several
+      // times within one page (create, rename, new versions, ...) needs only
+      // one request. This matters most on a fresh device replaying the whole
+      // history from revision 0.
+      final changedNodeIds = <String>{
+        for (final change in page.changes)
+          if (change.nodeId != null) change.nodeId!,
+      };
+      for (final nodeId in changedNodeIds) {
         // A mutation queued after this pass's push phase started (e.g. Move
         // to Trash while a pass was in flight) is applied optimistically in
         // the cache only. Overwriting it with the server's older state would
         // resurrect the node until the next pass, and the sync folder would
         // download it again. Its own push refreshes the node afterwards.
-        if (nodeId != null &&
-            !pendingOperations.hasPendingOperationsForNode(nodeId)) {
+        if (!pendingOperations.hasPendingOperationsForNode(nodeId)) {
           await _refreshNodeFromServer(
             api,
             accessToken,

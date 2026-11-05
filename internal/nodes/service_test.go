@@ -223,3 +223,85 @@ func TestGetRejectsAnotherAccountsNode(t *testing.T) {
 		t.Fatalf("error=%v, want %v", err, ErrForbidden)
 	}
 }
+
+func TestRestoreUnderTrashedFolderMovesNodeToRoot(t *testing.T) {
+	ctx := context.Background()
+	s, _, userID, deviceID := newTestService(t)
+	create := func(nodeType string, parentID *string) Node {
+		t.Helper()
+		n, err := s.Create(ctx, CreateInput{ID: uuid.NewString(), OwnerID: userID, DeviceID: deviceID, OperationID: uuid.NewString(),
+			ParentID: parentID, NodeType: nodeType, MetadataCiphertext: []byte("encrypted"), MetadataKeyVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	outer := create("DIRECTORY", nil)
+	inner := create("DIRECTORY", &outer.ID)
+	file := create("FILE", &inner.ID)
+	sibling := create("FILE", &outer.ID)
+
+	// The file goes to Trash first, then a folder two levels above it.
+	if err := s.Delete(ctx, userID, deviceID, file.ID, uuid.NewString(), file.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, userID, deviceID, outer.ID, uuid.NewString(), outer.Revision); err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := s.Restore(ctx, userID, deviceID, file.ID, uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ParentID != nil || restored.IsDeleted() {
+		t.Fatalf("file restored under a trashed folder must land in the root: %#v", restored)
+	}
+	roots, err := s.ListChildren(ctx, userID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 1 || roots[0].ID != file.ID {
+		t.Fatalf("restored file must be visible in the root: %#v", roots)
+	}
+
+	// Restoring the folder itself keeps its subtree where it was.
+	restoredOuter, err := s.Restore(ctx, userID, deviceID, outer.ID, uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredOuter.ParentID != nil {
+		t.Fatalf("root folder restored with a parent: %#v", restoredOuter)
+	}
+	children, err := s.ListChildren(ctx, userID, &outer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 2 || (children[0].ID != inner.ID && children[1].ID != inner.ID) || (children[0].ID != sibling.ID && children[1].ID != sibling.ID) {
+		t.Fatalf("restored folder lost its children: %#v", children)
+	}
+}
+
+func TestRestoreUnderLiveFolderKeepsParent(t *testing.T) {
+	ctx := context.Background()
+	s, _, userID, deviceID := newTestService(t)
+	dir, err := s.Create(ctx, CreateInput{ID: uuid.NewString(), OwnerID: userID, DeviceID: deviceID, OperationID: uuid.NewString(),
+		NodeType: "DIRECTORY", MetadataCiphertext: []byte("encrypted"), MetadataKeyVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := s.Create(ctx, CreateInput{ID: uuid.NewString(), OwnerID: userID, DeviceID: deviceID, OperationID: uuid.NewString(),
+		ParentID: &dir.ID, NodeType: "FILE", MetadataCiphertext: []byte("encrypted"), MetadataKeyVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, userID, deviceID, file.ID, uuid.NewString(), file.Revision); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := s.Restore(ctx, userID, deviceID, file.ID, uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ParentID == nil || *restored.ParentID != dir.ID {
+		t.Fatalf("file restored into a live folder must keep its parent: %#v", restored)
+	}
+}

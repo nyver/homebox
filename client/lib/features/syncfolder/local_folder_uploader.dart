@@ -97,13 +97,23 @@ final class LocalFolderUploader extends ChangeNotifier {
   /// pass — it is simply retried on the next call.
   Future<void> scan(String rootPath) async {
     if (_running) return;
+    // Claimed before the first await, so a second caller arriving while the
+    // session is being refreshed cannot start an overlapping pass.
+    _running = true;
+    try {
+      await _scanLocked(rootPath);
+    } finally {
+      _running = false;
+    }
+  }
+
+  Future<void> _scanLocked(String rootPath) async {
     final api = _serverConnection.api;
     // Not _serverConnection.session directly — see FilesController's
     // _requireContext for why (mobile OSes suspend background timers).
     final session = await _serverConnection.ensureFreshSession();
     final vaultKey = await _vaultKeyStore.loadVaultKey();
     if (api == null || session == null || vaultKey == null) return;
-    _running = true;
     _clearTransferProgress();
     _setStatus(LocalUploadStatus.scanning);
     try {
@@ -125,7 +135,6 @@ final class LocalFolderUploader extends ChangeNotifier {
       _errorMessage = describeError(e);
       _setStatus(LocalUploadStatus.error);
     } finally {
-      _running = false;
       _clearTransferProgress();
     }
   }
@@ -138,6 +147,15 @@ final class LocalFolderUploader extends ChangeNotifier {
   /// partially rebuilt server tree.
   Future<bool> resyncFromLocalFolder(String rootPath) async {
     if (_running) return false;
+    _running = true;
+    try {
+      return await _resyncLocked(rootPath);
+    } finally {
+      _running = false;
+    }
+  }
+
+  Future<bool> _resyncLocked(String rootPath) async {
     _resyncRequiresRecovery = false;
     final root = Directory(rootPath);
     if (!await root.exists()) {
@@ -161,7 +179,6 @@ final class LocalFolderUploader extends ChangeNotifier {
       return false;
     }
 
-    _running = true;
     _clearTransferProgress();
     _setStatus(LocalUploadStatus.resyncing);
     try {
@@ -220,7 +237,6 @@ final class LocalFolderUploader extends ChangeNotifier {
       _setStatus(LocalUploadStatus.error);
       return false;
     } finally {
-      _running = false;
       _clearTransferProgress();
     }
   }

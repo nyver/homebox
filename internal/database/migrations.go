@@ -22,6 +22,7 @@ var migrations = []migration{
 	{9, "hot_path_indexes_and_token_rotation", migration0009HotPathIndexesAndTokenRotation},
 	{10, "recovery_bundles", migration0010RecoveryBundles},
 	{11, "file_version_retention_index", migration0011FileVersionRetentionIndex},
+	{12, "gc_and_lookup_indexes", migration0012GCAndLookupIndexes},
 }
 
 const migration0001InitialSchema = `
@@ -210,4 +211,15 @@ CREATE TABLE IF NOT EXISTS recovery_bundles (
 // retention scan and the version-history listing ordered by an index.
 const migration0011FileVersionRetentionIndex = `
 CREATE INDEX IF NOT EXISTS idx_file_versions_node_created ON file_versions(node_id, created_at);
+`
+
+// migration0012GCAndLookupIndexes indexes the reverse lookups that run for
+// every row of large tables. Without file_versions(blob_id) the hourly blob GC
+// scans the whole version table once per blob while holding SQLite's write
+// lock, which stalls every client write on a vault with a long history.
+const migration0012GCAndLookupIndexes = `
+CREATE INDEX IF NOT EXISTS idx_file_versions_blob ON file_versions(blob_id);
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_target_node ON upload_sessions(target_node_id);
+CREATE INDEX IF NOT EXISTS idx_vault_envelopes_target_device
+  ON vault_key_envelopes(target_device_id, created_at) WHERE revoked_at IS NULL;
 `

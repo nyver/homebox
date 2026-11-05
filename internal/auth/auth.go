@@ -29,13 +29,18 @@ const maxConcurrentPasswordHashes = 2
 
 const maxConcurrentAttemptsPerAddress = 4
 
+// maxConcurrentAttemptsPerAccount caps parallel guesses against one username
+// across all addresses without letting one stalled client lock it out.
+const maxConcurrentAttemptsPerAccount = 4
+
 type Service struct {
 	db             *sql.DB
 	maxUsers       int
 	accessTokenTTL time.Duration
 	now            func() time.Time
-	loginLimiter   *attemptLimiter
-	addressLimiter *attemptLimiter
+	loginLimiter   *attemptLimiter // strict, keyed by username and address
+	accountLimiter *attemptLimiter // lenient, keyed by username alone
+	addressLimiter *attemptLimiter // keyed by client address alone
 	passwordSlots  chan struct{}
 }
 
@@ -51,7 +56,12 @@ type User struct {
 func New(db *sql.DB, maxUsers int, accessTokenTTL time.Duration) *Service {
 	return &Service{
 		db: db, maxUsers: maxUsers, accessTokenTTL: accessTokenTTL, now: time.Now,
-		loginLimiter: newAttemptLimiter(loginBackoff, 1),
+		// The strict backoff is keyed by username *and* address, so a stranger
+		// failing logins for a username cannot lock its owner out from their
+		// own network. The lenient account-wide limiter still bounds a
+		// guessing campaign spread across many addresses.
+		loginLimiter:   newAttemptLimiter(loginBackoff, 1),
+		accountLimiter: newAttemptLimiter(accountBackoff, maxConcurrentAttemptsPerAccount),
 		// A few concurrent attempts per address leave room for a family
 		// signing in together behind one NAT while stopping one client from
 		// queueing hundreds of Argon2id evaluations before its first

@@ -43,8 +43,7 @@ String _describeApiError(HomeBoxApiException error) {
     'AUTH_RATE_LIMITED' =>
       'Too many failed sign-in attempts. Wait a minute and try again.',
     'AUTH_TOKEN_EXPIRED' => 'Your session has expired. Sign in again.',
-    'AUTH_DEVICE_REVOKED' =>
-      'This device was removed from your account. Sign in again to register it.',
+    'AUTH_DEVICE_REVOKED' => 'This device was removed from your account. Sign in again to register it.',
     'REVISION_CONFLICT' =>
       'This item was changed on another device. Refresh and try again.',
     'NOT_FOUND' || 'UPLOAD_NOT_FOUND' =>
@@ -53,6 +52,7 @@ String _describeApiError(HomeBoxApiException error) {
     'UPLOAD_EXPIRED' ||
     'UPLOAD_CHUNK_INVALID' ||
     'UPLOAD_ID_CONFLICT' => 'The upload could not be completed. Try again.',
+    'UPLOAD_LIMIT_REACHED' => 'Too many unfinished uploads from this device. Wait for them to finish and try again.',
     'SYNC_CURSOR_INVALID' =>
       'Sync state is out of date. HomeBox will resynchronize.',
     // Validation messages are written by the server for display.

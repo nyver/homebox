@@ -127,8 +127,17 @@ func (s *Service) Get(ctx context.Context, userID, nodeID string) (Node, error) 
 	if err != nil {
 		return Node{}, err
 	}
-	if n.OwnerID != userID && (n.IsDeleted() || !s.hasReadShare(ctx, userID, nodeID)) {
-		return Node{}, ErrForbidden
+	if n.OwnerID != userID {
+		if n.IsDeleted() {
+			return Node{}, ErrForbidden
+		}
+		shared, err := s.hasReadShare(ctx, userID, nodeID)
+		if err != nil {
+			return Node{}, err
+		}
+		if !shared {
+			return Node{}, ErrForbidden
+		}
 	}
 	return n, nil
 }
@@ -259,8 +268,17 @@ func (s *Service) requireReadableDirectory(ctx context.Context, userID, nodeID s
 	if err != nil {
 		return err
 	}
-	if nodeType != "DIRECTORY" || deleted.Valid || (ownerID != userID && !s.hasReadShare(ctx, userID, nodeID)) {
+	if nodeType != "DIRECTORY" || deleted.Valid {
 		return ErrForbidden
+	}
+	if ownerID != userID {
+		shared, err := s.hasReadShare(ctx, userID, nodeID)
+		if err != nil {
+			return err
+		}
+		if !shared {
+			return ErrForbidden
+		}
 	}
 	return nil
 }
@@ -270,8 +288,10 @@ func (s *Service) requireReadableDirectory(ctx context.Context, userID, nodeID s
 // shared ancestor is in Trash: a recipient must lose access to a subtree
 // the owner deleted, exactly as the owner's own listings hide it. The
 // recursive walk is bounded by SQLite's recursion limit and the existing
-// node mutation cycle checks.
-func (s *Service) hasReadShare(ctx context.Context, userID, nodeID string) bool {
+// node mutation cycle checks. A database error is returned rather than
+// treated as "no share", so it surfaces as an internal error instead of a
+// misleading 403.
+func (s *Service) hasReadShare(ctx context.Context, userID, nodeID string) (bool, error) {
 	var allowed bool
 	err := s.db.QueryRowContext(ctx, `WITH RECURSIVE ancestors(id,parent_id,deleted_at,depth) AS (
 		SELECT id,parent_id,deleted_at,0 FROM nodes WHERE id=?
@@ -281,7 +301,7 @@ func (s *Service) hasReadShare(ctx context.Context, userID, nodeID string) bool 
 		WHERE sh.target_user_id=? AND sh.permission='READ' AND sh.revoked_at IS NULL
 	) SELECT EXISTS(SELECT 1 FROM nearest WHERE nearest.depth IS NOT NULL
 		AND NOT EXISTS(SELECT 1 FROM ancestors a WHERE a.depth <= nearest.depth AND a.deleted_at IS NOT NULL))`, nodeID, userID).Scan(&allowed)
-	return err == nil && allowed
+	return allowed, err
 }
 
 type UpdateInput struct {
@@ -441,8 +461,8 @@ func (s *Service) Restore(ctx context.Context, userID, deviceID, nodeID, operati
 		return Node{}, err
 	}
 	var ownerID string
-	var deletedAt sql.NullString
-	if err := tx.QueryRowContext(ctx, "SELECT owner_id, deleted_at FROM nodes WHERE id = ?", nodeID).Scan(&ownerID, &deletedAt); err != nil {
+	var parentID, deletedAt sql.NullString
+	if err := tx.QueryRowContext(ctx, "SELECT owner_id, parent_id, deleted_at FROM nodes WHERE id = ?", nodeID).Scan(&ownerID, &parentID, &deletedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Node{}, ErrNotFound
 		}
@@ -454,14 +474,27 @@ func (s *Service) Restore(ctx context.Context, userID, deviceID, nodeID, operati
 	if !deletedAt.Valid {
 		return Node{}, apierror.NewValidation("node is not in trash")
 	}
+	// A node restored under a folder that is itself still in Trash would stay
+	// invisible, and the folder's retention purge would later delete it for
+	// good together with the rest of that subtree. Restore it to the root
+	// instead, where the owner can see it and move it on.
+	toRoot := false
+	if parentID.Valid {
+		if toRoot, err = s.hasDeletedAncestor(ctx, tx, parentID.String); err != nil {
+			return Node{}, err
+		}
+	}
 
 	now := s.now().UTC()
 	revision, err := s.recordChange(ctx, tx, userID, nodeID, "RESTORE")
 	if err != nil {
 		return Node{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET deleted_at=NULL, revision=?, updated_at=? WHERE id=?`,
-		revision, now.Format(time.RFC3339Nano), nodeID); err != nil {
+	restoreSQL := `UPDATE nodes SET deleted_at=NULL, revision=?, updated_at=? WHERE id=?`
+	if toRoot {
+		restoreSQL = `UPDATE nodes SET deleted_at=NULL, parent_id=NULL, revision=?, updated_at=? WHERE id=?`
+	}
+	if _, err := tx.ExecContext(ctx, restoreSQL, revision, now.Format(time.RFC3339Nano), nodeID); err != nil {
 		return Node{}, fmt.Errorf("restore node: %w", err)
 	}
 	if err := s.recordProcessed(ctx, tx, operationID, userID, deviceID, "NODE_RESTORE", nodeID, revision); err != nil {
@@ -471,6 +504,18 @@ func (s *Service) Restore(ctx context.Context, userID, deviceID, nodeID, operati
 		return Node{}, err
 	}
 	return s.Get(ctx, userID, nodeID)
+}
+
+// hasDeletedAncestor reports whether nodeID or any folder above it is in
+// Trash (or no longer exists), i.e. whether a child placed there is hidden.
+func (s *Service) hasDeletedAncestor(ctx context.Context, tx *sql.Tx, nodeID string) (bool, error) {
+	var hidden bool
+	err := tx.QueryRowContext(ctx, `WITH RECURSIVE ancestors(id,parent_id,deleted_at) AS (
+		SELECT id,parent_id,deleted_at FROM nodes WHERE id=?
+		UNION SELECT n.id,n.parent_id,n.deleted_at FROM nodes n JOIN ancestors a ON a.parent_id=n.id
+	) SELECT NOT EXISTS(SELECT 1 FROM ancestors WHERE id=?) OR EXISTS(SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
+		nodeID, nodeID).Scan(&hidden)
+	return hidden, err
 }
 
 // ListTrash returns the caller's soft-deleted nodes (spec §17.7).

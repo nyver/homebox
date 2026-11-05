@@ -1004,7 +1004,7 @@ final class FilesController extends ChangeNotifier {
         await _ensureNameIsFree(deleted, ctx);
       }
       final now = DateTime.now().toUtc();
-      for (final deleted in toRestore) {
+      for (final (index, deleted) in toRestore.indexed) {
         cache.upsert(
           LocalNode(
             id: deleted.id,
@@ -1026,7 +1026,9 @@ final class FilesController extends ChangeNotifier {
             type: PendingOperationType.restoreNode,
             nodeId: deleted.id,
             payload: const {},
-            createdAt: now,
+            // Strictly increasing, so the outbox pushes the outermost
+            // folder's restore first.
+            createdAt: now.add(Duration(microseconds: index)),
             retryCount: 0,
             status: PendingOperationStatus.pending,
           ),

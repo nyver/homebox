@@ -25,8 +25,25 @@ final class ServerFingerprint {
   const ServerFingerprint._();
 
   static const List<int> _p256AlgorithmIdentifier = [
-    0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
-    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+    0x06,
+    0x07,
+    0x2a,
+    0x86,
+    0x48,
+    0xce,
+    0x3d,
+    0x02,
+    0x01,
+    0x06,
+    0x08,
+    0x2a,
+    0x86,
+    0x48,
+    0xce,
+    0x3d,
+    0x03,
+    0x01,
+    0x07,
   ];
   static const int _pointLength = 65; // 0x04 || X(32) || Y(32), uncompressed
 
@@ -61,7 +78,9 @@ final class ServerFingerprint {
       final subjectPublicKeyInfo = tbs.read(0x30).reader();
 
       final algorithm = subjectPublicKeyInfo.read(0x30).content;
-      if (!_constantBytesEqual(algorithm, _p256AlgorithmIdentifier)) return null;
+      if (!_constantBytesEqual(algorithm, _p256AlgorithmIdentifier)) {
+        return null;
+      }
       final publicKeyBits = subjectPublicKeyInfo.read(0x03).content;
       if (!subjectPublicKeyInfo.isAtEnd ||
           publicKeyBits.length != _pointLength + 1 ||
@@ -116,7 +135,9 @@ final class _DerReader {
     var length = _bytes[_offset++];
     if ((length & 0x80) != 0) {
       final lengthBytes = length & 0x7f;
-      if (lengthBytes == 0 || lengthBytes > 4 || _offset + lengthBytes > _bytes.length) {
+      if (lengthBytes == 0 ||
+          lengthBytes > 4 ||
+          _offset + lengthBytes > _bytes.length) {
         throw const FormatException('Invalid DER length.');
       }
       if (_bytes[_offset] == 0) {

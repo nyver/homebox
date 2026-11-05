@@ -361,7 +361,7 @@ type uploadEnvelopeRequest struct {
 }
 
 // uploadKeyEnvelope lets any of the caller's own active devices deliver a
-// provisioning envelope to another of their own devices. Sharing an
+// certified provisioning envelope to another of their own devices. Sharing an
 // envelope across different user accounts is part of Family Vault sharing
 // (spec §28) and is out of scope until that milestone.
 func (a *API) uploadKeyEnvelope(w http.ResponseWriter, r *http.Request) {
@@ -388,25 +388,26 @@ func (a *API) uploadKeyEnvelope(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, auth.ErrDeviceRevoked)
 		return
 	}
-	var certificate *provisioning.Certification
-	hasCertificateField := req.SignatureVersion != 0 || req.AccountIdentityPublicKey != "" || req.PublicKeySignature != ""
-	if hasCertificateField {
-		if req.SignatureVersion == 0 || req.AccountIdentityPublicKey == "" || req.PublicKeySignature == "" {
-			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "device key certificate fields must be supplied together")
-			return
-		}
-		accountPublicKey, err := base64.StdEncoding.DecodeString(req.AccountIdentityPublicKey)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "accountIdentityPublicKey must be base64-encoded")
-			return
-		}
-		deviceSignature, err := base64.StdEncoding.DecodeString(req.PublicKeySignature)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "publicKeySignature must be base64-encoded")
-			return
-		}
-		certificate = &provisioning.Certification{SignatureVersion: req.SignatureVersion, AccountPublicKey: accountPublicKey, DeviceSignature: deviceSignature}
+	// Every new envelope must carry the account-identity certificate of the
+	// device key it targets (provisioning v2, ADR-021). Accepting an
+	// uncertified legacy v1 envelope would let anyone holding the account
+	// password, or a malicious server, hand a pending device a Vault Key of
+	// their own choosing.
+	if req.SignatureVersion == 0 || req.AccountIdentityPublicKey == "" || req.PublicKeySignature == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "a device key certificate is required for new key envelopes")
+		return
 	}
+	accountPublicKey, err := base64.StdEncoding.DecodeString(req.AccountIdentityPublicKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "accountIdentityPublicKey must be base64-encoded")
+		return
+	}
+	deviceSignature, err := base64.StdEncoding.DecodeString(req.PublicKeySignature)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "publicKeySignature must be base64-encoded")
+		return
+	}
+	certificate := &provisioning.Certification{SignatureVersion: req.SignatureVersion, AccountPublicKey: accountPublicKey, DeviceSignature: deviceSignature}
 	envelope, err := a.provisioning.UploadAuthenticated(r.Context(), req.VaultID, userID, targetDeviceID, req.KeyVersion, ciphertext, target.PublicKey, target.KeyVersion, certificate)
 	if err != nil {
 		writeServiceError(w, err)
@@ -576,6 +577,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "REVISION_CONFLICT", "node revision conflict")
 	case errors.Is(err, uploads.ErrIDConflict):
 		writeError(w, http.StatusConflict, "UPLOAD_ID_CONFLICT", "blob or file version id is already in use")
+	case errors.Is(err, uploads.ErrTooManyUploads):
+		writeError(w, http.StatusTooManyRequests, "UPLOAD_LIMIT_REACHED", "too many unfinished uploads from this device; let them finish or expire")
 	case errors.Is(err, uploads.ErrTargetNodeMissing):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "target file node not found")
 

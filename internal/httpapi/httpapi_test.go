@@ -243,6 +243,28 @@ func loginDevice(t *testing.T, s testServer, username, deviceID string) map[stri
 	return body
 }
 
+// signedEnvelopeBody builds a provisioning v2 key-envelope request whose
+// device key certificate is signed by a fresh account identity. The device
+// public key matches the one loginDevice registers.
+func signedEnvelopeBody(t *testing.T, userID, deviceID string, ciphertext []byte) map[string]any {
+	t.Helper()
+	accountPublicKey, accountPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement, err := deviceauth.Statement(userID, deviceID, 1, []byte("01234567890123456789012345678901"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{
+		"vaultId": userID, "keyVersion": 1,
+		"ciphertext":               base64.StdEncoding.EncodeToString(ciphertext),
+		"signatureVersion":         deviceauth.SignatureVersion,
+		"accountIdentityPublicKey": base64.StdEncoding.EncodeToString(accountPublicKey),
+		"publicKeySignature":       base64.StdEncoding.EncodeToString(ed25519.Sign(accountPrivateKey, statement)),
+	}
+}
+
 func TestFullLoginDeviceKeyEnvelopeAndRevokeFlow(t *testing.T) {
 	s := startTestServer(t)
 	trustedDeviceID := "11111111-1111-1111-1111-111111111111"
@@ -280,9 +302,22 @@ func TestFullLoginDeviceKeyEnvelopeAndRevokeFlow(t *testing.T) {
 		t.Fatalf("expected no envelope yet, status=%d", resp.StatusCode)
 	}
 
+	// An uncertified legacy (v1) envelope must be refused: it would let a
+	// password holder or a malicious server choose the pending device's
+	// Vault Key.
 	resp, upload := s.do(t, http.MethodPost, fmt.Sprintf("/api/v1/devices/%s/key-envelope", newDeviceID), map[string]any{
 		"vaultId": "vault-1", "keyVersion": 1, "ciphertext": base64.StdEncoding.EncodeToString([]byte("wrapped-vault-key")),
 	}, trustedToken)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("uncertified envelope status=%d body=%v, want 400", resp.StatusCode, upload)
+	}
+	if hasVaultKey, ok := deviceField(t, s, trustedToken, newDeviceID, "hasVaultKey").(bool); !ok || hasVaultKey {
+		t.Fatalf("a refused envelope must not approve the device, got %v", hasVaultKey)
+	}
+
+	userID := trusted["user"].(map[string]any)["id"].(string)
+	resp, upload = s.do(t, http.MethodPost, fmt.Sprintf("/api/v1/devices/%s/key-envelope", newDeviceID),
+		signedEnvelopeBody(t, userID, newDeviceID, []byte("wrapped-vault-key")), trustedToken)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("upload envelope status=%d body=%v", resp.StatusCode, upload)
 	}
