@@ -875,6 +875,29 @@ final class _FilesSectionState extends State<_FilesSection> {
     }
   }
 
+  Future<void> _markConflictResolved(
+    BuildContext context,
+    FileEntry entry,
+  ) async {
+    final controller = widget.controller;
+    if (controller == null) return;
+    final ok = await controller.markConflictResolved(entry);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            controller.errorMessage ??
+                _localized(
+                  context,
+                  en: 'Could not update the conflict copy.',
+                  ru: 'Не удалось обновить конфликтную копию.',
+                ),
+          ),
+        ),
+      );
+    }
+  }
+
   Future<void> _deleteEntry(BuildContext context, FileEntry entry) async {
     final controller = widget.controller;
     if (controller == null) return;
@@ -979,7 +1002,27 @@ final class _FilesSectionState extends State<_FilesSection> {
                 leading: entry.isDirectory
                     ? _folderListIcon
                     : _FileListLeading(entry: entry, controller: controller),
-                title: Text(entry.name),
+                title: entry.isConflictCopy
+                    ? Row(
+                        children: [
+                          Flexible(child: Text(entry.name)),
+                          const SizedBox(width: 6),
+                          Tooltip(
+                            message: entry.metadata.conflictDetails!,
+                            child: Icon(
+                              Icons.call_split,
+                              size: 18,
+                              color: Theme.of(context).colorScheme.tertiary,
+                              semanticLabel: _localized(
+                                context,
+                                en: 'Conflict copy',
+                                ru: 'Конфликтная копия',
+                              ),
+                            ),
+                          ),
+                        ],
+                      )
+                    : Text(entry.name),
                 subtitle: entry.isDirectory
                     ? null
                     : Text(_fileEntrySubtitle(entry, controller.entriesAsOf)),
@@ -995,6 +1038,7 @@ final class _FilesSectionState extends State<_FilesSection> {
                     'replace' => _replaceContent(context, entry),
                     'versions' => _showVersionHistory(context, entry),
                     'rename' => _renameEntry(context, entry),
+                    'resolve_conflict' => _markConflictResolved(context, entry),
                     'delete' => _deleteEntry(context, entry),
                     _ => null,
                   },
@@ -1035,6 +1079,17 @@ final class _FilesSectionState extends State<_FilesSection> {
                             context,
                             en: 'Version history…',
                             ru: 'История версий…',
+                          ),
+                        ),
+                      ),
+                    if (entry.isConflictCopy)
+                      PopupMenuItem(
+                        value: 'resolve_conflict',
+                        child: Text(
+                          _localized(
+                            context,
+                            en: 'Mark conflict resolved',
+                            ru: 'Отметить конфликт решённым',
                           ),
                         ),
                       ),

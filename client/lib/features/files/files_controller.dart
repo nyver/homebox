@@ -21,6 +21,8 @@ import '../../core/storage/pending_operations_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/util/local_path.dart';
 import '../server/server_connection_controller.dart';
+import '../sync/outbox_conflict_resolver.dart'
+    show baseMetadataPayloadKey, baseParentIdPayloadKey;
 import '../sync/sync_engine.dart';
 import 'file_transfer.dart';
 import '../../core/util/user_facing_error.dart';
@@ -58,6 +60,9 @@ final class FileEntry {
 
   bool get isDirectory => node.isDirectory;
   String get name => metadata.fileName;
+
+  /// True for a conflict copy (spec §21) the user has not marked resolved.
+  bool get isConflictCopy => metadata.conflictDetails != null;
 }
 
 /// A soft-deleted file or folder that can still be restored from Trash.
@@ -487,6 +492,8 @@ final class FilesController extends ChangeNotifier {
           mimeType: entry.metadata.mimeType,
           plaintextSha256: entry.metadata.plaintextSha256,
           plaintextSize: entry.metadata.plaintextSize,
+          conflictDetails: entry.metadata.conflictDetails,
+          labels: entry.metadata.labels,
         ),
         metadataKey: ctx.vaultKey,
         keyVersion: homeBoxPersonalVaultKeyVersion,
@@ -518,6 +525,61 @@ final class FilesController extends ChangeNotifier {
         metadataCiphertext: metadataCiphertext,
         moveParent: move,
         parentId: targetParentId,
+      );
+      unawaited(_syncEngine.runOnce());
+      await refresh();
+      return true;
+    } catch (e) {
+      _errorMessage = describeError(e);
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Clears the conflict-copy marker of [entry] once the user has reviewed
+  /// it, through the same local-first outbox as a rename. Only the encrypted
+  /// metadata changes; the content and its version history stay as they are.
+  Future<bool> markConflictResolved(FileEntry entry) async {
+    if (!entry.isConflictCopy) return true;
+    final ctx = await _requireContext();
+    if (ctx == null) return false;
+    try {
+      final envelope = await _metadataCipher.encrypt(
+        metadata: SensitiveNodeMetadata(
+          fileName: entry.metadata.fileName,
+          mimeType: entry.metadata.mimeType,
+          plaintextSha256: entry.metadata.plaintextSha256,
+          plaintextSize: entry.metadata.plaintextSize,
+          labels: entry.metadata.labels,
+        ),
+        metadataKey: ctx.vaultKey,
+        keyVersion: homeBoxPersonalVaultKeyVersion,
+        nodeType: entry.isDirectory
+            ? MetadataNodeType.directory
+            : MetadataNodeType.file,
+        scopeId: ctx.vaultId,
+        nodeId: uuidStringToBytes(entry.node.id),
+      );
+      final metadataCiphertext = envelope.encode();
+      _syncEngine.nodeCache.upsert(
+        LocalNode(
+          id: entry.node.id,
+          parentId: entry.node.parentId,
+          nodeType: entry.node.nodeType,
+          metadataCiphertext: metadataCiphertext,
+          metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+          currentVersionId: entry.node.currentVersionId,
+          revision: entry.node.revision,
+          createdAt: entry.node.createdAt,
+          updatedAt: DateTime.now().toUtc(),
+          pendingCreate: entry.node.pendingCreate,
+        ),
+      );
+      _enqueueUpdate(
+        entry.node,
+        baseRevision: entry.node.revision,
+        metadataCiphertext: metadataCiphertext,
+        parentId: entry.node.parentId,
       );
       unawaited(_syncEngine.runOnce());
       await refresh();
@@ -594,6 +656,11 @@ final class FilesController extends ChangeNotifier {
             'metadataKeyVersion': homeBoxPersonalVaultKeyVersion,
           'moveParent': moveParent,
           'parentId': parentId,
+          // The node as this change saw it, so a revision conflict can be
+          // rebased onto the server's newer state (spec §21) instead of
+          // being dropped or overwriting a concurrent change.
+          baseParentIdPayloadKey: node.parentId,
+          baseMetadataPayloadKey: base64Encode(node.metadataCiphertext),
         },
         baseRevision: baseRevision,
         createdAt: DateTime.now().toUtc(),

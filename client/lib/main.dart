@@ -20,6 +20,7 @@ import 'core/platform/windows_autostart.dart';
 import 'core/platform/windows_file_drop.dart';
 import 'core/platform/windows_sync_folder.dart';
 import 'core/storage/local_database.dart';
+import 'core/storage/sync_conflicts_store.dart';
 import 'core/util/local_path.dart';
 import 'features/device/device_setup_controller.dart';
 import 'features/device/device_provisioning_controller.dart';
@@ -27,6 +28,8 @@ import 'features/files/download_notification_controller.dart';
 import 'features/files/files_controller.dart';
 import 'features/files/image_thumbnail.dart';
 import 'features/server/server_connection_controller.dart';
+import 'features/sync/outbox_conflict_resolver.dart';
+import 'features/sync/sync_conflict_log.dart';
 import 'features/sync/sync_engine.dart';
 import 'features/syncfolder/local_folder_uploader.dart';
 import 'features/syncfolder/sync_folder_materializer.dart';
@@ -328,6 +331,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         final engine = SyncEngine(
           serverConnection: _serverConnectionController,
           localDatabase: localDatabase,
+          conflictResolver: VaultOutboxConflictResolver(_vaultKeyStore),
         );
         final files = FilesController(
           serverConnection: _serverConnectionController,
@@ -901,8 +905,14 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
                 label: _localized(context, en: 'Files', ru: 'Файлы'),
               ),
               NavigationDestination(
-                icon: Icon(Icons.sync_outlined),
-                selectedIcon: Icon(Icons.sync),
+                icon: _SyncNavigationIcon(
+                  conflicts: _syncEngine?.conflicts,
+                  icon: Icons.sync_outlined,
+                ),
+                selectedIcon: _SyncNavigationIcon(
+                  conflicts: _syncEngine?.conflicts,
+                  icon: Icons.sync,
+                ),
                 label: _localized(context, en: 'Sync', ru: 'Синхронизация'),
               ),
               NavigationDestination(
@@ -936,8 +946,14 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
                     label: Text(_localized(context, en: 'Files', ru: 'Файлы')),
                   ),
                   NavigationRailDestination(
-                    icon: Icon(Icons.sync_outlined),
-                    selectedIcon: Icon(Icons.sync),
+                    icon: _SyncNavigationIcon(
+                      conflicts: _syncEngine?.conflicts,
+                      icon: Icons.sync_outlined,
+                    ),
+                    selectedIcon: _SyncNavigationIcon(
+                      conflicts: _syncEngine?.conflicts,
+                      icon: Icons.sync,
+                    ),
                     label: Text(
                       _localized(context, en: 'Sync', ru: 'Синхронизация'),
                     ),

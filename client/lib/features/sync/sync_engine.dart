@@ -14,8 +14,11 @@ import '../../core/storage/materialization_failures_store.dart';
 import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/storage/pending_operations_store.dart';
+import '../../core/storage/sync_conflicts_store.dart';
 import '../../core/storage/sync_state_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
+import 'outbox_conflict_resolver.dart';
+import 'sync_conflict_log.dart';
 import '../server/server_connection_controller.dart';
 import '../../core/util/user_facing_error.dart';
 import '../../core/transport/network_errors.dart';
@@ -43,16 +46,22 @@ const Set<String> _permanentFailureCodes = {
 /// Takes ownership of [localDatabase]: [dispose] closes it, so callers must
 /// not also close it themselves or use it after disposing this engine.
 final class SyncEngine extends ChangeNotifier {
+  /// [conflictResolver] replays an outbox rename/move that lost a revision
+  /// race when that is safe (spec §21). Without one, every such conflict
+  /// keeps the server state and is reported in [conflicts].
   SyncEngine({
     required ServerConnectionController serverConnection,
     required LocalDatabase localDatabase,
+    OutboxConflictResolver? conflictResolver,
   }) : _serverConnection = serverConnection,
        _localDatabase = localDatabase,
+       _conflictResolver = conflictResolver,
        nodeCache = NodeCache(localDatabase.db),
        pendingOperations = PendingOperationsStore(localDatabase.db),
        materializedDirectories = MaterializedDirectoriesStore(localDatabase.db),
        materializationFailures = MaterializationFailuresStore(localDatabase.db),
        materializedFiles = MaterializedFilesStore(localDatabase.db),
+       conflicts = SyncConflictLog(SyncConflictsStore(localDatabase.db)),
        _syncState = SyncStateStore(localDatabase.db) {
     _connectionWasAuthenticated =
         serverConnection.status == ServerConnectionStatus.authenticated;
@@ -61,12 +70,21 @@ final class SyncEngine extends ChangeNotifier {
 
   final ServerConnectionController _serverConnection;
   final LocalDatabase _localDatabase;
+  final OutboxConflictResolver? _conflictResolver;
   final NodeCache nodeCache;
   final PendingOperationsStore pendingOperations;
   final MaterializedDirectoriesStore materializedDirectories;
   final MaterializationFailuresStore materializationFailures;
   final MaterializedFilesStore materializedFiles;
+
+  /// Conflicts resolved on this device, shared with the sync-folder
+  /// components so the Sync page can list them all in one place.
+  final SyncConflictLog conflicts;
   final SyncStateStore _syncState;
+
+  /// How many times one pass re-resolves the same operation's revision
+  /// conflict before giving up on it (another device keeps winning the race).
+  static const int _maxConflictRebasesPerPass = 3;
 
   Timer? _timer;
   Duration _interval = const Duration(seconds: 30);
@@ -185,7 +203,7 @@ final class SyncEngine extends ChangeNotifier {
         _setStatus(SyncStatus.offline);
         return;
       }
-      await _pushPending(api, session.accessToken);
+      await _pushPending(api, session.accessToken, session.user.id);
       await _pullChanges(api, session.accessToken, session.user.id);
       _errorMessage = null;
       if (!_paused) _setStatus(SyncStatus.idle);
@@ -210,8 +228,13 @@ final class SyncEngine extends ChangeNotifier {
   Future<void> _pushPending(
     transport.HomeBoxApiClient api,
     String accessToken,
+    String scopeId,
   ) async {
-    for (final op in pendingOperations.listReady(DateTime.now())) {
+    for (final snapshot in pendingOperations.listReady(DateTime.now())) {
+      // Re-read: an operation earlier in this pass may have rebased this one
+      // onto the revision it produced (see _pushOne).
+      final op = pendingOperations.getById(snapshot.id);
+      if (op == null || op.status != PendingOperationStatus.pending) continue;
       if (op.type != PendingOperationType.createNode &&
           pendingOperations.hasEarlierUnfinishedOperationForNode(
             op.nodeId,
@@ -222,32 +245,194 @@ final class SyncEngine extends ChangeNotifier {
         // reordering into a mutation on a node the server doesn't have.
         continue;
       }
-      pendingOperations.markRunning(op.id);
+      await _pushOne(api, accessToken, scopeId, op);
+    }
+  }
+
+  Future<void> _pushOne(
+    transport.HomeBoxApiClient api,
+    String accessToken,
+    String scopeId,
+    PendingOperation queued,
+  ) async {
+    // Later operations on this node were queued on top of the revision this
+    // one started from — locally a node keeps its last server revision until
+    // its own mutation is pushed.
+    final queuedOnRevision = queued.baseRevision ?? 0;
+    var op = queued;
+    pendingOperations.markRunning(op.id);
+    for (var rebases = 0; ; rebases++) {
       try {
-        switch (op.type) {
-          case PendingOperationType.createNode:
-            await _applyCreate(api, accessToken, op);
-          case PendingOperationType.updateNode:
-            await _applyUpdate(api, accessToken, op);
-          case PendingOperationType.deleteNode:
-            await _applyDelete(api, accessToken, op);
-          case PendingOperationType.restoreNode:
-            await _applyRestore(api, accessToken, op);
-        }
+        final revision = switch (op.type) {
+          PendingOperationType.createNode => await _applyCreate(
+            api,
+            accessToken,
+            op,
+          ),
+          PendingOperationType.updateNode => await _applyUpdate(
+            api,
+            accessToken,
+            op,
+          ),
+          PendingOperationType.deleteNode => await _applyDelete(
+            api,
+            accessToken,
+            op,
+          ),
+          PendingOperationType.restoreNode => await _applyRestore(
+            api,
+            accessToken,
+            op,
+          ),
+        };
         pendingOperations.markDone(op.id);
+        if (revision != null) {
+          _rebaseLaterOperations(op, queuedOnRevision, revision);
+        }
+        return;
+      } on transport.HomeBoxApiException catch (e) {
+        if (e.code == 'REVISION_CONFLICT' &&
+            (op.type == PendingOperationType.updateNode ||
+                op.type == PendingOperationType.deleteNode)) {
+          final PendingOperation? rebased;
+          try {
+            rebased = await _resolveRevisionConflict(
+              api,
+              accessToken,
+              scopeId,
+              op,
+              queuedOnRevision: queuedOnRevision,
+              mayRetry: rebases < _maxConflictRebasesPerPass,
+            );
+          } catch (resolutionError) {
+            // Never leave the operation RUNNING: settle it like any other
+            // failure (a transient error retries the whole conflict later).
+            await _recordFailure(api, accessToken, op, resolutionError);
+            return;
+          }
+          if (rebased == null) return;
+          op = rebased;
+          pendingOperations.markRunning(op.id);
+          continue;
+        }
+        await _recordFailure(api, accessToken, op, e);
+        return;
       } catch (e) {
         await _recordFailure(api, accessToken, op, e);
+        return;
       }
     }
   }
 
-  Future<void> _applyCreate(
+  void _rebaseLaterOperations(
+    PendingOperation op,
+    int queuedOnRevision,
+    int newRevision,
+  ) {
+    pendingOperations.rebaseLaterOperations(
+      nodeId: op.nodeId,
+      afterOperationId: op.id,
+      createdAtOrAfter: op.createdAt,
+      fromRevision: queuedOnRevision,
+      toRevision: newRevision,
+    );
+  }
+
+  /// Handles an UPDATE/DELETE the server rejected because the node changed
+  /// on another device first (spec §21). Returns the rebased operation to
+  /// retry right away, or null once the operation is settled: already
+  /// satisfied, or kept as the server's state with the conflict reported.
+  Future<PendingOperation?> _resolveRevisionConflict(
+    transport.HomeBoxApiClient api,
+    String accessToken,
+    String scopeId,
+    PendingOperation op, {
+    required int queuedOnRevision,
+    required bool mayRetry,
+  }) async {
+    final transport.NodeInfo server;
+    try {
+      server = await api.getNode(accessToken, op.nodeId);
+    } catch (e) {
+      await _recordFailure(api, accessToken, op, e);
+      return null;
+    }
+    final resolver = _conflictResolver;
+    if (op.type == PendingOperationType.deleteNode && server.isDeleted) {
+      // Another device moved it to Trash first: the intent already holds.
+      pendingOperations.markDone(op.id);
+      nodeCache.upsert(localNodeFromServerNode(server));
+      return null;
+    }
+    if (op.type == PendingOperationType.deleteNode) {
+      // DELETE vs UPDATE/RENAME: never destroy the newer remote state.
+      await _keepServerState(
+        op,
+        server,
+        SyncConflictKind.deleteRejected,
+        fileName: await resolver?.displayName(server: server, scopeId: scopeId),
+      );
+      return null;
+    }
+    final fallbackKind = (op.payload['moveParent'] as bool? ?? false)
+        ? SyncConflictKind.moveRejected
+        : SyncConflictKind.renameRejected;
+    if (resolver == null || !mayRetry) {
+      await _keepServerState(
+        op,
+        server,
+        fallbackKind,
+        fileName: await resolver?.displayName(server: server, scopeId: scopeId),
+      );
+      return null;
+    }
+    final resolution = await resolver.resolveUpdate(
+      operation: op,
+      server: server,
+      scopeId: scopeId,
+    );
+    switch (resolution) {
+      case RetryUpdate(:final payload):
+        return pendingOperations.rebase(
+          op.id,
+          operationId: generateUuidV4(),
+          payload: payload,
+          baseRevision: server.revision,
+        );
+      case UpdateAlreadyApplied():
+        pendingOperations.markDone(op.id);
+        nodeCache.upsert(localNodeFromServerNode(server));
+        _rebaseLaterOperations(op, queuedOnRevision, server.revision);
+        return null;
+      case UpdateConflicts(:final kind, :final fileName):
+        await _keepServerState(op, server, kind, fileName: fileName);
+        return null;
+    }
+  }
+
+  /// Settles [op] as FAILED in favor of the server's state and reports the
+  /// conflict. The optimistic local change is replaced by [server] so the
+  /// Files page and sync folder show what actually exists.
+  Future<void> _keepServerState(
+    PendingOperation op,
+    transport.NodeInfo server,
+    SyncConflictKind kind, {
+    String? fileName,
+  }) async {
+    pendingOperations.markFailed(op.id, errorCode: 'REVISION_CONFLICT');
+    nodeCache.upsert(localNodeFromServerNode(server));
+    conflicts.record(kind: kind, nodeId: op.nodeId, fileName: fileName);
+  }
+
+  /// Each `_apply*` returns the node revision its own mutation produced, so
+  /// later queued operations on the same node can be rebased onto it.
+  Future<int?> _applyCreate(
     transport.HomeBoxApiClient api,
     String accessToken,
     PendingOperation op,
   ) async {
     final payload = op.payload;
-    await api.createNode(
+    final created = await api.createNode(
       accessToken,
       id: op.nodeId,
       operationId: op.operationId,
@@ -257,16 +442,17 @@ final class SyncEngine extends ChangeNotifier {
       metadataKeyVersion: payload['metadataKeyVersion'] as int,
     );
     await _refreshNodeFromServer(api, accessToken, op.nodeId);
+    return created.revision;
   }
 
-  Future<void> _applyUpdate(
+  Future<int?> _applyUpdate(
     transport.HomeBoxApiClient api,
     String accessToken,
     PendingOperation op,
   ) async {
     final payload = op.payload;
     final metadataCiphertextB64 = payload['metadataCiphertext'] as String?;
-    await api.updateNode(
+    final updated = await api.updateNode(
       accessToken,
       op.nodeId,
       operationId: op.operationId,
@@ -279,9 +465,10 @@ final class SyncEngine extends ChangeNotifier {
       parentId: payload['parentId'] as String?,
     );
     await _refreshNodeFromServer(api, accessToken, op.nodeId);
+    return updated.revision;
   }
 
-  Future<void> _applyDelete(
+  Future<int?> _applyDelete(
     transport.HomeBoxApiClient api,
     String accessToken,
     PendingOperation op,
@@ -293,15 +480,21 @@ final class SyncEngine extends ChangeNotifier {
       expectedRevision: op.baseRevision ?? 0,
     );
     await _refreshNodeFromServer(api, accessToken, op.nodeId);
+    return nodeCache.getById(op.nodeId)?.revision;
   }
 
-  Future<void> _applyRestore(
+  Future<int?> _applyRestore(
     transport.HomeBoxApiClient api,
     String accessToken,
     PendingOperation op,
   ) async {
-    await api.restoreNode(accessToken, op.nodeId, operationId: op.operationId);
+    final restored = await api.restoreNode(
+      accessToken,
+      op.nodeId,
+      operationId: op.operationId,
+    );
     await _refreshNodeFromServer(api, accessToken, op.nodeId);
+    return restored.revision;
   }
 
   /// Optimistically moves an integrity-failed immutable file version to
@@ -461,6 +654,7 @@ final class SyncEngine extends ChangeNotifier {
     _disposed = true;
     _timer?.cancel();
     _serverConnection.removeListener(_onServerConnectionChanged);
+    conflicts.dispose();
     _localDatabase.dispose();
     super.dispose();
   }

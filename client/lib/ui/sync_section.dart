@@ -90,6 +90,18 @@ class _SyncSection extends StatelessWidget {
                 );
               },
             ),
+          if (engine != null)
+            AnimatedBuilder(
+              animation: engine.conflicts,
+              builder: (context, _) {
+                final open = engine.conflicts.open;
+                if (open.isEmpty) return const SizedBox.shrink();
+                return _SyncConflictsCard(
+                  conflicts: open,
+                  log: engine.conflicts,
+                );
+              },
+            ),
           if (defaultTargetPlatform == TargetPlatform.android)
             Card(
               child: ListTile(
@@ -301,6 +313,133 @@ class _SyncSection extends StatelessWidget {
   }
 }
 
+/// Lists the sync conflicts this device resolved (spec §21) until the user
+/// dismisses them. Content is never lost: either both versions exist side by
+/// side, or the server's state was kept for a rename/move/delete.
+class _SyncConflictsCard extends StatelessWidget {
+  const _SyncConflictsCard({required this.conflicts, required this.log});
+
+  /// How many conflicts are listed individually; the rest are summarized.
+  static const int _maxListed = 20;
+
+  final List<SyncConflict> conflicts;
+  final SyncConflictLog log;
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now().toUtc();
+    final listed = conflicts.take(_maxListed).toList(growable: false);
+    final hidden = conflicts.length - listed.length;
+    return Card(
+      key: const ValueKey('sync-conflicts'),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: Icon(
+              Icons.call_split,
+              color: Theme.of(context).colorScheme.tertiary,
+            ),
+            title: Text(
+              _localized(
+                context,
+                en: 'Sync conflicts (${conflicts.length})',
+                ru: 'Конфликты синхронизации (${conflicts.length})',
+              ),
+            ),
+            subtitle: Text(
+              _localized(
+                context,
+                en: 'Nothing was lost. Review the conflict copies, then dismiss.',
+                ru: 'Ничего не потеряно. Проверьте конфликтные копии и скройте уведомления.',
+              ),
+            ),
+            trailing: TextButton(
+              key: const ValueKey('dismiss-all-conflicts'),
+              onPressed: log.dismissAll,
+              child: Text(
+                _localized(context, en: 'Dismiss all', ru: 'Скрыть все'),
+              ),
+            ),
+          ),
+          for (final conflict in listed)
+            ListTile(
+              dense: true,
+              leading: Icon(
+                conflict.kind.keepsConflictCopy
+                    ? Icons.file_copy_outlined
+                    : Icons.cloud_done_outlined,
+              ),
+              title: Text(
+                conflict.fileName ??
+                    _localized(context, en: 'An item', ru: 'Элемент'),
+              ),
+              subtitle: Text(
+                [
+                  _syncConflictDescription(context, conflict.kind),
+                  if (conflict.conflictCopyPath != null)
+                    '${_localized(context, en: 'Copy', ru: 'Копия')}: ${conflict.conflictCopyPath}',
+                  _formatRelativeTime(conflict.detectedAt, now),
+                ].join('\n'),
+              ),
+              isThreeLine: true,
+              trailing: IconButton(
+                tooltip: _localized(context, en: 'Dismiss', ru: 'Скрыть'),
+                icon: const Icon(Icons.close),
+                onPressed: () => log.dismiss(conflict.id),
+              ),
+            ),
+          if (hidden > 0)
+            ListTile(
+              dense: true,
+              title: Text(
+                _localized(
+                  context,
+                  en: '$hidden more not shown',
+                  ru: 'Ещё $hidden не показано',
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+String _syncConflictDescription(BuildContext context, SyncConflictKind kind) =>
+    switch (kind) {
+      SyncConflictKind.bothModified => _localized(
+        context,
+        en: 'Changed here and on another device. Your local edit was kept as a conflict copy.',
+        ru: 'Изменён здесь и на другом устройстве. Локальная правка сохранена как конфликтная копия.',
+      ),
+      SyncConflictKind.bothCreated => _localized(
+        context,
+        en: 'Another file with the same name already existed. Your local file was kept as a conflict copy.',
+        ru: 'Файл с таким именем уже существовал. Локальный файл сохранён как конфликтная копия.',
+      ),
+      SyncConflictKind.modifiedLocallyDeletedRemotely => _localized(
+        context,
+        en: 'Deleted on another device after you edited it here. Your edit was kept as a conflict copy; the original is in Trash.',
+        ru: 'Удалён на другом устройстве после локальной правки. Правка сохранена как конфликтная копия, оригинал — в корзине.',
+      ),
+      SyncConflictKind.renameRejected => _localized(
+        context,
+        en: 'Your rename was not applied: the item was renamed or deleted on another device.',
+        ru: 'Переименование не применено: элемент переименован или удалён на другом устройстве.',
+      ),
+      SyncConflictKind.moveRejected => _localized(
+        context,
+        en: 'Your move was not applied: the item was moved or deleted on another device.',
+        ru: 'Перемещение не применено: элемент перемещён или удалён на другом устройстве.',
+      ),
+      SyncConflictKind.deleteRejected => _localized(
+        context,
+        en: 'Not moved to Trash: it changed on another device first.',
+        ru: 'Не перемещён в корзину: элемент сначала изменили на другом устройстве.',
+      ),
+    };
+
 /// Shared inline progress display for both directions of local-folder sync.
 /// File transfers report byte/chunk progress; scanning and folder creation
 /// remain intentionally indeterminate until a concrete file starts moving.
@@ -319,4 +458,30 @@ Widget _syncFolderTransferProgress({
       LinearProgressIndicator(value: progress),
     ],
   );
+}
+
+/// The Sync navigation icon, badged with the number of open sync conflicts
+/// so they are noticed from any page.
+class _SyncNavigationIcon extends StatelessWidget {
+  const _SyncNavigationIcon({required this.conflicts, required this.icon});
+
+  final SyncConflictLog? conflicts;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final log = conflicts;
+    if (log == null) return Icon(icon);
+    return AnimatedBuilder(
+      animation: log,
+      builder: (context, _) {
+        final count = log.openCount;
+        return Badge(
+          isLabelVisible: count > 0,
+          label: Text(count > 99 ? '99+' : '$count'),
+          child: Icon(icon),
+        );
+      },
+    );
+  }
 }

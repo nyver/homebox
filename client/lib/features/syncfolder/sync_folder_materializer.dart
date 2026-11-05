@@ -13,10 +13,13 @@ import '../../core/platform/android_sync_folder.dart';
 import '../../core/storage/materialized_directories_store.dart';
 import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
+import '../../core/storage/sync_conflicts_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../files/file_transfer.dart';
 import '../server/server_connection_controller.dart';
+import '../sync/conflict_naming.dart';
 import '../sync/sync_engine.dart';
+import 'conflict_copies.dart';
 import '../../core/util/user_facing_error.dart';
 
 enum SyncFolderStatus { idle, materializing, error }
@@ -32,6 +35,13 @@ enum SyncFolderStatus { idle, materializing, error }
 /// desktop coordinator to run this pull pass before the uploader's push pass.
 /// This class remains server -> disk only.
 ///
+/// It never destroys local content the server does not have (spec §21). A
+/// local file is replaced or removed only when it provably still holds what
+/// this device last synchronized (see [localCopyMatchesRecord]); an edited
+/// or unknown file in the way is first renamed to a conflict copy, which the
+/// uploader then publishes as a separate node. Android's write-only SAF
+/// mirror is never edited through HomeBox and keeps the plain behavior.
+///
 final class SyncFolderMaterializer extends ChangeNotifier {
   SyncFolderMaterializer({
     required ServerConnectionController serverConnection,
@@ -40,16 +50,22 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     AndroidSyncFolder? androidSyncFolder,
     void Function({required String fileName, required String location})?
     onFileMaterialized,
+    String? deviceName,
   }) : _serverConnection = serverConnection,
        _vaultKeyStore = vaultKeyStore,
        _syncEngine = syncEngine,
        _androidSyncFolder = androidSyncFolder,
-       _onFileMaterialized = onFileMaterialized;
+       _onFileMaterialized = onFileMaterialized,
+       _deviceName = deviceName ?? localConflictDeviceName();
 
   final ServerConnectionController _serverConnection;
   final VaultKeyStore _vaultKeyStore;
   final SyncEngine _syncEngine;
   final AndroidSyncFolder? _androidSyncFolder;
+
+  /// Embedded in conflict-copy names so the user can tell which device
+  /// kept which version.
+  final String _deviceName;
   final void Function({required String fileName, required String location})?
   _onFileMaterialized;
   final MetadataCipher _metadataCipher = MetadataCipher();
@@ -203,19 +219,19 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         // Only the name/location changed since last time; relocate the
         // bytes already on disk instead of re-downloading them.
         final oldFile = File('$rootPath/${existing.relativePath}');
-        if (await oldFile.exists()) {
-          await Directory(File(targetPath).parent.path).create(recursive: true);
-          await oldFile.rename(targetPath);
-          final stat = await _localStat(targetPath);
-          _syncEngine.materializedFiles.upsert(
-            MaterializedFile(
-              nodeId: node.id,
-              relativePath: relativePath,
-              contentVersionId: node.currentVersionId,
-              localSize: stat?.size,
-              localModifiedAt: stat?.modified,
-            ),
+        try {
+          await _relocateLocalCopy(
+            rootPath: rootPath,
+            relativePath: relativePath,
+            node: node,
+            existing: existing,
+            oldFile: oldFile,
           );
+        } catch (error) {
+          // E.g. the file is open in an application that locks it. Leave it
+          // where it is for a later pass instead of aborting the whole tree.
+          fileErrors.add('${metadata.fileName}: ${_localFileError(error)}');
+          return;
         }
       }
       if (await _fileExists(rootPath, relativePath)) {
@@ -226,17 +242,14 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       return; // node created but no content uploaded yet.
     }
     final expectedHash = metadata.plaintextSha256;
-    // A Windows Files-page upload can copy its original plaintext straight
-    // into the matching sync-folder location. Verify that local copy before
-    // downloading ciphertext back from the server. A hash mismatch still
-    // takes the normal encrypted-download path below, so a changed source
-    // file can never be recorded as the uploaded version.
-    if (!_usesAndroidStorage &&
-        expectedHash != null &&
-        await File(targetPath).exists()) {
+    if (!_usesAndroidStorage && await File(targetPath).exists()) {
+      // A Windows Files-page upload can copy its original plaintext straight
+      // into the matching sync-folder location. Verify that local copy before
+      // downloading ciphertext back from the server.
       final stat = await _localStat(targetPath);
       final localHash = await plaintextFileSha256(File(targetPath));
-      if (localHash.toLowerCase() == expectedHash.toLowerCase()) {
+      if (expectedHash != null &&
+          localHash.toLowerCase() == expectedHash.toLowerCase()) {
         _syncEngine.materializedFiles.upsert(
           MaterializedFile(
             nodeId: node.id,
@@ -244,9 +257,26 @@ final class SyncFolderMaterializer extends ChangeNotifier {
             contentVersionId: node.currentVersionId,
             localSize: stat?.size,
             localModifiedAt: stat?.modified,
+            contentSha256: localHash,
           ),
         );
         _syncEngine.materializationFailures.remove(node.id);
+        return;
+      }
+      // The local file differs from the server's current version. Replace
+      // it only if it is this node's own untouched older copy; otherwise it
+      // is a concurrent edit (or an unrelated same-name file) and is kept.
+      try {
+        await _clearDestination(
+          rootPath: rootPath,
+          relativePath: relativePath,
+          node: node,
+          ownRecord: existing,
+          knownSha256: localHash,
+        );
+      } catch (error) {
+        // Never download over a local file that could not be moved aside.
+        fileErrors.add('${metadata.fileName}: ${_localFileError(error)}');
         return;
       }
     }
@@ -297,10 +327,15 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       } finally {
         if (await source.exists()) await source.delete();
       }
-      if (existing != null && existing.relativePath != relativePath) {
+      if (existing != null &&
+          !_sameLocalPath(existing.relativePath, relativePath)) {
         // Content changed and it moved/was renamed in the same pass -
-        // clean up the stale copy at its old location.
-        await _deleteFile(rootPath, existing.relativePath);
+        // clean up the stale copy at its old location (kept if edited).
+        await _removeLocalCopy(
+          rootPath,
+          existing,
+          SyncConflictKind.bothModified,
+        );
       }
       final stat = await _localStat(targetPath);
       _syncEngine.materializedFiles.upsert(
@@ -310,6 +345,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           contentVersionId: node.currentVersionId,
           localSize: stat?.size,
           localModifiedAt: stat?.modified,
+          contentSha256: metadata.plaintextSha256,
         ),
       );
       _syncEngine.materializationFailures.remove(node.id);
@@ -351,6 +387,50 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     }
   }
 
+  /// Moves [existing]'s copy from [oldFile] to [relativePath] after a remote
+  /// rename or move, without re-downloading unchanged content.
+  Future<void> _relocateLocalCopy({
+    required String rootPath,
+    required String relativePath,
+    required LocalNode node,
+    required MaterializedFile existing,
+    required File oldFile,
+  }) async {
+    if (!_ownsLocalPath(existing) || !await oldFile.exists()) return;
+    // A case-only rename on a case-insensitive file system names the same
+    // file; anything else already at the target is not ours.
+    if (!_sameLocalPath(existing.relativePath, relativePath)) {
+      await _clearDestination(
+        rootPath: rootPath,
+        relativePath: relativePath,
+        node: node,
+        ownRecord: null,
+      );
+    }
+    // An edit made here before the remote rename is still unsynced. Forget
+    // the stat then, so the uploader hashes the moved file and publishes the
+    // edit instead of trusting it as this version.
+    final unchanged = await localCopyMatchesRecord(existing, oldFile);
+    final targetPath = '$rootPath/$relativePath';
+    await Directory(File(targetPath).parent.path).create(recursive: true);
+    await oldFile.rename(targetPath);
+    final stat = unchanged ? await _localStat(targetPath) : null;
+    _syncEngine.materializedFiles.upsert(
+      MaterializedFile(
+        nodeId: node.id,
+        relativePath: relativePath,
+        contentVersionId: node.currentVersionId,
+        localSize: stat?.size,
+        localModifiedAt: stat?.modified,
+        contentSha256: existing.contentSha256,
+      ),
+    );
+  }
+
+  String _localFileError(Object error) => error is FileSystemException
+      ? 'the local copy could not be moved (${error.osError?.message ?? error.message}). It may be open in another application.'
+      : '$error';
+
   bool _isCurrentDownload(LocalNode snapshot) {
     final current = _syncEngine.nodeCache.getById(snapshot.id);
     return current != null &&
@@ -369,9 +449,18 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     required MaterializedFile? existing,
   }) async {
     if (!await _syncEngine.trashAfterIntegrityFailure(node)) return false;
-    await _deleteFile(rootPath, relativePath);
-    if (existing != null && existing.relativePath != relativePath) {
-      await _deleteFile(rootPath, existing.relativePath);
+    // Anything still at the target path is either this node's own untouched
+    // copy or was already moved aside before the download started.
+    if (existing != null) {
+      await _removeLocalCopy(
+        rootPath,
+        existing,
+        SyncConflictKind.modifiedLocallyDeletedRemotely,
+      );
+    }
+    if (existing == null ||
+        !_sameLocalPath(existing.relativePath, relativePath)) {
+      await _deleteFile(rootPath, relativePath);
     }
     _syncEngine.materializedFiles.remove(node.id);
     return true;
@@ -380,7 +469,13 @@ final class SyncFolderMaterializer extends ChangeNotifier {
   Future<void> _pruneUnseen(String rootPath, Set<String> seenNodeIds) async {
     for (final entry in _syncEngine.materializedFiles.listAll()) {
       if (seenNodeIds.contains(entry.nodeId)) continue;
-      await _deleteFile(rootPath, entry.relativePath);
+      // Deleted (or no longer reachable) on the server: remove the mirror,
+      // but keep a local edit the server never received (UPDATE vs DELETE).
+      await _removeLocalCopy(
+        rootPath,
+        entry,
+        SyncConflictKind.modifiedLocallyDeletedRemotely,
+      );
       _syncEngine.materializedFiles.remove(entry.nodeId);
       _syncEngine.materializationFailures.remove(entry.nodeId);
     }
@@ -395,6 +490,106 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       _syncEngine.materializedDirectories.remove(entry.nodeId);
     }
   }
+
+  /// Makes [relativePath] safe to overwrite with [node]'s content. The file
+  /// there is left alone (the caller replaces it) when it is [ownRecord]'s
+  /// untouched copy; deleted when it is another node's untouched stale copy
+  /// that node re-downloads (e.g. two files swapped names remotely); and
+  /// otherwise renamed to a conflict copy, so nothing unsynced is lost.
+  Future<void> _clearDestination({
+    required String rootPath,
+    required String relativePath,
+    required LocalNode node,
+    required MaterializedFile? ownRecord,
+    String? knownSha256,
+  }) async {
+    if (_usesAndroidStorage) return;
+    final file = File('$rootPath/$relativePath');
+    if (!await file.exists()) return;
+    final ownCopyHere =
+        ownRecord != null &&
+        _sameLocalPath(ownRecord.relativePath, relativePath);
+    if (ownCopyHere &&
+        await localCopyMatchesRecord(
+          ownRecord,
+          file,
+          knownSha256: knownSha256,
+        )) {
+      return;
+    }
+    if (!ownCopyHere) {
+      final occupant = _syncEngine.materializedFiles.getByRelativePath(
+        relativePath,
+        excludingNodeId: node.id,
+      );
+      if (occupant != null &&
+          await localCopyMatchesRecord(
+            occupant,
+            file,
+            knownSha256: knownSha256,
+          )) {
+        await file.delete();
+        return;
+      }
+    }
+    await preserveAsConflictCopy(
+      rootPath: rootPath,
+      relativePath: relativePath,
+      conflicts: _syncEngine.conflicts,
+      kind: ownCopyHere
+          ? SyncConflictKind.bothModified
+          : SyncConflictKind.bothCreated,
+      deviceName: _deviceName,
+      nodeId: node.id,
+    );
+  }
+
+  /// Removes [record]'s local copy, unless it holds an edit this device has
+  /// not uploaded yet: that copy is renamed to a conflict copy (recorded as
+  /// [kindIfEdited]) and later uploaded as a separate node instead.
+  Future<void> _removeLocalCopy(
+    String rootPath,
+    MaterializedFile record,
+    SyncConflictKind kindIfEdited,
+  ) async {
+    // Another node was already relocated onto this path in the current pass:
+    // the bytes there are its copy now, not [record]'s.
+    if (!_ownsLocalPath(record)) return;
+    if (_usesAndroidStorage) {
+      await _deleteFile(rootPath, record.relativePath);
+      return;
+    }
+    final file = File('$rootPath/${record.relativePath}');
+    if (!await file.exists()) return;
+    if (await localCopyMatchesRecord(record, file)) {
+      await file.delete();
+      return;
+    }
+    await preserveAsConflictCopy(
+      rootPath: rootPath,
+      relativePath: record.relativePath,
+      conflicts: _syncEngine.conflicts,
+      kind: kindIfEdited,
+      deviceName: _deviceName,
+      nodeId: record.nodeId,
+    );
+  }
+
+  /// Whether two sync-folder-relative paths name the same local file. The
+  /// Windows and macOS default file systems ignore case, so a case-only
+  /// rename there must never look like a different file being in the way.
+  bool _sameLocalPath(String a, String b) =>
+      a == b ||
+      ((Platform.isWindows || Platform.isMacOS) &&
+          a.toLowerCase() == b.toLowerCase());
+
+  /// False when another node's record already claims [record]'s path.
+  bool _ownsLocalPath(MaterializedFile record) =>
+      _syncEngine.materializedFiles.getByRelativePath(
+        record.relativePath,
+        excludingNodeId: record.nodeId,
+      ) ==
+      null;
 
   bool get _usesAndroidStorage =>
       defaultTargetPlatform == TargetPlatform.android &&

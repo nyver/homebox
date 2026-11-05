@@ -144,4 +144,27 @@ final List<_Migration> _migrations = [
     ALTER TABLE materialized_files ADD COLUMN local_size INTEGER;
     ALTER TABLE materialized_files ADD COLUMN local_modified_at INTEGER;
   '''),
+  // content_sha256 is the plaintext hash of the version last written to (or
+  // read from) the local copy, so a sync pass can prove that copy is still
+  // untouched before replacing or removing it (spec §21: never lose content).
+  // sync_conflicts records every conflict resolved on this device so the UI
+  // can explain it, and so a preserved conflict copy is uploaded with its
+  // encrypted conflict details.
+  _Migration(6, '''
+    ALTER TABLE materialized_files ADD COLUMN content_sha256 TEXT;
+    CREATE INDEX IF NOT EXISTS idx_materialized_files_path ON materialized_files(relative_path);
+
+    CREATE TABLE IF NOT EXISTS sync_conflicts (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      node_id TEXT,
+      file_name TEXT,
+      conflict_copy_path TEXT,
+      copy_node_id TEXT,
+      detected_at TEXT NOT NULL,
+      dismissed INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open ON sync_conflicts(dismissed, detected_at);
+    CREATE INDEX IF NOT EXISTS idx_sync_conflicts_copy ON sync_conflicts(conflict_copy_path);
+  '''),
 ];

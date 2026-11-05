@@ -18,6 +18,7 @@ final class MaterializedFile {
     required this.contentVersionId,
     this.localSize,
     this.localModifiedAt,
+    this.contentSha256,
   });
 
   final String nodeId;
@@ -29,6 +30,13 @@ final class MaterializedFile {
   /// record written before these were tracked, or on Android storage).
   final int? localSize;
   final DateTime? localModifiedAt;
+
+  /// Lowercase hex SHA-256 of [contentVersionId]'s plaintext, i.e. of what the
+  /// local copy held when it was last in sync. Lets a sync pass tell a real
+  /// local edit apart from a file whose timestamp merely changed. Null for
+  /// records written before this was tracked: such a copy is treated as
+  /// possibly edited, so it is preserved rather than overwritten.
+  final String? contentSha256;
 
   /// True when [stat] still describes the copy recorded here, i.e. the file
   /// has very likely not been touched since. Used only to skip re-hashing;
@@ -58,6 +66,23 @@ final class MaterializedFilesStore {
     return _fromRow(rows.first);
   }
 
+  /// The record of a node other than [excludingNodeId] whose local copy
+  /// lives at [relativePath], if any. During one materialization pass two
+  /// records can briefly share a path: once a node is relocated onto a path,
+  /// the previous occupant's bytes there are gone, so that occupant must
+  /// neither move nor delete the file it still points at.
+  MaterializedFile? getByRelativePath(
+    String relativePath, {
+    required String excludingNodeId,
+  }) {
+    final rows = _db.select(
+      'SELECT * FROM materialized_files WHERE relative_path = ? AND node_id != ? LIMIT 1',
+      [relativePath, excludingNodeId],
+    );
+    if (rows.isEmpty) return null;
+    return _fromRow(rows.first);
+  }
+
   List<MaterializedFile> listAll() => _db
       .select('SELECT * FROM materialized_files')
       .map(_fromRow)
@@ -66,8 +91,8 @@ final class MaterializedFilesStore {
   void upsert(MaterializedFile file) {
     _db.execute(
       '''
-      INSERT INTO materialized_files (node_id, relative_path, content_version_id, local_size, local_modified_at) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(node_id) DO UPDATE SET relative_path = excluded.relative_path, content_version_id = excluded.content_version_id, local_size = excluded.local_size, local_modified_at = excluded.local_modified_at
+      INSERT INTO materialized_files (node_id, relative_path, content_version_id, local_size, local_modified_at, content_sha256) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(node_id) DO UPDATE SET relative_path = excluded.relative_path, content_version_id = excluded.content_version_id, local_size = excluded.local_size, local_modified_at = excluded.local_modified_at, content_sha256 = excluded.content_sha256
       ''',
       [
         file.nodeId,
@@ -75,6 +100,7 @@ final class MaterializedFilesStore {
         file.contentVersionId,
         file.localSize,
         file.localModifiedAt?.millisecondsSinceEpoch,
+        file.contentSha256?.toLowerCase(),
       ],
     );
   }
@@ -96,5 +122,6 @@ final class MaterializedFilesStore {
       ),
       _ => null,
     },
+    contentSha256: row['content_sha256'] as String?,
   );
 }

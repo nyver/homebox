@@ -11,11 +11,14 @@ import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
 import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
+import '../../core/storage/sync_conflicts_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/util/local_path.dart';
 import '../files/file_transfer.dart';
 import '../server/server_connection_controller.dart';
+import '../sync/conflict_naming.dart';
 import '../sync/sync_engine.dart';
+import 'conflict_copies.dart';
 import '../../core/util/user_facing_error.dart';
 
 enum LocalUploadStatus { idle, scanning, resyncing, error }
@@ -60,13 +63,18 @@ final class LocalFolderUploader extends ChangeNotifier {
     required ServerConnectionController serverConnection,
     required VaultKeyStore vaultKeyStore,
     required SyncEngine syncEngine,
+    String? deviceName,
   }) : _serverConnection = serverConnection,
        _vaultKeyStore = vaultKeyStore,
-       _syncEngine = syncEngine;
+       _syncEngine = syncEngine,
+       _deviceName = deviceName ?? localConflictDeviceName();
 
   final ServerConnectionController _serverConnection;
   final VaultKeyStore _vaultKeyStore;
   final SyncEngine _syncEngine;
+
+  /// Embedded in conflict-copy names and details (see SyncFolderMaterializer).
+  final String _deviceName;
   final MetadataCipher _metadataCipher = MetadataCipher();
 
   bool _running = false;
@@ -279,6 +287,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         continue;
       }
       await _uploadIfChanged(
+        rootPath: rootPath,
         api: api,
         accessToken: accessToken,
         keyScopeId: keyScopeId,
@@ -368,6 +377,7 @@ final class LocalFolderUploader extends ChangeNotifier {
   }
 
   Future<void> _uploadIfChanged({
+    required String rootPath,
     required transport.HomeBoxApiClient api,
     required String accessToken,
     required String keyScopeId,
@@ -386,10 +396,11 @@ final class LocalFolderUploader extends ChangeNotifier {
           : '$relativePath/$name';
       final stat = await localFile.stat();
       final materialized = _syncEngine.materializedFiles.getById(node.id);
+      final recordedHere =
+          materialized != null && materialized.relativePath == fileRelativePath;
       final materializedCurrent =
-          materialized != null &&
-          materialized.contentVersionId == node.currentVersionId &&
-          materialized.relativePath == fileRelativePath;
+          recordedHere &&
+          materialized.contentVersionId == node.currentVersionId;
       if (materializedCurrent && materialized.matchesLocalStat(stat)) {
         return; // untouched since its content was last verified.
       }
@@ -413,9 +424,50 @@ final class LocalFolderUploader extends ChangeNotifier {
               contentVersionId: node.currentVersionId,
               localSize: stat.size,
               localModifiedAt: stat.modified,
+              contentSha256: hash,
             ),
           );
         }
+        return;
+      }
+      if (!materializedCurrent && node.currentVersionId != null && !strict) {
+        // The local file is not based on the server's current version: the
+        // server moved on since this device last synced it, or the file
+        // never came from this node at all. Uploading it as the next version
+        // would silently replace someone else's change (spec §21). A node
+        // without content yet (e.g. this device's own interrupted upload)
+        // still receives the file as its first version below; a concurrent
+        // first upload elsewhere makes one side lose the revision check,
+        // and that side keeps its file as a conflict copy on the next pass.
+        if (recordedHere &&
+            await localCopyMatchesRecord(
+              materialized,
+              localFile,
+              knownSha256: hash,
+            )) {
+          return; // an untouched older copy; materialize() refreshes it.
+        }
+        final copyPath = await preserveAsConflictCopy(
+          rootPath: rootPath,
+          relativePath: fileRelativePath,
+          conflicts: _syncEngine.conflicts,
+          kind: recordedHere
+              ? SyncConflictKind.bothModified
+              : SyncConflictKind.bothCreated,
+          deviceName: _deviceName,
+          nodeId: node.id,
+        );
+        await _uploadNewFile(
+          api: api,
+          accessToken: accessToken,
+          keyScopeId: keyScopeId,
+          vaultKey: vaultKey,
+          vaultId: vaultId,
+          parentId: node.parentId,
+          name: basenameOfLocalPath(copyPath),
+          relativePath: relativePath,
+          localFile: File('$rootPath/$copyPath'),
+        );
         return;
       }
       final metadataEnvelope = await _metadataCipher.encrypt(
@@ -423,6 +475,10 @@ final class LocalFolderUploader extends ChangeNotifier {
           fileName: name,
           plaintextSha256: hash,
           plaintextSize: plaintextLength,
+          // Editing a conflict copy does not resolve it; only the explicit
+          // "Mark conflict resolved" action clears the marker.
+          conflictDetails: currentMetadata.conflictDetails,
+          labels: currentMetadata.labels,
         ),
         metadataKey: vaultKey,
         keyVersion: homeBoxPersonalVaultKeyVersion,
@@ -457,6 +513,7 @@ final class LocalFolderUploader extends ChangeNotifier {
           // stat, so the next scan hashes again instead of skipping it.
           localSize: stat.size,
           localModifiedAt: stat.modified,
+          contentSha256: hash,
         ),
       );
     } catch (error) {
@@ -464,7 +521,10 @@ final class LocalFolderUploader extends ChangeNotifier {
       // Broad on purpose: this class's own checks and the shared crypto
       // helpers can throw StateError/ArgumentError, which do not extend
       // Exception. Leave this file for the next scan() call rather than
-      // aborting the whole tree over one bad upload.
+      // aborting the whole tree over one bad upload. A REVISION_CONFLICT
+      // (the server moved on mid-scan) is resolved by the next pass: the
+      // record still names the older version, so the edit becomes a
+      // conflict copy instead of overwriting the newer content.
     }
   }
 
@@ -490,6 +550,14 @@ final class LocalFolderUploader extends ChangeNotifier {
         return;
       }
       final hash = await plaintextFileSha256(localFile);
+      final fileRelativePath = relativePath.isEmpty
+          ? name
+          : '$relativePath/$name';
+      // A conflict copy kept by this device carries its explanation inside
+      // the encrypted metadata, so every device can show it.
+      final conflict = _syncEngine.conflicts.copyAwaitingUpload(
+        fileRelativePath,
+      );
 
       final nodeId = generateUuidV4();
       final metadataEnvelope = await _metadataCipher.encrypt(
@@ -497,6 +565,14 @@ final class LocalFolderUploader extends ChangeNotifier {
           fileName: name,
           plaintextSha256: hash,
           plaintextSize: plaintextLength,
+          conflictDetails: conflict == null
+              ? null
+              : conflictCopyDetails(
+                  originalName: conflict.fileName ?? name,
+                  deviceName: _deviceName,
+                  detectedAt: conflict.detectedAt,
+                  reason: conflictCopyReason(conflict.kind),
+                ),
         ),
         metadataKey: vaultKey,
         keyVersion: homeBoxPersonalVaultKeyVersion,
@@ -539,12 +615,16 @@ final class LocalFolderUploader extends ChangeNotifier {
       _syncEngine.materializedFiles.upsert(
         MaterializedFile(
           nodeId: nodeId,
-          relativePath: relativePath.isEmpty ? name : '$relativePath/$name',
+          relativePath: fileRelativePath,
           contentVersionId: uploadedNode.currentVersionId,
           localSize: stat.size,
           localModifiedAt: stat.modified,
+          contentSha256: hash,
         ),
       );
+      if (conflict != null) {
+        _syncEngine.conflicts.markCopyUploaded(conflict.id, nodeId);
+      }
     } catch (error) {
       if (strict) rethrow;
       // Broad on purpose — see _uploadIfChanged.

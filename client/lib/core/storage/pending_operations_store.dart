@@ -179,6 +179,48 @@ final class PendingOperationsStore {
     );
   }
 
+  /// Replaces [id]'s payload and base revision after a revision conflict was
+  /// resolved, and makes it immediately ready again. The rebased mutation is
+  /// a different request, so it gets a fresh idempotency key
+  /// [operationId] (ADR-006). Returns the updated row.
+  PendingOperation? rebase(
+    String id, {
+    required String operationId,
+    required Map<String, dynamic> payload,
+    required int baseRevision,
+  }) {
+    _db.execute(
+      "UPDATE pending_operations SET operation_id = ?, payload = ?, base_revision = ?, status = 'PENDING', next_retry_at = NULL WHERE id = ?",
+      [operationId, jsonEncode(payload), baseRevision, id],
+    );
+    return getById(id);
+  }
+
+  /// Moves every later PENDING operation on [nodeId] that was queued on top
+  /// of [fromRevision] to [toRevision]. Used after this device's own earlier
+  /// mutation of the same node succeeds: a second offline rename was queued
+  /// against the revision the first one started from, and would otherwise
+  /// fail with a revision conflict caused by this device itself.
+  void rebaseLaterOperations({
+    required String nodeId,
+    required String afterOperationId,
+    required DateTime createdAtOrAfter,
+    required int fromRevision,
+    required int toRevision,
+  }) {
+    if (fromRevision == toRevision) return;
+    _db.execute(
+      "UPDATE pending_operations SET base_revision = ? WHERE node_id = ? AND id != ? AND status = 'PENDING' AND created_at >= ? AND base_revision = ?",
+      [
+        toRevision,
+        nodeId,
+        afterOperationId,
+        createdAtOrAfter.toUtc().toIso8601String(),
+        fromRevision,
+      ],
+    );
+  }
+
   void markFailed(String id, {String? errorCode}) {
     _db.execute(
       "UPDATE pending_operations SET status = 'FAILED', last_error_code = ? WHERE id = ?",

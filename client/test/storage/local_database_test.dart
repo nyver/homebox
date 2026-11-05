@@ -15,7 +15,7 @@ void main() {
     final versions = second.db.select(
       'SELECT version FROM schema_migrations ORDER BY version',
     );
-    expect(versions.map((r) => r['version']), [1, 2, 3, 4, 5]);
+    expect(versions.map((r) => r['version']), [1, 2, 3, 4, 5, 6]);
     // Re-opening must not error re-applying earlier migrations, and the
     // nodes table from migration 1 must still exist and be usable.
     second.db.execute(
@@ -37,7 +37,11 @@ void main() {
     };
     expect(
       materializedColumns,
-      containsAll(['local_size', 'local_modified_at']),
+      containsAll(['local_size', 'local_modified_at', 'content_sha256']),
+    );
+    expect(
+      second.db.select('SELECT COUNT(*) AS c FROM sync_conflicts').first['c'],
+      0,
     );
   });
 
