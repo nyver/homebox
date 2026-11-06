@@ -40,8 +40,15 @@ enum SyncFolderStatus { idle, materializing, error }
 /// local file is replaced or removed only when it provably still holds what
 /// this device last synchronized (see [localCopyMatchesRecord]); an edited
 /// or unknown file in the way is first renamed to a conflict copy, which the
-/// uploader then publishes as a separate node. Android's write-only SAF
-/// mirror is never edited through HomeBox and keeps the plain behavior.
+/// uploader then publishes as a separate node.
+///
+/// On Android the folder is a Storage Access Framework tree that cannot be
+/// renamed into or hashed cheaply from Dart, so the rules are narrower: every
+/// written document's size and modification time are recorded, and a tracked
+/// copy whose stat no longer matches is never overwritten or deleted. The
+/// uploader's Android pass, which runs before this one, publishes such an
+/// edit first (as a new version, or as a conflict copy when the server moved
+/// on), after which the copy is replaced normally.
 ///
 final class SyncFolderMaterializer extends ChangeNotifier {
   SyncFolderMaterializer({
@@ -274,6 +281,11 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     if (node.currentVersionId == null) {
       return; // node created but no content uploaded yet.
     }
+    if (_usesAndroidStorage &&
+        await _holdsUnsyncedAndroidEdit(rootPath, relativePath, node.id)) {
+      // Kept for the uploader's Android pass instead of being overwritten.
+      return;
+    }
     final expectedHash = metadata.plaintextSha256;
     if (!_usesAndroidStorage && await File(targetPath).exists()) {
       // A Windows Files-page upload can copy its original plaintext straight
@@ -334,6 +346,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     try {
       if (!_isCurrentDownload(node)) return;
       _setTransferProgress(metadata.fileName, 0);
+      _LocalStat? written;
       final temporaryDirectory = Directory.systemTemp;
       final source = File(
         '${temporaryDirectory.path}/homebox_materialize_${node.id}_${generateUuidV4()}.tmp',
@@ -355,7 +368,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           },
         );
         if (!_isCurrentDownload(node)) return;
-        await _writeFile(rootPath, relativePath, targetPath, source);
+        written = await _writeFile(rootPath, relativePath, targetPath, source);
       } finally {
         if (await source.exists()) await source.delete();
       }
@@ -369,7 +382,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           SyncConflictKind.bothModified,
         );
       }
-      final stat = await _localStat(targetPath);
+      final stat = _usesAndroidStorage ? written : await _localStat(targetPath);
       _syncEngine.materializedFiles.upsert(
         MaterializedFile(
           nodeId: node.id,
@@ -503,11 +516,14 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       if (seenNodeIds.contains(entry.nodeId)) continue;
       // Deleted (or no longer reachable) on the server: remove the mirror,
       // but keep a local edit the server never received (UPDATE vs DELETE).
-      await _removeLocalCopy(
+      final released = await _removeLocalCopy(
         rootPath,
         entry,
         SyncConflictKind.modifiedLocallyDeletedRemotely,
       );
+      // Android keeps the record of an edited copy until the uploader has
+      // published the edit as a conflict copy.
+      if (!released) continue;
       _syncEngine.materializedFiles.remove(entry.nodeId);
       _syncEngine.materializationFailures.remove(entry.nodeId);
     }
@@ -578,24 +594,28 @@ final class SyncFolderMaterializer extends ChangeNotifier {
 
   /// Removes [record]'s local copy, unless it holds an edit this device has
   /// not uploaded yet: that copy is renamed to a conflict copy (recorded as
-  /// [kindIfEdited]) and later uploaded as a separate node instead.
-  Future<void> _removeLocalCopy(
+  /// [kindIfEdited]) and later uploaded as a separate node instead. On
+  /// Android, which cannot rename into the tree, an edited copy is left in
+  /// place and false is returned: the record must stay so the uploader's
+  /// Android pass can publish the edit before the copy is removed.
+  Future<bool> _removeLocalCopy(
     String rootPath,
     MaterializedFile record,
     SyncConflictKind kindIfEdited,
   ) async {
     // Another node was already relocated onto this path in the current pass:
     // the bytes there are its copy now, not [record]'s.
-    if (!_ownsLocalPath(record)) return;
+    if (!_ownsLocalPath(record)) return true;
     if (_usesAndroidStorage) {
+      if (await _androidCopyEdited(rootPath, record)) return false;
       await _deleteFile(rootPath, record.relativePath);
-      return;
+      return true;
     }
     final file = File('$rootPath/${record.relativePath}');
-    if (!await file.exists()) return;
+    if (!await file.exists()) return true;
     if (await localCopyMatchesRecord(record, file)) {
       await file.delete();
-      return;
+      return true;
     }
     await preserveAsConflictCopy(
       rootPath: rootPath,
@@ -605,6 +625,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       deviceName: _deviceName,
       nodeId: record.nodeId,
     );
+    return true;
   }
 
   /// Whether two sync-folder-relative paths name the same local file. The
@@ -639,11 +660,46 @@ final class SyncFolderMaterializer extends ChangeNotifier {
   }
 
   /// The stat recorded alongside a materialized file so the uploader can skip
-  /// re-hashing it. Android SAF documents are never scanned, so none there.
-  Future<FileStat?> _localStat(String targetPath) async {
+  /// re-hashing it. Android documents report theirs from [_writeFile].
+  Future<_LocalStat?> _localStat(String targetPath) async {
     if (_usesAndroidStorage) return null;
     final stat = await File(targetPath).stat();
-    return stat.type == FileSystemEntityType.notFound ? null : stat;
+    return stat.type == FileSystemEntityType.notFound
+        ? null
+        : (size: stat.size, modified: stat.modified);
+  }
+
+  /// True when the Android document at [relativePath] is tracked (by
+  /// [nodeId]'s own record or another node's) and differs from what was last
+  /// written there. A record without a stat (written by an older version)
+  /// cannot prove an edit and keeps the previous overwrite behavior.
+  Future<bool> _holdsUnsyncedAndroidEdit(
+    String rootPath,
+    String relativePath,
+    String nodeId,
+  ) async {
+    final own = _syncEngine.materializedFiles.getById(nodeId);
+    final record = own != null && own.relativePath == relativePath
+        ? own
+        : _syncEngine.materializedFiles.getByRelativePath(
+            relativePath,
+            excludingNodeId: nodeId,
+          );
+    return record != null && await _androidCopyEdited(rootPath, record);
+  }
+
+  Future<bool> _androidCopyEdited(
+    String rootPath,
+    MaterializedFile record,
+  ) async {
+    final android = _androidSyncFolder;
+    if (android == null || record.localSize == null) return false;
+    final stat = await android.statFile(
+      treeUri: rootPath,
+      relativePath: record.relativePath,
+    );
+    return stat != null &&
+        !record.matchesSizeAndModified(stat.size, stat.modified);
   }
 
   Future<bool> _fileExists(String rootPath, String relativePath) {
@@ -654,7 +710,9 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     return File('$rootPath/$relativePath').exists();
   }
 
-  Future<void> _writeFile(
+  /// Writes [source] to its sync-folder location and returns the Android
+  /// document's resulting stat (null on desktop, see [_localStat]).
+  Future<_LocalStat?> _writeFile(
     String rootPath,
     String relativePath,
     String targetPath,
@@ -662,17 +720,18 @@ final class SyncFolderMaterializer extends ChangeNotifier {
   ) async {
     final android = _androidSyncFolder;
     if (_usesAndroidStorage && android != null) {
-      await android.writeFile(
+      final stat = await android.writeFile(
         treeUri: rootPath,
         relativePath: relativePath,
         sourcePath: source.path,
       );
-      return;
+      return stat == null ? null : (size: stat.size, modified: stat.modified);
     }
     await Directory(File(targetPath).parent.path).create(recursive: true);
     final tempPath = '$targetPath.homebox-tmp';
     await source.copy(tempPath);
     await File(tempPath).rename(targetPath); // Atomic on the same volume.
+    return null;
   }
 
   Future<void> _deleteFile(String rootPath, String relativePath) async {
@@ -733,6 +792,8 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     super.dispose();
   }
 }
+
+typedef _LocalStat = ({int size, DateTime? modified});
 
 final class _MaterializationCancelled implements Exception {
   const _MaterializationCancelled();

@@ -1,6 +1,7 @@
 # HomeBox stores only client-encrypted ciphertext. Do not enable server-side decryption.
 # Android release signing is local to build-mobile-release.bat and is never configured here.
 # Desktop Resync uses the authenticated node/upload APIs and needs no server-side option.
+# Android sync-folder edits are uploaded as ordinary encrypted file versions; no option either.
 # Family Vault sharing (per-folder keys, READ and READ_WRITE shares, key rotation) needs no
 # server-side option either: the server only stores client-wrapped folder keys and envelopes.
 server:

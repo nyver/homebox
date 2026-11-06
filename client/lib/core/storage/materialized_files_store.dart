@@ -42,11 +42,18 @@ final class MaterializedFile {
   /// has very likely not been touched since. Used only to skip re-hashing;
   /// any mismatch falls back to comparing the full content hash.
   bool matchesLocalStat(FileStat stat) =>
-      localSize != null &&
       localModifiedAt != null &&
-      localSize == stat.size &&
-      localModifiedAt!.millisecondsSinceEpoch ==
-          stat.modified.millisecondsSinceEpoch;
+      matchesSizeAndModified(stat.size, stat.modified);
+
+  /// Like [matchesLocalStat], for storage reached without a [FileStat] (an
+  /// Android Storage Access Framework document). A provider that does not
+  /// report modification times recorded a null [localModifiedAt], so only the
+  /// size is compared then. False while no stat has been recorded at all.
+  bool matchesSizeAndModified(int size, DateTime? modified) =>
+      localSize != null &&
+      localSize == size &&
+      localModifiedAt?.millisecondsSinceEpoch ==
+          modified?.millisecondsSinceEpoch;
 }
 
 /// CRUD for the local `materialized_files` table (spec §8: the sync-folder

@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
+import '../../core/platform/android_sync_folder.dart';
 import '../../core/storage/materialized_files_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/storage/sync_conflicts_store.dart';
@@ -58,20 +59,40 @@ enum LocalUploadStatus { idle, scanning, resyncing, error }
 /// recorded when its content was last verified is not re-hashed, so an idle
 /// scan of a large folder costs a directory listing instead of reading every
 /// byte again.
+///
+/// Android's Storage Access Framework folder is handled by
+/// [scanAndroidEdits] instead, which only publishes edits to files this
+/// device materialized (see its doc comment).
 final class LocalFolderUploader extends ChangeNotifier {
   LocalFolderUploader({
     required ServerConnectionController serverConnection,
     required VaultKeyStore vaultKeyStore,
     required SyncEngine syncEngine,
+    AndroidSyncFolder? androidSyncFolder,
     String? deviceName,
+    this.androidEditRetryDelay = const Duration(minutes: 5),
   }) : _serverConnection = serverConnection,
        _vaultKeyStore = vaultKeyStore,
        _syncEngine = syncEngine,
+       _androidSyncFolder = androidSyncFolder,
        _deviceName = deviceName ?? localConflictDeviceName();
 
   final ServerConnectionController _serverConnection;
   final VaultKeyStore _vaultKeyStore;
   final SyncEngine _syncEngine;
+  final AndroidSyncFolder? _androidSyncFolder;
+
+  /// How long an Android edit that failed to upload waits before the same
+  /// unchanged file is tried again (see [scanAndroidEdits]).
+  final Duration androidEditRetryDelay;
+
+  /// Failed Android edit uploads by node ID; in memory only, so restarting
+  /// the app retries every pending edit at once.
+  final Map<
+    String,
+    ({int size, int? modifiedMillis, int? nodeRevision, DateTime notBefore})
+  >
+  _androidRetryAfter = {};
 
   /// Embedded in conflict-copy names and details (see SyncFolderMaterializer).
   final String _deviceName;
@@ -136,6 +157,381 @@ final class LocalFolderUploader extends ChangeNotifier {
       keys.dispose();
       _clearTransferProgress();
     }
+  }
+
+  /// Publishes edits that other Android apps made to files this device has
+  /// materialized into the Storage Access Framework tree [treeUri].
+  ///
+  /// SAF offers no change notifications for a document tree, so the caller
+  /// polls: one recursive listing per call, and a file is read only when its
+  /// size or modification time differs from what was recorded when it was
+  /// last in sync. Its content hash then decides: an unchanged hash merely
+  /// refreshes the recorded stat; a changed one is uploaded as the node's
+  /// next version when the local copy is based on the server's current
+  /// version, and otherwise (the server moved on, or the node was deleted)
+  /// as a separate conflict copy (spec §21), so neither side's edit is lost.
+  ///
+  /// Unlike [scan], new and deleted local files are not mirrored back: the
+  /// Android folder is a download mirror whose tracked files can be edited.
+  /// Callers MUST run this before [SyncFolderMaterializer.materialize] on the
+  /// same tree and never concurrently with it, so a pull never overwrites an
+  /// edit that has not been published yet.
+  Future<void> scanAndroidEdits(String treeUri) async {
+    final android = _androidSyncFolder;
+    if (android == null || _running) return;
+    // Claimed before the first await, like [scan].
+    _running = true;
+    try {
+      final records = _syncEngine.materializedFiles.listAll();
+      if (records.isEmpty) return;
+      // Listing needs neither the network nor the keys, so an idle pass
+      // (the common case: this runs every sync cycle) stops here.
+      final Map<String, AndroidDocumentStat> documents;
+      try {
+        documents = await android.listFiles(treeUri: treeUri);
+      } catch (e) {
+        _errorMessage = describeError(e);
+        _setStatus(LocalUploadStatus.error);
+        return;
+      }
+      final now = DateTime.now();
+      final candidates = [
+        for (final record in records)
+          if (documents[record.relativePath] case final stat?)
+            if (!record.matchesSizeAndModified(stat.size, stat.modified) &&
+                !_androidRetryDeferred(record, stat, now))
+              (record, stat),
+      ];
+      if (_androidRetryAfter.isNotEmpty) {
+        final tracked = {for (final record in records) record.nodeId};
+        _androidRetryAfter.removeWhere((id, _) => !tracked.contains(id));
+      }
+      if (candidates.isEmpty) {
+        if (_status == LocalUploadStatus.error) {
+          _errorMessage = null;
+          _setStatus(LocalUploadStatus.idle);
+        }
+        return;
+      }
+      final api = _serverConnection.api;
+      final session = await _serverConnection.ensureFreshSession();
+      if (api == null || session == null) return;
+      final keys = await _openKeys(session.user.id);
+      if (keys == null) return;
+      _clearTransferProgress();
+      _setStatus(LocalUploadStatus.scanning);
+      try {
+        for (final (record, stat) in candidates) {
+          await _publishAndroidEdit(
+            android: android,
+            treeUri: treeUri,
+            api: api,
+            accessToken: session.accessToken,
+            keys: keys,
+            record: record,
+            stat: stat,
+            documents: documents,
+          );
+        }
+        _errorMessage = null;
+        _setStatus(LocalUploadStatus.idle);
+      } catch (e) {
+        _errorMessage = describeError(e);
+        _setStatus(LocalUploadStatus.error);
+      } finally {
+        keys.dispose();
+        _clearTransferProgress();
+      }
+    } finally {
+      _running = false;
+    }
+  }
+
+  Future<void> _publishAndroidEdit({
+    required AndroidSyncFolder android,
+    required String treeUri,
+    required transport.HomeBoxApiClient api,
+    required String accessToken,
+    required OwnerKeys keys,
+    required MaterializedFile record,
+    required AndroidDocumentStat stat,
+    required Map<String, AndroidDocumentStat> documents,
+  }) async {
+    File? copy;
+    var failed = false;
+    try {
+      final cached = _syncEngine.nodeCache.getById(record.nodeId);
+      final node = cached != null && !cached.isDeleted && !cached.isDirectory
+          ? cached
+          : null;
+      final metadata = node == null ? null : await keys.decrypt(node);
+      final basedOnCurrent =
+          node != null &&
+          node.currentVersionId != null &&
+          record.contentVersionId == node.currentVersionId;
+      final baseline =
+          record.contentSha256 ??
+          (basedOnCurrent ? metadata?.plaintextSha256 : null);
+      void rememberStat({String? contentSha256}) =>
+          _syncEngine.materializedFiles.upsert(
+            MaterializedFile(
+              nodeId: record.nodeId,
+              relativePath: record.relativePath,
+              contentVersionId: record.contentVersionId,
+              localSize: stat.size,
+              localModifiedAt: stat.modified,
+              contentSha256: contentSha256 ?? record.contentSha256,
+            ),
+          );
+      if (baseline == null && node != null) {
+        // Nothing to compare against (content uploaded without a hash):
+        // adopt the current stat, so edits are detected from here on. Not
+        // for a deleted node, whose copy the next prune would then remove:
+        // that copy is kept as a conflict copy below instead.
+        rememberStat();
+        return;
+      }
+      if (stat.size > homeBoxMaxPlaintextFileSize) return;
+      if (baseline != null) {
+        final localHash = await android.hashFile(
+          treeUri: treeUri,
+          relativePath: record.relativePath,
+        );
+        if (localHash == null) return; // removed meanwhile.
+        if (localHash.toLowerCase() == baseline.toLowerCase()) {
+          rememberStat(contentSha256: baseline); // touched, not changed.
+          return;
+        }
+      }
+
+      final edited = File(
+        '${Directory.systemTemp.path}/homebox_android_edit_${generateUuidV4()}.tmp',
+      );
+      copy = edited;
+      if (!await android.readFile(
+        treeUri: treeUri,
+        relativePath: record.relativePath,
+        destinationPath: edited.path,
+      )) {
+        return;
+      }
+      // Hash what is actually uploaded: the editing app may still have been
+      // writing while the native hash ran. The recorded stat stays the one
+      // listed before reading, so a write landing during the upload no longer
+      // matches it and is published by the next pass.
+      final plaintextLength = await edited.length();
+      if (plaintextLength > homeBoxMaxPlaintextFileSize) {
+        failed = true; // grew past the limit while being read.
+        return;
+      }
+      final hash = await plaintextFileSha256(edited);
+
+      if (basedOnCurrent) {
+        await _uploadAndroidVersion(
+          api: api,
+          accessToken: accessToken,
+          keys: keys,
+          node: node,
+          metadata: metadata!,
+          record: record,
+          stat: stat,
+          file: edited,
+          plaintextLength: plaintextLength,
+          hash: hash,
+        );
+        return;
+      }
+
+      // The edit is not based on what the server holds now: keep it as a
+      // separate conflict copy next to the original (at the vault root when
+      // the original's folder is gone too). The materializer then downloads
+      // that copy into the folder like any other new file.
+      final fileName =
+          metadata?.fileName ?? basenameOfLocalPath(record.relativePath);
+      final copyPath = _freeAndroidConflictCopyPath(
+        record.relativePath,
+        fileName,
+        documents,
+      );
+      final kind = node == null
+          ? SyncConflictKind.modifiedLocallyDeletedRemotely
+          : SyncConflictKind.bothModified;
+      final detectedAt = DateTime.now().toUtc();
+      // Logged only once the copy is on the server: a file that keeps
+      // failing must not add a conflict entry on every polling pass.
+      final copyNodeId = await _uploadNewFile(
+        api: api,
+        accessToken: accessToken,
+        keys: keys,
+        parentId: node?.parentId ?? _liveParentOf(cached),
+        name: basenameOfLocalPath(copyPath),
+        relativePath: '',
+        localFile: edited,
+        conflict: SyncConflict(
+          id: generateUuidV4(),
+          kind: kind,
+          detectedAt: detectedAt,
+          nodeId: record.nodeId,
+          fileName: fileName,
+          conflictCopyPath: copyPath,
+        ),
+        recordMaterialized: false,
+      );
+      if (copyNodeId == null) {
+        failed = true;
+        return;
+      }
+      final conflict = _syncEngine.conflicts.record(
+        kind: kind,
+        nodeId: record.nodeId,
+        fileName: fileName,
+        conflictCopyPath: copyPath,
+        detectedAt: detectedAt,
+      );
+      _syncEngine.conflicts.markCopyUploaded(conflict.id, copyNodeId);
+      // The edit now lives on the server, so the materializer may replace
+      // (or remove) the local copy like an untouched one.
+      rememberStat();
+    } catch (_) {
+      // Broad on purpose — see _uploadIfChanged. The record keeps its old
+      // stat, so a later pass retries while the materializer leaves the
+      // edited copy alone.
+      failed = true;
+    } finally {
+      if (failed) {
+        _androidRetryAfter[record.nodeId] = (
+          size: stat.size,
+          modifiedMillis: stat.modified?.millisecondsSinceEpoch,
+          nodeRevision: _syncEngine.nodeCache.getById(record.nodeId)?.revision,
+          notBefore: DateTime.now().add(androidEditRetryDelay),
+        );
+      } else {
+        _androidRetryAfter.remove(record.nodeId);
+      }
+      final leftover = copy;
+      if (leftover != null && await leftover.exists()) {
+        await leftover.delete();
+      }
+    }
+  }
+
+  /// True while an earlier attempt to publish this exact edit failed
+  /// recently. Without this, a file the server keeps refusing (say, in a
+  /// folder shared read-only) would be read, hashed and uploaded again on
+  /// every sync cycle. A further edit, or any change of the node, retries at
+  /// once.
+  bool _androidRetryDeferred(
+    MaterializedFile record,
+    AndroidDocumentStat stat,
+    DateTime now,
+  ) {
+    final retry = _androidRetryAfter[record.nodeId];
+    return retry != null &&
+        now.isBefore(retry.notBefore) &&
+        retry.size == stat.size &&
+        retry.modifiedMillis == stat.modified?.millisecondsSinceEpoch &&
+        retry.nodeRevision ==
+            _syncEngine.nodeCache.getById(record.nodeId)?.revision;
+  }
+
+  Future<void> _uploadAndroidVersion({
+    required transport.HomeBoxApiClient api,
+    required String accessToken,
+    required OwnerKeys keys,
+    required LocalNode node,
+    required SensitiveNodeMetadata metadata,
+    required MaterializedFile record,
+    required AndroidDocumentStat stat,
+    required File file,
+    required int plaintextLength,
+    required String hash,
+  }) async {
+    final key = await keys.forExisting(node);
+    final metadataCiphertext = (await _metadataCipher.encrypt(
+      metadata: SensitiveNodeMetadata(
+        fileName: metadata.fileName,
+        mimeType: metadata.mimeType,
+        plaintextSha256: hash,
+        plaintextSize: plaintextLength,
+        // Editing a conflict copy does not resolve it (see _uploadIfChanged).
+        conflictDetails: metadata.conflictDetails,
+        labels: metadata.labels,
+      ),
+      metadataKey: key.key,
+      keyVersion: key.version,
+      nodeType: MetadataNodeType.file,
+      scopeId: key.scopeIdBytes,
+      nodeId: uuidStringToBytes(node.id),
+    )).encode();
+    _setTransferProgress(metadata.fileName, 0);
+    // A REVISION_CONFLICT (the server moved on meanwhile) throws: the record
+    // still names the older version, so the next pass keeps the edit as a
+    // conflict copy instead.
+    final uploaded = await uploadFilePathVersion(
+      api: api,
+      accessToken: accessToken,
+      key: key,
+      targetNodeId: node.id,
+      expectedRevision: node.revision,
+      file: file,
+      plaintextLength: plaintextLength,
+      expectedPlaintextSha256: hash,
+      metadataCiphertext: metadataCiphertext,
+      onProgress: (progress) =>
+          _setTransferProgress(metadata.fileName, progress),
+    );
+    _syncEngine.nodeCache.upsert(localNodeFromServerNode(uploaded));
+    _syncEngine.materializedFiles.upsert(
+      MaterializedFile(
+        nodeId: node.id,
+        relativePath: record.relativePath,
+        contentVersionId: uploaded.currentVersionId,
+        localSize: stat.size,
+        localModifiedAt: stat.modified,
+        contentSha256: hash,
+      ),
+    );
+  }
+
+  /// The parent of a deleted [node] while that folder still exists, so its
+  /// conflict copy lands where the user last saw the file.
+  String? _liveParentOf(LocalNode? node) {
+    final parentId = node?.parentId;
+    if (parentId == null) return null;
+    final parent = _syncEngine.nodeCache.getById(parentId);
+    return parent != null && !parent.isDeleted ? parentId : null;
+  }
+
+  /// A conflict-copy path next to [relativePath] that no local document
+  /// uses yet.
+  String _freeAndroidConflictCopyPath(
+    String relativePath,
+    String fileName,
+    Map<String, AndroidDocumentStat> documents,
+  ) {
+    final slash = relativePath.lastIndexOf('/');
+    final directory = slash == -1 ? '' : relativePath.substring(0, slash);
+    String inDirectory(String name) =>
+        directory.isEmpty ? name : '$directory/$name';
+    final detectedAt = DateTime.now().toUtc();
+    var path = inDirectory(
+      conflictCopyName(
+        fileName,
+        deviceName: _deviceName,
+        detectedAt: detectedAt,
+      ),
+    );
+    while (documents.containsKey(path)) {
+      path = inDirectory(
+        conflictCopyName(
+          fileName,
+          deviceName: _deviceName,
+          detectedAt: detectedAt,
+          uniqueSuffix: generateUuidV4().substring(0, 8),
+        ),
+      );
+    }
+    return path;
   }
 
   /// The keys of one scan or Resync pass; disposed when the pass ends.
@@ -482,6 +878,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(
           fileName: name,
+          mimeType: currentMetadata.mimeType,
           plaintextSha256: hash,
           plaintextSize: plaintextLength,
           // Editing a conflict copy does not resolve it; only the explicit
@@ -535,7 +932,12 @@ final class LocalFolderUploader extends ChangeNotifier {
     }
   }
 
-  Future<void> _uploadNewFile({
+  /// Uploads [localFile] as a new node named [name] and returns its ID, or
+  /// null when it was skipped or failed. [conflict] overrides the conflict
+  /// looked up by the copy's path; [recordMaterialized] is false when
+  /// [localFile] is not the copy in the sync folder itself (Android uploads
+  /// a temporary copy).
+  Future<String?> _uploadNewFile({
     required transport.HomeBoxApiClient api,
     required String accessToken,
     required OwnerKeys keys,
@@ -544,6 +946,8 @@ final class LocalFolderUploader extends ChangeNotifier {
     required String relativePath,
     required File localFile,
     bool strict = false,
+    SyncConflict? conflict,
+    bool recordMaterialized = true,
   }) async {
     try {
       final stat = await localFile.stat();
@@ -552,7 +956,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         if (strict) {
           throw StateError('$name exceeds the HomeBox file size limit.');
         }
-        return;
+        return null;
       }
       final hash = await plaintextFileSha256(localFile);
       final fileRelativePath = relativePath.isEmpty
@@ -560,9 +964,7 @@ final class LocalFolderUploader extends ChangeNotifier {
           : '$relativePath/$name';
       // A conflict copy kept by this device carries its explanation inside
       // the encrypted metadata, so every device can show it.
-      final conflict = _syncEngine.conflicts.copyAwaitingUpload(
-        fileRelativePath,
-      );
+      conflict ??= _syncEngine.conflicts.copyAwaitingUpload(fileRelativePath);
 
       final nodeId = generateUuidV4();
       final key = await keys.forNewChild(parentId);
@@ -617,22 +1019,26 @@ final class LocalFolderUploader extends ChangeNotifier {
       // Record this device's own upload as already-materialized so the
       // next materialize() pass doesn't immediately re-download the bytes
       // it just read from disk.
-      _syncEngine.materializedFiles.upsert(
-        MaterializedFile(
-          nodeId: nodeId,
-          relativePath: fileRelativePath,
-          contentVersionId: uploadedNode.currentVersionId,
-          localSize: stat.size,
-          localModifiedAt: stat.modified,
-          contentSha256: hash,
-        ),
-      );
+      if (recordMaterialized) {
+        _syncEngine.materializedFiles.upsert(
+          MaterializedFile(
+            nodeId: nodeId,
+            relativePath: fileRelativePath,
+            contentVersionId: uploadedNode.currentVersionId,
+            localSize: stat.size,
+            localModifiedAt: stat.modified,
+            contentSha256: hash,
+          ),
+        );
+      }
       if (conflict != null) {
         _syncEngine.conflicts.markCopyUploaded(conflict.id, nodeId);
       }
+      return nodeId;
     } catch (error) {
       if (strict) rethrow;
       // Broad on purpose — see _uploadIfChanged.
+      return null;
     }
   }
 

@@ -16,6 +16,8 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.util.Locale
 
 /// Backs [MethodChannelAndroidFileSaver] (lib/core/platform/android_file_saver.dart).
@@ -164,13 +166,54 @@ class MainActivity : FlutterFragmentActivity() {
                                 contentResolver.openOutputStream(destination, "wt")?.use { output ->
                                     FileInputStream(File(sourcePath)).use { input -> input.copyTo(output) }
                                 } ?: throw IllegalStateException("Could not open the sync-folder destination.")
-                                null
+                                // Recorded by the materializer, so a later scan can tell an
+                                // untouched copy from one another app has edited.
+                                documentStat(destination)
                             }
                         }
                     }
                     "fileExists" -> withTreeAndPath(call, result) { treeUri, relativePath ->
                         runSyncFolderOperation(result) {
                             findDocument(treeUri, relativePath) != null
+                        }
+                    }
+                    "statFile" -> withTreeAndPath(call, result) { treeUri, relativePath ->
+                        runSyncFolderOperation(result) {
+                            findDocument(treeUri, relativePath)?.let { documentStat(it) }
+                        }
+                    }
+                    "listFiles" -> {
+                        val rawTreeUri = call.argument<String>("treeUri")
+                        if (rawTreeUri.isNullOrEmpty()) {
+                            result.error("invalid_arguments", "treeUri is required.", null)
+                            return@setMethodCallHandler
+                        }
+                        runSyncFolderOperation(result) { listTreeFiles(Uri.parse(rawTreeUri)) }
+                    }
+                    "hashFile" -> withTreeAndPath(call, result) { treeUri, relativePath ->
+                        runSyncFolderOperation(result) {
+                            findDocument(treeUri, relativePath)?.let { sha256Hex(it) }
+                        }
+                    }
+                    "readFile" -> {
+                        val destinationPath = call.argument<String>("destinationPath")
+                        if (destinationPath.isNullOrEmpty() || !isPrivateCachePath(File(destinationPath))) {
+                            result.error(
+                                "invalid_arguments",
+                                "destinationPath must be in HomeBox's private cache.",
+                                null,
+                            )
+                            return@setMethodCallHandler
+                        }
+                        withTreeAndPath(call, result) { treeUri, relativePath ->
+                            runSyncFolderOperation(result) {
+                                val document = findDocument(treeUri, relativePath)
+                                    ?: return@runSyncFolderOperation false
+                                contentResolver.openInputStream(document)?.use { input ->
+                                    FileOutputStream(File(destinationPath)).use { output -> input.copyTo(output) }
+                                } ?: throw IllegalStateException("Could not open the sync-folder file.")
+                                true
+                            }
                         }
                     }
                     "deleteFile" -> withTreeAndPath(call, result) { treeUri, relativePath ->
@@ -218,9 +261,13 @@ class MainActivity : FlutterFragmentActivity() {
                                             setDataAndType(document, mimeType)
                                             // Some OEM choosers propagate a URI grant only when it
                                             // is also present in ClipData. Keep the document readable
-                                            // by the app selected from this chooser.
+                                            // by the app selected from this chooser, and writable so an
+                                            // editor can save back; the next sync pass uploads the edit.
                                             clipData = ClipData.newRawUri(relativePath.substringAfterLast('/'), document)
-                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            addFlags(
+                                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                                            )
                                         }
                                         try {
                                             startActivity(Intent.createChooser(intent, "Open file"))
@@ -272,6 +319,109 @@ class MainActivity : FlutterFragmentActivity() {
         candidate.isFile && candidate.path.startsWith("${shareRoot.path}${File.separator}")
     } catch (_: Exception) {
         false
+    }
+
+    /// The sync-folder `readFile` call copies user content out of the tree;
+    /// only HomeBox's own cache directories may receive it.
+    private fun isPrivateCachePath(file: File): Boolean = try {
+        val candidate = file.canonicalFile
+        val parent = candidate.parentFile
+        parent != null && listOf(cacheDir, codeCacheDir).any { root ->
+            val canonicalRoot = root.canonicalFile
+            parent == canonicalRoot ||
+                parent.path.startsWith("${canonicalRoot.path}${File.separator}")
+        }
+    } catch (_: Exception) {
+        false
+    }
+
+    /// Size and last-modified time (epoch milliseconds, absent when the
+    /// provider does not track it) of one document, or null when the provider
+    /// does not report a size.
+    private fun documentStat(document: Uri): Map<String, Any?>? {
+        contentResolver.query(
+            document,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_SIZE,
+                DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+            ),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val sizeIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
+            val modifiedIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+            if (cursor.isNull(sizeIndex)) return null
+            return mapOf(
+                "size" to cursor.getLong(sizeIndex),
+                "modified" to if (cursor.isNull(modifiedIndex)) null else cursor.getLong(modifiedIndex),
+            )
+        }
+        return null
+    }
+
+    /// Every regular file under [treeUri] with its '/'-separated relative path,
+    /// size and last-modified time: one provider query per directory instead
+    /// of a path lookup per file.
+    private fun listTreeFiles(treeUri: Uri): List<Map<String, Any?>> {
+        val files = mutableListOf<Map<String, Any?>>()
+        val pending = ArrayDeque<Pair<String, String>>()
+        pending.add(DocumentsContract.getTreeDocumentId(treeUri) to "")
+        while (pending.isNotEmpty()) {
+            val (documentId, prefix) = pending.removeFirst()
+            contentResolver.query(
+                DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId),
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_SIZE,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                ),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                val idIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                val sizeIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
+                val modifiedIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(nameIndex) ?: continue
+                    if (name.isEmpty() || name.contains('/')) continue
+                    val path = if (prefix.isEmpty()) name else "$prefix/$name"
+                    if (cursor.getString(mimeIndex) == DocumentsContract.Document.MIME_TYPE_DIR) {
+                        pending.add(cursor.getString(idIndex) to path)
+                    } else if (!cursor.isNull(sizeIndex)) {
+                        files.add(
+                            mapOf(
+                                "path" to path,
+                                "size" to cursor.getLong(sizeIndex),
+                                "modified" to if (cursor.isNull(modifiedIndex)) null else cursor.getLong(modifiedIndex),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        return files
+    }
+
+    /// Lowercase hex SHA-256 of a document, streamed so an unchanged file never
+    /// has to be copied out of the tree to be compared.
+    private fun sha256Hex(document: Uri): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        contentResolver.openInputStream(document)?.use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        } ?: throw IllegalStateException("Could not open the sync-folder file.")
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun withTreeAndPath(

@@ -194,9 +194,9 @@ class _SyncSection extends StatelessWidget {
                 );
               },
             ),
-          if (syncFolder != null &&
-              localFolderUploader != null &&
-              defaultTargetPlatform != TargetPlatform.android)
+          // Android uploads edits to its mirrored files too (see
+          // LocalFolderUploader.scanAndroidEdits), so the status is shown there.
+          if (syncFolder != null && localFolderUploader != null)
             AnimatedBuilder(
               animation: localFolderUploader!,
               builder: (context, _) {

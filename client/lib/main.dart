@@ -168,7 +168,8 @@ class HomeBoxDesktopPage extends StatefulWidget {
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
 }
 
-class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
+class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
+    with WidgetsBindingObserver {
   late final DeviceIdentityStore _deviceIdentityStore;
   late final DeviceSetupController _deviceSetupController;
   late final DeviceProvisioningController _deviceProvisioningController;
@@ -213,6 +214,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _deviceIdentityStore =
         widget.deviceIdentityStore ?? DeviceIdentityStore.platform();
     _deviceSetupController = DeviceSetupController(_deviceIdentityStore);
@@ -374,6 +376,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
           serverConnection: _serverConnectionController,
           vaultKeyStore: _vaultKeyStore,
           syncEngine: engine,
+          androidSyncFolder: _androidSyncFolder,
         );
         if (!mounted) {
           files.dispose();
@@ -503,6 +506,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   /// follow-up pass once the current one finishes.
   /// A local filesystem event must upload first: pulling first would recreate
   /// a directory the user just deleted before the uploader can observe it.
+  /// Android always publishes edits to its mirrored files first, for the same
+  /// reason: the pull would otherwise replace an edit whose node changed.
   Future<void> _runSyncFolderPass({bool localChange = false}) async {
     final folder = _syncFolder;
     final engine = _syncEngine;
@@ -525,16 +530,15 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _syncFolderPassRunning = true;
     final passDone = Completer<void>();
     _syncFolderPassDone = passDone;
+    final android = defaultTargetPlatform == TargetPlatform.android;
     try {
-      if (localChange && defaultTargetPlatform != TargetPlatform.android) {
-        await uploader.scan(folder);
-      }
+      // SAF has no recursive change notifications, so Android polls instead:
+      // every pass (each SyncEngine cycle and each return to the foreground)
+      // checks the mirrored files for edits made by other apps.
+      if (android) await uploader.scanAndroidEdits(folder);
+      if (localChange && !android) await uploader.scan(folder);
       await materializer.materialize(folder);
-      // SAF has no reliable recursive filesystem event stream, so Android
-      // mirrors server changes to the selected folder but does not watch it.
-      if (!localChange && defaultTargetPlatform != TargetPlatform.android) {
-        await uploader.scan(folder);
-      }
+      if (!localChange && !android) await uploader.scan(folder);
     } finally {
       _syncFolderPassRunning = false;
       _syncFolderPassDone = null;
@@ -710,8 +714,19 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     }
   }
 
+  /// An edit is usually made by opening a mirrored file in another app, so
+  /// returning to HomeBox publishes it at once instead of on the next cycle.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        defaultTargetPlatform == TargetPlatform.android) {
+      unawaited(_runSyncFolderPass());
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _serverConnectionController.removeListener(_onServerConnectionChanged);
     _vaultSetupController.removeListener(_maybeRefreshFiles);
     _filesController?.dispose();
