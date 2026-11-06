@@ -12,16 +12,14 @@ final class FolderKeysStore {
 
   final Database _db;
 
-  /// Replaces the cache with the server's complete list.
-  void replaceAll(List<FolderKeyRecord> records) {
+  /// Adds every key in [records] to the cache. Keys are never removed:
+  /// one this device created while the list was being fetched must survive,
+  /// and a key whose folder was purged is harmless to keep.
+  void mergeAll(List<FolderKeyRecord> records) {
     _db.execute('BEGIN');
     try {
-      _db.execute('DELETE FROM folder_keys');
       for (final record in records) {
-        _db.execute(
-          'INSERT OR REPLACE INTO folder_keys (folder_id, key_version, owner_envelope) VALUES (?, ?, ?)',
-          [record.folderId, record.keyVersion, record.ownerEnvelope],
-        );
+        add(record.folderId, record.keyVersion, record.ownerEnvelope);
       }
       _db.execute('COMMIT');
     } catch (_) {

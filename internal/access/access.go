@@ -91,12 +91,23 @@ func SubtreeHasKeyedFolder(ctx context.Context, q Querier, nodeID string) (bool,
 	return found, err
 }
 
+// ErrStaleFolderKey rejects member content encrypted with a folder key
+// version that a rotation has superseded: a removed member still holds the
+// old version, so accepting it would let them read content added after
+// their removal.
+var ErrStaleFolderKey = apierror.NewValidation("this shared folder has a newer key that this device has not received yet; ask the folder's owner to open HomeBox, then try again")
+
 // ValidateKeyScope checks the key a client declared for metadata or a File
 // DEK it is about to store. scopeID is either the owner's own account ID
 // (the personal Vault Key, which only the owner holds) or the ID of one of
 // the owner's shared folders with an existing key of keyVersion. A
-// non-owner writer must use the folder key of the share it writes through
-// (writeRootID), so everything it adds stays readable by every member.
+// non-owner writer must use the newest key of the share it writes through
+// (writeRootID), so everything it adds stays readable by every current
+// member and by no removed one.
+//
+// The owner may still use an older version: its devices refresh folder keys
+// on every sync pass, and refusing an older version would permanently fail
+// a change queued offline just before another owner device rotated the key.
 //
 // The check cannot prove the ciphertext really uses that key; it keeps
 // honest clients consistent, while AEAD context binding makes a lying
@@ -118,12 +129,17 @@ func ValidateKeyScope(ctx context.Context, q Querier, ownerID, actorID, writeRoo
 		return apierror.NewValidation("shared content must be encrypted with the shared folder's key")
 	}
 	var exists bool
-	if err := q.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM folder_keys WHERE folder_id=? AND key_version=? AND owner_user_id=?)",
-		scopeID, keyVersion, ownerID).Scan(&exists); err != nil {
+	var latest int
+	if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM folder_keys WHERE folder_id=? AND key_version=? AND owner_user_id=?),
+		COALESCE((SELECT MAX(key_version) FROM folder_keys WHERE folder_id=? AND owner_user_id=?),0)`,
+		scopeID, keyVersion, ownerID, scopeID, ownerID).Scan(&exists, &latest); err != nil {
 		return err
 	}
 	if !exists {
 		return apierror.NewValidation("the declared folder key does not exist")
+	}
+	if actorID != ownerID && keyVersion != latest {
+		return ErrStaleFolderKey
 	}
 	return nil
 }

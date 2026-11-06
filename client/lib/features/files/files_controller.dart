@@ -11,7 +11,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 import '../../core/e2ee/file_cipher.dart' show homeBoxChunkMacLength;
-import '../../core/e2ee/key_ring.dart';
+import '../../core/e2ee/key_ring.dart' show ScopedKey;
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/portable_name.dart';
@@ -117,32 +117,32 @@ final class _Breadcrumb {
   final String name;
 }
 
+/// One operation's connection and keys. Every caller of
+/// [FilesController._requireContext] disposes it when done, so the Vault
+/// Key and folder keys it unwrapped are erased.
 final class _UploadContext {
   const _UploadContext({
     required this.api,
     required this.accessToken,
     required this.keys,
-    required this.scopes,
-    required this.userId,
   });
   final transport.HomeBoxApiClient api;
   final String accessToken;
 
   /// The Vault Key and every shared-folder key of this account (ADR-023).
-  final OwnerKeyRing keys;
-  final KeyScopeResolver scopes;
-  final String userId;
+  final OwnerKeys keys;
+
+  String get userId => keys.userId;
 
   /// The newest key of the scope a new child of [parentId] belongs to.
   Future<ScopedKey> keyForNewChild(String? parentId) =>
-      keys.current(scopes.forNewChild(parentId));
+      keys.forNewChild(parentId);
 
-  /// The newest key of the scope [node] is currently encrypted in. A
-  /// rename or new version stays in that scope, so the node's metadata and
-  /// File DEKs never diverge; moving into a shared folder's scope is done
-  /// by the shared-scope reconciler for both at once.
-  Future<ScopedKey> keyForExisting(LocalNode node) =>
-      keys.current(node.scopeOrOwner(userId));
+  /// The newest key of the scope [node] is currently encrypted in; moving
+  /// into a shared folder's scope is the shared-scope reconciler's job.
+  Future<ScopedKey> keyForExisting(LocalNode node) => keys.forExisting(node);
+
+  void dispose() => keys.dispose();
 }
 
 /// Drives the Files browser. Folder create/rename/delete go through
@@ -378,32 +378,39 @@ final class FilesController extends ChangeNotifier {
       _setStatus(FilesStatus.failed);
       return;
     }
-    _setStatus(FilesStatus.loading);
     try {
-      final nodes = _syncEngine.nodeCache.listChildren(_currentParentId);
-      final decrypted = <FileEntry>[];
-      for (final node in nodes) {
-        try {
-          decrypted.add(
-            FileEntry(node: node, metadata: await _decryptMetadata(node, ctx)),
-          );
-        } catch (_) {
-          // A node this device cannot decrypt or parse (wrong/missing key
-          // version, or malformed metadata) is skipped rather than failing
-          // the whole listing. Broad catch: envelope decoding can throw
-          // ArgumentError, which does not extend Exception.
+      _setStatus(FilesStatus.loading);
+      try {
+        final nodes = _syncEngine.nodeCache.listChildren(_currentParentId);
+        final decrypted = <FileEntry>[];
+        for (final node in nodes) {
+          try {
+            decrypted.add(
+              FileEntry(
+                node: node,
+                metadata: await _decryptMetadata(node, ctx),
+              ),
+            );
+          } catch (_) {
+            // A node this device cannot decrypt or parse (wrong/missing key
+            // version, or malformed metadata) is skipped rather than failing
+            // the whole listing. Broad catch: envelope decoding can throw
+            // ArgumentError, which does not extend Exception.
+          }
         }
+        decrypted.sort(_compareEntries);
+        _entries = decrypted;
+        _entriesAsOf = DateTime.now().toUtc();
+        _setStatus(FilesStatus.ready);
+      } catch (e) {
+        // Broad on purpose: StateError/ArgumentError (thrown by this class's
+        // own checks) do not extend Exception, so `on Exception` would miss
+        // them and crash instead of surfacing errorMessage.
+        _errorMessage = describeError(e);
+        _setStatus(FilesStatus.failed);
       }
-      decrypted.sort(_compareEntries);
-      _entries = decrypted;
-      _entriesAsOf = DateTime.now().toUtc();
-      _setStatus(FilesStatus.ready);
-    } catch (e) {
-      // Broad on purpose: StateError/ArgumentError (thrown by this class's
-      // own checks) do not extend Exception, so `on Exception` would miss
-      // them and crash instead of surfacing errorMessage.
-      _errorMessage = describeError(e);
-      _setStatus(FilesStatus.failed);
+    } finally {
+      ctx.dispose();
     }
   }
 
@@ -439,58 +446,62 @@ final class FilesController extends ChangeNotifier {
     final ctx = await _requireContext();
     if (ctx == null) return false;
     try {
-      final nodeId = generateUuidV4();
-      final key = await ctx.keyForNewChild(_currentParentId);
-      final envelope = await _metadataCipher.encrypt(
-        metadata: SensitiveNodeMetadata(fileName: name),
-        metadataKey: key.key,
-        keyVersion: key.version,
-        nodeType: MetadataNodeType.directory,
-        scopeId: key.scopeIdBytes,
-        nodeId: uuidStringToBytes(nodeId),
-      );
-      final metadataCiphertext = envelope.encode();
-      final now = DateTime.now().toUtc();
-      _syncEngine.nodeCache.upsert(
-        LocalNode(
-          id: nodeId,
-          parentId: _currentParentId,
-          nodeType: 'DIRECTORY',
-          metadataCiphertext: metadataCiphertext,
-          metadataKeyVersion: key.version,
-          keyScopeId: key.scopeId,
-          currentVersionId: null,
-          revision: 0,
-          createdAt: now,
-          updatedAt: now,
-          pendingCreate: true,
-        ),
-      );
-      _syncEngine.pendingOperations.enqueue(
-        PendingOperation(
-          id: generateUuidV4(),
-          operationId: generateUuidV4(),
-          type: PendingOperationType.createNode,
-          nodeId: nodeId,
-          payload: {
-            'parentId': _currentParentId,
-            'nodeType': 'DIRECTORY',
-            'metadataCiphertext': base64Encode(metadataCiphertext),
-            'metadataKeyVersion': key.version,
-            metadataScopePayloadKey: key.scopeId,
-          },
-          createdAt: now,
-          retryCount: 0,
-          status: PendingOperationStatus.pending,
-        ),
-      );
-      unawaited(_syncEngine.runOnce());
-      await refresh();
-      return true;
-    } catch (e) {
-      _errorMessage = describeError(e);
-      notifyListeners();
-      return false;
+      try {
+        final nodeId = generateUuidV4();
+        final key = await ctx.keyForNewChild(_currentParentId);
+        final envelope = await _metadataCipher.encrypt(
+          metadata: SensitiveNodeMetadata(fileName: name),
+          metadataKey: key.key,
+          keyVersion: key.version,
+          nodeType: MetadataNodeType.directory,
+          scopeId: key.scopeIdBytes,
+          nodeId: uuidStringToBytes(nodeId),
+        );
+        final metadataCiphertext = envelope.encode();
+        final now = DateTime.now().toUtc();
+        _syncEngine.nodeCache.upsert(
+          LocalNode(
+            id: nodeId,
+            parentId: _currentParentId,
+            nodeType: 'DIRECTORY',
+            metadataCiphertext: metadataCiphertext,
+            metadataKeyVersion: key.version,
+            keyScopeId: key.scopeId,
+            currentVersionId: null,
+            revision: 0,
+            createdAt: now,
+            updatedAt: now,
+            pendingCreate: true,
+          ),
+        );
+        _syncEngine.pendingOperations.enqueue(
+          PendingOperation(
+            id: generateUuidV4(),
+            operationId: generateUuidV4(),
+            type: PendingOperationType.createNode,
+            nodeId: nodeId,
+            payload: {
+              'parentId': _currentParentId,
+              'nodeType': 'DIRECTORY',
+              'metadataCiphertext': base64Encode(metadataCiphertext),
+              'metadataKeyVersion': key.version,
+              metadataScopePayloadKey: key.scopeId,
+            },
+            createdAt: now,
+            retryCount: 0,
+            status: PendingOperationStatus.pending,
+          ),
+        );
+        unawaited(_syncEngine.runOnce());
+        await refresh();
+        return true;
+      } catch (e) {
+        _errorMessage = describeError(e);
+        notifyListeners();
+        return false;
+      }
+    } finally {
+      ctx.dispose();
     }
   }
 
@@ -506,54 +517,58 @@ final class FilesController extends ChangeNotifier {
     final ctx = await _requireContext();
     if (ctx == null) return false;
     try {
-      final targetParentId = move ? newParentId : entry.node.parentId;
-      if (move) {
-        _checkMoveKeepsSharedFoldersApart(entry.node, targetParentId, ctx);
-      }
-      final key = await ctx.keyForExisting(entry.node);
-      final envelope = await _metadataCipher.encrypt(
-        metadata: SensitiveNodeMetadata(
-          fileName: newName,
-          mimeType: entry.metadata.mimeType,
-          plaintextSha256: entry.metadata.plaintextSha256,
-          plaintextSize: entry.metadata.plaintextSize,
-          conflictDetails: entry.metadata.conflictDetails,
-          labels: entry.metadata.labels,
-        ),
-        metadataKey: key.key,
-        keyVersion: key.version,
-        nodeType: entry.isDirectory
-            ? MetadataNodeType.directory
-            : MetadataNodeType.file,
-        scopeId: key.scopeIdBytes,
-        nodeId: uuidStringToBytes(entry.node.id),
-      );
-      final metadataCiphertext = envelope.encode();
-      _syncEngine.nodeCache.upsert(
-        entry.node.copyWith(
-          parentId: targetParentId,
-          clearParent: targetParentId == null,
+      try {
+        final targetParentId = move ? newParentId : entry.node.parentId;
+        if (move) {
+          _checkMoveKeepsSharedFoldersApart(entry.node, targetParentId, ctx);
+        }
+        final key = await ctx.keyForExisting(entry.node);
+        final envelope = await _metadataCipher.encrypt(
+          metadata: SensitiveNodeMetadata(
+            fileName: newName,
+            mimeType: entry.metadata.mimeType,
+            plaintextSha256: entry.metadata.plaintextSha256,
+            plaintextSize: entry.metadata.plaintextSize,
+            conflictDetails: entry.metadata.conflictDetails,
+            labels: entry.metadata.labels,
+          ),
+          metadataKey: key.key,
+          keyVersion: key.version,
+          nodeType: entry.isDirectory
+              ? MetadataNodeType.directory
+              : MetadataNodeType.file,
+          scopeId: key.scopeIdBytes,
+          nodeId: uuidStringToBytes(entry.node.id),
+        );
+        final metadataCiphertext = envelope.encode();
+        _syncEngine.nodeCache.upsert(
+          entry.node.copyWith(
+            parentId: targetParentId,
+            clearParent: targetParentId == null,
+            metadataCiphertext: metadataCiphertext,
+            metadataKeyVersion: key.version,
+            keyScopeId: key.scopeId,
+            updatedAt: DateTime.now().toUtc(),
+          ),
+        );
+        _enqueueUpdate(
+          entry.node,
+          baseRevision: entry.node.revision,
           metadataCiphertext: metadataCiphertext,
-          metadataKeyVersion: key.version,
-          keyScopeId: key.scopeId,
-          updatedAt: DateTime.now().toUtc(),
-        ),
-      );
-      _enqueueUpdate(
-        entry.node,
-        baseRevision: entry.node.revision,
-        metadataCiphertext: metadataCiphertext,
-        metadataKey: key,
-        moveParent: move,
-        parentId: targetParentId,
-      );
-      unawaited(_syncEngine.runOnce());
-      await refresh();
-      return true;
-    } catch (e) {
-      _errorMessage = describeError(e);
-      notifyListeners();
-      return false;
+          metadataKey: key,
+          moveParent: move,
+          parentId: targetParentId,
+        );
+        unawaited(_syncEngine.runOnce());
+        await refresh();
+        return true;
+      } catch (e) {
+        _errorMessage = describeError(e);
+        notifyListeners();
+        return false;
+      }
+    } finally {
+      ctx.dispose();
     }
   }
 
@@ -565,46 +580,50 @@ final class FilesController extends ChangeNotifier {
     final ctx = await _requireContext();
     if (ctx == null) return false;
     try {
-      final key = await ctx.keyForExisting(entry.node);
-      final envelope = await _metadataCipher.encrypt(
-        metadata: SensitiveNodeMetadata(
-          fileName: entry.metadata.fileName,
-          mimeType: entry.metadata.mimeType,
-          plaintextSha256: entry.metadata.plaintextSha256,
-          plaintextSize: entry.metadata.plaintextSize,
-          labels: entry.metadata.labels,
-        ),
-        metadataKey: key.key,
-        keyVersion: key.version,
-        nodeType: entry.isDirectory
-            ? MetadataNodeType.directory
-            : MetadataNodeType.file,
-        scopeId: key.scopeIdBytes,
-        nodeId: uuidStringToBytes(entry.node.id),
-      );
-      final metadataCiphertext = envelope.encode();
-      _syncEngine.nodeCache.upsert(
-        entry.node.copyWith(
+      try {
+        final key = await ctx.keyForExisting(entry.node);
+        final envelope = await _metadataCipher.encrypt(
+          metadata: SensitiveNodeMetadata(
+            fileName: entry.metadata.fileName,
+            mimeType: entry.metadata.mimeType,
+            plaintextSha256: entry.metadata.plaintextSha256,
+            plaintextSize: entry.metadata.plaintextSize,
+            labels: entry.metadata.labels,
+          ),
+          metadataKey: key.key,
+          keyVersion: key.version,
+          nodeType: entry.isDirectory
+              ? MetadataNodeType.directory
+              : MetadataNodeType.file,
+          scopeId: key.scopeIdBytes,
+          nodeId: uuidStringToBytes(entry.node.id),
+        );
+        final metadataCiphertext = envelope.encode();
+        _syncEngine.nodeCache.upsert(
+          entry.node.copyWith(
+            metadataCiphertext: metadataCiphertext,
+            metadataKeyVersion: key.version,
+            keyScopeId: key.scopeId,
+            updatedAt: DateTime.now().toUtc(),
+          ),
+        );
+        _enqueueUpdate(
+          entry.node,
+          baseRevision: entry.node.revision,
           metadataCiphertext: metadataCiphertext,
-          metadataKeyVersion: key.version,
-          keyScopeId: key.scopeId,
-          updatedAt: DateTime.now().toUtc(),
-        ),
-      );
-      _enqueueUpdate(
-        entry.node,
-        baseRevision: entry.node.revision,
-        metadataCiphertext: metadataCiphertext,
-        metadataKey: key,
-        parentId: entry.node.parentId,
-      );
-      unawaited(_syncEngine.runOnce());
-      await refresh();
-      return true;
-    } catch (e) {
-      _errorMessage = describeError(e);
-      notifyListeners();
-      return false;
+          metadataKey: key,
+          parentId: entry.node.parentId,
+        );
+        unawaited(_syncEngine.runOnce());
+        await refresh();
+        return true;
+      } catch (e) {
+        _errorMessage = describeError(e);
+        notifyListeners();
+        return false;
+      }
+    } finally {
+      ctx.dispose();
     }
   }
 
@@ -613,6 +632,7 @@ final class FilesController extends ChangeNotifier {
   Future<bool> deleteNode(FileEntry entry) async {
     final ctx = await _requireContext();
     if (ctx == null) return false;
+    ctx.dispose(); // Only the session check is needed; Trash needs no key.
     try {
       final now = DateTime.now().toUtc();
       _syncEngine.nodeCache.upsert(
@@ -725,31 +745,35 @@ final class FilesController extends ChangeNotifier {
     if (ctx == null) {
       return FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length);
     }
-    for (var index = 0; index < uniquePaths.length; index++) {
-      try {
-        await _uploadFileToParent(
-          localPath: uniquePaths[index],
-          ctx: ctx,
-          parentId: targetParentId,
-          onProgress: (progress) =>
-              _setProgress((index + progress) / uniquePaths.length),
-        );
-        succeeded++;
-        successfulPaths.add(uniquePaths[index]);
-      } catch (e) {
-        // Continue so a single unreadable or oversized dropped file does
-        // not prevent the rest of the selection from being backed up.
-        failed++;
-        _errorMessage = describeError(e);
-        notifyListeners();
+    try {
+      for (var index = 0; index < uniquePaths.length; index++) {
+        try {
+          await _uploadFileToParent(
+            localPath: uniquePaths[index],
+            ctx: ctx,
+            parentId: targetParentId,
+            onProgress: (progress) =>
+                _setProgress((index + progress) / uniquePaths.length),
+          );
+          succeeded++;
+          successfulPaths.add(uniquePaths[index]);
+        } catch (e) {
+          // Continue so a single unreadable or oversized dropped file does
+          // not prevent the rest of the selection from being backed up.
+          failed++;
+          _errorMessage = describeError(e);
+          notifyListeners();
+        }
       }
+      await refresh();
+      return FileUploadBatchResult(
+        succeeded: succeeded,
+        failed: failed,
+        successfulPaths: List.unmodifiable(successfulPaths),
+      );
+    } finally {
+      ctx.dispose();
     }
-    await refresh();
-    return FileUploadBatchResult(
-      succeeded: succeeded,
-      failed: failed,
-      successfulPaths: List.unmodifiable(successfulPaths),
-    );
   }
 
   /// Runs [body] as the next file transfer, after every transfer requested
@@ -866,8 +890,9 @@ final class FilesController extends ChangeNotifier {
     String localPath, {
     void Function(double progress)? onProgress,
   }) async {
+    _UploadContext? ctx;
     try {
-      final ctx = await _requireContext();
+      ctx = await _requireContext();
       if (ctx == null) return false;
       final file = File(localPath);
       final plaintextLength = await file.length();
@@ -917,6 +942,8 @@ final class FilesController extends ChangeNotifier {
       _errorMessage = describeError(e);
       notifyListeners();
       return false;
+    } finally {
+      ctx?.dispose();
     }
   }
 
@@ -933,13 +960,14 @@ final class FilesController extends ChangeNotifier {
       );
 
   Future<bool> _downloadFile(FileEntry entry, String destinationPath) async {
+    _UploadContext? ctx;
     try {
-      final ctx = await _requireContext();
+      ctx = await _requireContext();
       if (ctx == null) return false;
       await downloadAndDecryptFileToPath(
         api: ctx.api,
         accessToken: ctx.accessToken,
-        keys: ctx.keys,
+        keys: ctx.keys.ring,
         nodeId: entry.node.id,
         expectedVersionId: entry.node.currentVersionId,
         destinationPath: destinationPath,
@@ -954,6 +982,8 @@ final class FilesController extends ChangeNotifier {
       _errorMessage = describeError(e);
       notifyListeners();
       return false;
+    } finally {
+      ctx?.dispose();
     }
   }
 
@@ -966,22 +996,26 @@ final class FilesController extends ChangeNotifier {
       notifyListeners();
       return const [];
     }
-    final folderNames = <String, String?>{};
-    final result = <TrashEntry>[];
-    for (final node in _syncEngine.nodeCache.listTrash()) {
-      try {
-        final metadata = await _decryptMetadata(node, ctx);
-        result.add(
-          TrashEntry(
-            entry: FileEntry(node: node, metadata: metadata),
-            location: await _readablePath(node.parentId, ctx, folderNames),
-          ),
-        );
-      } catch (_) {
-        // Broad on purpose, as in refresh(): see its comment.
+    try {
+      final folderNames = <String, String?>{};
+      final result = <TrashEntry>[];
+      for (final node in _syncEngine.nodeCache.listTrash()) {
+        try {
+          final metadata = await _decryptMetadata(node, ctx);
+          result.add(
+            TrashEntry(
+              entry: FileEntry(node: node, metadata: metadata),
+              location: await _readablePath(node.parentId, ctx, folderNames),
+            ),
+          );
+        } catch (_) {
+          // Broad on purpose, as in refresh(): see its comment.
+        }
       }
+      return result;
+    } finally {
+      ctx.dispose();
     }
-    return result;
   }
 
   /// Restores [entry] from Trash through the durable outbox, together with
@@ -995,47 +1029,51 @@ final class FilesController extends ChangeNotifier {
       return false;
     }
     try {
-      final cache = _syncEngine.nodeCache;
-      // Collected innermost first and restored outermost first, so each
-      // node lands in a parent that is already live again.
-      final deletedChain = <LocalNode>[];
-      final visited = <String>{};
-      LocalNode? node = cache.getById(entry.node.id) ?? entry.node;
-      while (node != null && visited.add(node.id)) {
-        if (node.isDeleted) deletedChain.add(node);
-        final parentId = node.parentId;
-        node = parentId == null ? null : cache.getById(parentId);
+      try {
+        final cache = _syncEngine.nodeCache;
+        // Collected innermost first and restored outermost first, so each
+        // node lands in a parent that is already live again.
+        final deletedChain = <LocalNode>[];
+        final visited = <String>{};
+        LocalNode? node = cache.getById(entry.node.id) ?? entry.node;
+        while (node != null && visited.add(node.id)) {
+          if (node.isDeleted) deletedChain.add(node);
+          final parentId = node.parentId;
+          node = parentId == null ? null : cache.getById(parentId);
+        }
+        final toRestore = deletedChain.reversed.toList(growable: false);
+        for (final deleted in toRestore) {
+          await _ensureNameIsFree(deleted, ctx);
+        }
+        final now = DateTime.now().toUtc();
+        for (final (index, deleted) in toRestore.indexed) {
+          cache.upsert(deleted.copyWith(updatedAt: now, clearDeletedAt: true));
+          _syncEngine.pendingOperations.enqueue(
+            PendingOperation(
+              id: generateUuidV4(),
+              operationId: generateUuidV4(),
+              type: PendingOperationType.restoreNode,
+              nodeId: deleted.id,
+              payload: const {},
+              // Strictly increasing, so the outbox pushes the outermost
+              // folder's restore first.
+              createdAt: now.add(Duration(microseconds: index)),
+              retryCount: 0,
+              status: PendingOperationStatus.pending,
+            ),
+          );
+        }
+        unawaited(_syncEngine.runOnce());
+        await refresh();
+        return true;
+      } catch (e) {
+        // Broad on purpose, as in refresh(): see its comment.
+        _errorMessage = describeError(e);
+        notifyListeners();
+        return false;
       }
-      final toRestore = deletedChain.reversed.toList(growable: false);
-      for (final deleted in toRestore) {
-        await _ensureNameIsFree(deleted, ctx);
-      }
-      final now = DateTime.now().toUtc();
-      for (final (index, deleted) in toRestore.indexed) {
-        cache.upsert(deleted.copyWith(updatedAt: now, clearDeletedAt: true));
-        _syncEngine.pendingOperations.enqueue(
-          PendingOperation(
-            id: generateUuidV4(),
-            operationId: generateUuidV4(),
-            type: PendingOperationType.restoreNode,
-            nodeId: deleted.id,
-            payload: const {},
-            // Strictly increasing, so the outbox pushes the outermost
-            // folder's restore first.
-            createdAt: now.add(Duration(microseconds: index)),
-            retryCount: 0,
-            status: PendingOperationStatus.pending,
-          ),
-        );
-      }
-      unawaited(_syncEngine.runOnce());
-      await refresh();
-      return true;
-    } catch (e) {
-      // Broad on purpose, as in refresh(): see its comment.
-      _errorMessage = describeError(e);
-      notifyListeners();
-      return false;
+    } finally {
+      ctx.dispose();
     }
   }
 
@@ -1093,6 +1131,7 @@ final class FilesController extends ChangeNotifier {
       notifyListeners();
       return null;
     }
+    ctx.dispose(); // Listing versions needs the session only.
     try {
       final versions = await ctx.api.listFileVersions(
         ctx.accessToken,
@@ -1192,11 +1231,16 @@ final class FilesController extends ChangeNotifier {
   Future<FileEntry> _latestEntry(FileEntry entry) async {
     final latest = _syncEngine.nodeCache.getById(entry.node.id);
     final ctx = await _requireContext();
-    if (latest == null || ctx == null) return entry;
-    return FileEntry(
-      node: latest,
-      metadata: await _decryptMetadata(latest, ctx),
-    );
+    if (ctx == null) return entry;
+    try {
+      if (latest == null) return entry;
+      return FileEntry(
+        node: latest,
+        metadata: await _decryptMetadata(latest, ctx),
+      );
+    } finally {
+      ctx.dispose();
+    }
   }
 
   Future<void> _downloadVersionTo(
@@ -1209,10 +1253,30 @@ final class FilesController extends ChangeNotifier {
     if (ctx == null) {
       throw StateError(_errorMessage ?? 'Sign in and unlock the vault first.');
     }
+    try {
+      await _downloadVersionWith(
+        ctx,
+        entry,
+        version,
+        destinationPath,
+        onProgress,
+      );
+    } finally {
+      ctx.dispose();
+    }
+  }
+
+  Future<void> _downloadVersionWith(
+    _UploadContext ctx,
+    FileEntry entry,
+    FileVersionEntry version,
+    String destinationPath,
+    void Function(double progress) onProgress,
+  ) async {
     await downloadAndDecryptFileToPath(
       api: ctx.api,
       accessToken: ctx.accessToken,
-      keys: ctx.keys,
+      keys: ctx.keys.ring,
       nodeId: entry.node.id,
       expectedVersionId: version.id,
       destinationPath: destinationPath,
@@ -1268,7 +1332,7 @@ final class FilesController extends ChangeNotifier {
         return await downloadAndDecryptFile(
           api: api,
           accessToken: session.accessToken,
-          keys: keys,
+          keys: keys.ring,
           nodeId: entry.node.id,
           expectedVersionId: entry.node.currentVersionId,
           expectedPlaintextSha256: entry.metadata.plaintextSha256,
@@ -1293,33 +1357,13 @@ final class FilesController extends ChangeNotifier {
   Future<SensitiveNodeMetadata> _decryptMetadata(
     LocalNode node,
     _UploadContext ctx,
-  ) async {
-    final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
-    final key = await ctx.keys.key(
-      node.scopeOrOwner(ctx.userId),
-      envelope.keyVersion,
-    );
-    return _metadataCipher.decrypt(
-      envelope: envelope,
-      metadataKey: key.key,
-      nodeType: node.isDirectory
-          ? MetadataNodeType.directory
-          : MetadataNodeType.file,
-      scopeId: key.scopeIdBytes,
-      nodeId: uuidStringToBytes(node.id),
-    );
-  }
+  ) => ctx.keys.decrypt(node);
 
-  KeyScopeResolver _scopesFor(String userId) => KeyScopeResolver(
-    nodeCache: _syncEngine.nodeCache,
-    isKeyedFolder: _syncEngine.folderKeys.isKeyedFolder,
-    userId: userId,
-  );
-
-  Future<OwnerKeyRing?> _openKeys(String userId) => openOwnerKeyRing(
+  Future<OwnerKeys?> _openKeys(String userId) => OwnerKeys.open(
     vaultKeyStore: _vaultKeyStore,
+    nodeCache: _syncEngine.nodeCache,
+    folderKeys: _syncEngine.folderKeys,
     userId: userId,
-    wrappedFolderKeys: _syncEngine.folderKeys.all(),
   );
 
   /// Refuses a move the server would reject anyway: shared folders never
@@ -1329,24 +1373,15 @@ final class FilesController extends ChangeNotifier {
     String? newParentId,
     _UploadContext ctx,
   ) {
+    final scopes = ctx.keys.scopes;
     if (newParentId == null ||
-        ctx.scopes.nearestKeyedFolder(newParentId) == null) {
+        scopes.nearestKeyedFolder(newParentId) == null ||
+        !scopes.subtreeHasKeyedFolder(node.id)) {
       return;
     }
-    final pending = [node.id];
-    final visited = <String>{};
-    while (pending.isNotEmpty) {
-      final id = pending.removeLast();
-      if (!visited.add(id)) continue;
-      if (_syncEngine.folderKeys.isKeyedFolder(id)) {
-        throw StateError(
-          'A shared folder cannot be moved into another shared folder.',
-        );
-      }
-      for (final child in _syncEngine.nodeCache.listChildren(id)) {
-        if (child.isDirectory) pending.add(child.id);
-      }
-    }
+    throw StateError(
+      'A shared folder cannot be moved into another shared folder.',
+    );
   }
 
   Future<_UploadContext?> _requireContext() async {
@@ -1366,8 +1401,6 @@ final class FilesController extends ChangeNotifier {
       api: api,
       accessToken: session.accessToken,
       keys: keys,
-      scopes: _scopesFor(session.user.id),
-      userId: session.user.id,
     );
   }
 

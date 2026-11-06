@@ -135,6 +135,15 @@ final class PendingOperationsStore {
     return rows.isNotEmpty;
   }
 
+  /// IDs of every node with a queued or running mutation, read in one
+  /// query for callers that check many nodes at once.
+  Set<String> nodeIdsWithUnfinishedOperations() => {
+    for (final row in _db.select(
+      "SELECT DISTINCT node_id FROM pending_operations WHERE status IN ('PENDING', 'RUNNING', 'BLOCKED')",
+    ))
+      row['node_id'] as String,
+  };
+
   bool get hasUnfinishedOperations {
     final rows = _db.select(
       "SELECT 1 FROM pending_operations WHERE status IN ('PENDING', 'RUNNING', 'BLOCKED') LIMIT 1",

@@ -9,8 +9,8 @@ import '../../core/e2ee/account_identity.dart';
 import '../../core/e2ee/device_identity.dart';
 import '../../core/e2ee/family_share_key.dart';
 import '../../core/e2ee/key_ring.dart';
-import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
+import '../../core/e2ee/scoped_metadata.dart';
 import '../../core/e2ee/vault_key_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
@@ -115,7 +115,6 @@ final class FamilyVaultController extends ChangeNotifier {
   final DeviceIdentityStore _deviceIdentityStore;
   final SyncEngine _syncEngine;
   final SharedScopeReconciler _reconciler;
-  final MetadataCipher _cipher = MetadataCipher();
   final FamilyShareKeyCipher _shareCipher = FamilyShareKeyCipher();
 
   List<OutgoingShareView> _outgoing = const [];
@@ -130,6 +129,7 @@ final class FamilyVaultController extends ChangeNotifier {
   bool _reconciling = false;
   bool _reconcileAgain = false;
   bool _loadedOnce = false;
+  DateTime? _lastReconcile;
 
   List<OutgoingShareView> get outgoing => _outgoing;
   List<IncomingShareView> get incoming => _incoming;
@@ -172,18 +172,8 @@ final class FamilyVaultController extends ChangeNotifier {
       isKeyedFolder: keyed,
       userId: userId,
     );
-    if (scopes.nearestKeyedFolder(folder.parentId) != null) return false;
-    final pending = [folder.id];
-    final visited = <String>{};
-    while (pending.isNotEmpty) {
-      final id = pending.removeLast();
-      if (!visited.add(id)) continue;
-      if (id != folder.id && keyed(id)) return false;
-      for (final child in _syncEngine.nodeCache.listChildren(id)) {
-        if (child.isDirectory) pending.add(child.id);
-      }
-    }
-    return true;
+    return scopes.nearestKeyedFolder(folder.parentId) == null &&
+        !scopes.subtreeHasKeyedFolder(folder.id, includeSelf: false);
   }
 
   void clearMessages() {
@@ -301,17 +291,25 @@ final class FamilyVaultController extends ChangeNotifier {
         candidate.accountId,
         candidate.identityPublicKey,
       );
+      // Another owner device may already have created or rotated this
+      // folder's key; never create a version from a stale local copy.
+      await _refreshFolderKeys(ctx);
       await _ensureFolderKey(ctx, folderId);
       // Bring the local tree up to date first so nothing recently added
       // elsewhere stays encrypted with the personal Vault Key.
       await _syncEngine.runOnce();
       _setBusy('Encrypting the folder with its own key…');
-      await _reconciler.reconcile(
+      final prepared = await _reconciler.reconcile(
         api: ctx.api,
         accessToken: ctx.accessToken,
         keys: ctx.keys,
         folderIds: [folderId],
       );
+      _noticeMessage = prepared.skipped == 0
+          ? null
+          : '${prepared.skipped} item(s) in this folder could not be '
+                'prepared for sharing yet. HomeBox retries after the next '
+                'sync; until then only you can open them.';
       _setBusy('Sending the folder key to the family member…');
       final envelopes = await _envelopesFor(
         ctx,
@@ -342,21 +340,27 @@ final class FamilyVaultController extends ChangeNotifier {
     }
   }
 
-  /// Removes a member and rotates the folder key (spec §28.3): the server
-  /// stops serving the folder to them at once, and everything added from now
-  /// on uses a new key version they never receive. Content they could
+  /// Removes a member and rotates the folder key (spec §28.3): everything
+  /// added from now on uses a new key version the member never receives,
+  /// and the server stops serving the folder to them. Content they could
   /// already read stays readable to them; that cannot be revoked.
+  ///
+  /// The key is rotated and delivered to the remaining members first, and
+  /// access is removed last. If anything fails, the share is still listed,
+  /// so the user can simply try again; a retry may add one more key
+  /// version, which is harmless.
   Future<bool> revoke(OutgoingShareView view) async {
     final ctx = await _context();
     if (ctx == null) return false;
-    _setBusy('Removing access…');
+    _setBusy('Rotating the folder key…');
     try {
-      await ctx.api.revokeShare(ctx.accessToken, view.share.id);
-      _setBusy('Rotating the folder key…');
       final folderId = view.share.nodeId;
+      await _refreshFolderKeys(ctx);
       await _rotateFolderKey(ctx, folderId);
       final remaining = (await ctx.api.listOutgoingShares(ctx.accessToken))
-          .where((share) => share.nodeId == folderId)
+          .where(
+            (share) => share.nodeId == folderId && share.id != view.share.id,
+          )
           .toList();
       final unverified = <String>[];
       for (final share in remaining) {
@@ -364,11 +368,13 @@ final class FamilyVaultController extends ChangeNotifier {
           unverified.add(share.targetUsername);
         }
       }
+      _setBusy('Removing access…');
+      await ctx.api.revokeShare(ctx.accessToken, view.share.id);
       await _reloadOutgoing(ctx);
       _noticeMessage = unverified.isEmpty
           ? null
           : 'Verify ${unverified.join(', ')} on this device to give them the '
-                'new folder key; until then they cannot read new content.';
+                'new folder key; until then they cannot add or read new content.';
       _errorMessage = null;
       return true;
     } catch (e) {
@@ -475,16 +481,38 @@ final class FamilyVaultController extends ChangeNotifier {
         ownerUserId: ctx.userId,
         version: version,
       );
-      await ctx.api.createFolderKey(
-        ctx.accessToken,
-        folderId,
-        keyVersion: version,
-        ownerEnvelope: envelope,
-      );
+      try {
+        await ctx.api.createFolderKey(
+          ctx.accessToken,
+          folderId,
+          keyVersion: version,
+          ownerEnvelope: envelope,
+        );
+      } on transport.HomeBoxApiException catch (e) {
+        // Another owner device created this version first. Its key is just
+        // as new, so adopt it instead of failing.
+        if (e.code != 'REVISION_CONFLICT') rethrow;
+        await _refreshFolderKeys(ctx);
+        if (ctx.keys.latestVersion(folderId) < version) rethrow;
+        return;
+      }
       _syncEngine.folderKeys.add(folderId, version, envelope);
       ctx.keys.addWrapped(folderId, version, envelope);
     } finally {
       folderKey.destroy();
+    }
+  }
+
+  /// Merges the server's folder keys into the local cache and [ctx]'s ring.
+  Future<void> _refreshFolderKeys(_Context ctx) async {
+    final records = await ctx.api.listFolderKeys(ctx.accessToken);
+    _syncEngine.folderKeys.mergeAll(records);
+    for (final record in records) {
+      ctx.keys.addWrapped(
+        record.folderId,
+        record.keyVersion,
+        record.ownerEnvelope,
+      );
     }
   }
 
@@ -658,19 +686,12 @@ final class FamilyVaultController extends ChangeNotifier {
     final node = _syncEngine.nodeCache.getById(folderId);
     if (node == null) return 'Shared folder';
     try {
-      final envelope = EncryptedMetadataEnvelope.decode(
-        node.metadataCiphertext,
-      );
-      final key = await ctx.keys.key(
-        node.scopeOrOwner(ctx.userId),
-        envelope.keyVersion,
-      );
-      return (await _cipher.decrypt(
-        envelope: envelope,
-        metadataKey: key.key,
-        nodeType: MetadataNodeType.directory,
-        scopeId: key.scopeIdBytes,
-        nodeId: uuidStringToBytes(node.id),
+      return (await decryptNodeMetadata(
+        keys: ctx.keys,
+        ciphertext: node.metadataCiphertext,
+        scopeId: node.scopeOrOwner(ctx.userId),
+        isDirectory: true,
+        nodeId: node.id,
       )).fileName;
     } catch (_) {
       return 'Shared folder';
@@ -798,16 +819,12 @@ final class FamilyVaultController extends ChangeNotifier {
         );
       }
       final root = await ctx.api.getNode(ctx.accessToken, share.nodeId);
-      final envelope = EncryptedMetadataEnvelope.decode(
-        root.metadataCiphertext,
-      );
-      final key = await keys.key(share.nodeId, envelope.keyVersion);
-      final metadata = await _cipher.decrypt(
-        envelope: envelope,
-        metadataKey: key.key,
-        nodeType: MetadataNodeType.directory,
-        scopeId: key.scopeIdBytes,
-        nodeId: uuidStringToBytes(share.nodeId),
+      final metadata = await decryptNodeMetadata(
+        keys: keys,
+        ciphertext: root.metadataCiphertext,
+        scopeId: share.nodeId,
+        isDirectory: true,
+        nodeId: share.nodeId,
       );
       return IncomingShareView(
         share: share,
@@ -887,12 +904,18 @@ final class FamilyVaultController extends ChangeNotifier {
 
   // --- background reconciliation ---
 
+  /// The shortest time between two background sweeps of shared folders.
+  static const Duration reconcileInterval = Duration(minutes: 2);
+
   void _onSyncEngineChanged() {
     if (_syncEngine.status != SyncStatus.idle) return;
     // Load the share lists once in the background, so Files can mark
     // shared folders before the Family page was ever opened.
     if (!_loadedOnce && !_loading) unawaited(refresh(quiet: true));
-    if (_syncEngine.folderKeys.keyedFolderIds().isEmpty) return;
+    final last = _lastReconcile;
+    if (last != null && DateTime.now().difference(last) < reconcileInterval) {
+      return;
+    }
     unawaited(_reconcileInBackground());
   }
 
@@ -905,6 +928,18 @@ final class FamilyVaultController extends ChangeNotifier {
     try {
       do {
         _reconcileAgain = false;
+        _lastReconcile = DateTime.now();
+        final userId = accountId;
+        final folders = _syncEngine.folderKeys.keyedFolderIds();
+        // A walk of the local cache needs no key; only read the Vault Key
+        // from secure storage when something actually has to move.
+        if (userId == null ||
+            folders.isEmpty ||
+            _reconciler
+                .staleNodes(userId: userId, folderIds: folders)
+                .isEmpty) {
+          continue;
+        }
         final ctx = await _context(quiet: true);
         if (ctx == null) return;
         try {
@@ -912,9 +947,10 @@ final class FamilyVaultController extends ChangeNotifier {
             api: ctx.api,
             accessToken: ctx.accessToken,
             keys: ctx.keys,
+            folderIds: folders,
           );
         } catch (_) {
-          // Retried after the next sync pass.
+          // Only a network failure ends a pass early; the next sync retries.
         } finally {
           ctx.keys.dispose();
         }

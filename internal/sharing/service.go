@@ -22,7 +22,9 @@ var (
 	ErrForbidden      = errors.New("share is not owned by this account")
 	ErrAlreadyShared  = errors.New("folder is already shared with this account")
 	ErrTargetNotFound = errors.New("target family account or device was not found")
-	ErrKeyConflict    = errors.New("folder key version already exists with different content")
+	// ErrKeyConflict means another owner device created this key version
+	// first; the client re-reads the folder keys and continues from there.
+	ErrKeyConflict = errors.New("folder key version already exists with different content")
 )
 
 const (
@@ -113,6 +115,10 @@ func (s *Service) CreateFolderKey(ctx context.Context, ownerUserID, ownerDeviceI
 	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(key_version),0) FROM folder_keys WHERE folder_id=?", folderID).Scan(&latest); err != nil {
 		return FolderKey{}, err
 	}
+	if keyVersion <= latest {
+		// Another owner device created this version first.
+		return FolderKey{}, ErrKeyConflict
+	}
 	if keyVersion != latest+1 {
 		return FolderKey{}, apierror.NewValidation(fmt.Sprintf("the next key version of this folder is %d", latest+1))
 	}
@@ -124,6 +130,9 @@ func (s *Service) CreateFolderKey(ctx context.Context, ownerUserID, ownerDeviceI
 	now := s.now().UTC()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO folder_keys (folder_id,key_version,owner_user_id,owner_envelope,created_at,created_by_device_id)
 		VALUES (?,?,?,?,?,?)`, folderID, keyVersion, ownerUserID, envelope, now.Format(time.RFC3339Nano), ownerDeviceID); err != nil {
+		if isUniqueConstraint(err) {
+			return FolderKey{}, ErrKeyConflict
+		}
 		return FolderKey{}, fmt.Errorf("create folder key: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

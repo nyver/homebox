@@ -233,6 +233,35 @@ func TestReadWriteShareLetsAMemberChangeContentBelowTheSharedFolder(t *testing.T
 	if resp.StatusCode != http.StatusOK || len(decodeArray(t, trashRaw)) != 1 {
 		t.Fatalf("owner trash status=%d body=%s", resp.StatusCode, trashRaw)
 	}
+
+	// After a rotation, a member may add content only with the newest key:
+	// a removed member still holds version 1.
+	createFolderKeyOverHTTP(t, s, ownerToken, folderID, 2)
+	createWithVersion := func(id, operationID string, version int) *http.Response {
+		resp, _ := s.do(t, http.MethodPost, "/api/v1/nodes", map[string]any{
+			"id": id, "operationId": operationID, "parentId": folderID, "nodeType": "DIRECTORY",
+			"metadataCiphertext": b64("encrypted"), "metadataKeyVersion": version, "metadataKeyScopeId": folderID,
+		}, memberToken)
+		return resp
+	}
+	if resp := createWithVersion("91000000-0000-4000-8000-000000000050", "91000000-0000-4000-8000-000000000051", 1); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("member create with a superseded key status=%d, want 400", resp.StatusCode)
+	}
+	if resp := createWithVersion("91000000-0000-4000-8000-000000000052", "91000000-0000-4000-8000-000000000053", 2); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("member create with the newest key status=%d, want 201", resp.StatusCode)
+	}
+	// The owner keeps using whatever version its device has.
+	resp, _ = s.do(t, http.MethodPost, "/api/v1/nodes", map[string]any{
+		"id": "91000000-0000-4000-8000-000000000054", "operationId": "91000000-0000-4000-8000-000000000055", "parentId": folderID,
+		"nodeType": "DIRECTORY", "metadataCiphertext": b64("encrypted"), "metadataKeyVersion": 1, "metadataKeyScopeId": folderID,
+	}, ownerToken)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("owner create with an older key status=%d, want 201", resp.StatusCode)
+	}
+	// A concurrent rotation to an existing version conflicts instead of failing.
+	if resp, _ := s.do(t, http.MethodPost, "/api/v1/nodes/"+folderID+"/folder-keys", map[string]any{"keyVersion": 2, "ownerEnvelope": b64("other-device")}, ownerToken); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("concurrent rotation status=%d, want 409", resp.StatusCode)
+	}
 }
 
 func TestFolderKeysRekeyRotationAndNestingRules(t *testing.T) {

@@ -5,7 +5,6 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
-import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
@@ -139,23 +138,13 @@ final class LocalFolderUploader extends ChangeNotifier {
     }
   }
 
-  Future<_Keys?> _openKeys(String userId) async {
-    final ring = await openOwnerKeyRing(
-      vaultKeyStore: _vaultKeyStore,
-      userId: userId,
-      wrappedFolderKeys: _syncEngine.folderKeys.all(),
-    );
-    if (ring == null) return null;
-    return _Keys(
-      ring,
-      KeyScopeResolver(
-        nodeCache: _syncEngine.nodeCache,
-        isKeyedFolder: _syncEngine.folderKeys.isKeyedFolder,
-        userId: userId,
-      ),
-      _metadataCipher,
-    );
-  }
+  /// The keys of one scan or Resync pass; disposed when the pass ends.
+  Future<OwnerKeys?> _openKeys(String userId) => OwnerKeys.open(
+    vaultKeyStore: _vaultKeyStore,
+    nodeCache: _syncEngine.nodeCache,
+    folderKeys: _syncEngine.folderKeys,
+    userId: userId,
+  );
 
   /// Replaces the active personal Vault with a fresh encrypted snapshot of
   /// [rootPath]. Existing root nodes are soft-deleted, so each whole subtree
@@ -265,7 +254,7 @@ final class LocalFolderUploader extends ChangeNotifier {
     required String relativePath,
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required _Keys keys,
+    required OwnerKeys keys,
     required _TrackedPaths tracked,
     bool strict = false,
   }) async {
@@ -403,7 +392,7 @@ final class LocalFolderUploader extends ChangeNotifier {
     required String rootPath,
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required _Keys keys,
+    required OwnerKeys keys,
     required LocalNode node,
     required SensitiveNodeMetadata currentMetadata,
     required String name,
@@ -549,7 +538,7 @@ final class LocalFolderUploader extends ChangeNotifier {
   Future<void> _uploadNewFile({
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required _Keys keys,
+    required OwnerKeys keys,
     required String? parentId,
     required String name,
     required String relativePath,
@@ -650,7 +639,7 @@ final class LocalFolderUploader extends ChangeNotifier {
   Future<LocalNode?> _createRemoteDirectory({
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required _Keys keys,
+    required OwnerKeys keys,
     required String? parentId,
     required String name,
     bool strict = false,
@@ -756,38 +745,4 @@ final class _TrackedPaths {
 
   final Set<String> files;
   final Set<String> directories;
-}
-
-/// The keys one scan or Resync pass encrypts and decrypts with (ADR-023).
-final class _Keys {
-  _Keys(this.ring, this.scopes, this._cipher);
-
-  final OwnerKeyRing ring;
-  final KeyScopeResolver scopes;
-  final MetadataCipher _cipher;
-
-  Future<SensitiveNodeMetadata> decrypt(LocalNode node) async {
-    final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
-    final key = await ring.key(
-      node.scopeOrOwner(ring.userId),
-      envelope.keyVersion,
-    );
-    return _cipher.decrypt(
-      envelope: envelope,
-      metadataKey: key.key,
-      nodeType: node.isDirectory
-          ? MetadataNodeType.directory
-          : MetadataNodeType.file,
-      scopeId: key.scopeIdBytes,
-      nodeId: uuidStringToBytes(node.id),
-    );
-  }
-
-  Future<ScopedKey> forNewChild(String? parentId) =>
-      ring.current(scopes.forNewChild(parentId));
-
-  Future<ScopedKey> forExisting(LocalNode node) =>
-      ring.current(node.scopeOrOwner(ring.userId));
-
-  void dispose() => ring.dispose();
 }

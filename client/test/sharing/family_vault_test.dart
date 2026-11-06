@@ -1,10 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/account_identity.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
+import 'package:homebox_client/core/e2ee/key_ring.dart';
 import 'package:homebox_client/core/e2ee/vault_key_store.dart';
+import 'package:homebox_client/core/storage/folder_keys_store.dart';
 import 'package:homebox_client/core/storage/local_database.dart';
 import 'package:homebox_client/core/transport/homebox_api_client.dart';
 import 'package:homebox_client/core/transport/pinned_server_store.dart';
@@ -331,5 +334,144 @@ void main() {
       (e) => e.name == 'Added later',
     );
     expect(fake.nodeJson(added.node.id)!['metadataKeyScopeId'], outer.node.id);
+  });
+
+  test('removing a member rotates from the newest key on the server, delivers it to '
+      'the remaining members first, and only then removes access', () async {
+    final fake = FakeNodeServer();
+    final server = await fake.start();
+    addTearDown(() => server.close(force: true));
+    final owner = await _signIn(server, 'admin', FakeNodeServer.userId);
+    final member = await _signIn(server, 'member', FakeNodeServer.memberId);
+    await _publishMemberDevice(fake, member);
+    expect(await owner.files.createFolder('Family'), isTrue);
+    await owner.engine.runOnce();
+    await owner.files.refresh();
+    final folderId = owner.files.entries.single.node.id;
+    final candidate = (await owner.family.lookupRecipient(member.userId))!;
+    expect(
+      await owner.family.shareFolder(
+        folderId: folderId,
+        candidate: candidate,
+        permission: SharePermission.read,
+      ),
+      isTrue,
+    );
+    // A second share of the same folder, standing in for another member
+    // who stays: it must receive the new key before the removal.
+    fake.shares.add({
+      ...fake.shares.single,
+      'id': 'share-2',
+      'envelopes': <dynamic>[],
+    });
+    // Another owner device already rotated to version 2; this device's
+    // local cache still knows only version 1.
+    final vaultKey = (await owner.vault.loadVaultKey())!;
+    final folderKey = newFolderKey();
+    fake.folderKeys[folderId]!.add({
+      'folderId': folderId,
+      'keyVersion': 2,
+      'ownerEnvelope': base64Encode(
+        await wrapFolderKeyForOwner(
+          vaultKey: vaultKey,
+          folderKey: folderKey,
+          folderId: folderId,
+          ownerUserId: owner.userId,
+          version: 2,
+        ),
+      ),
+      'createdAt': '2026-01-01T00:00:00Z',
+    });
+    await owner.family.refresh();
+    final removed = owner.family.outgoing.firstWhere(
+      (view) => view.share.id == 'share-1',
+    );
+    expect(
+      await owner.family.revoke(removed),
+      isTrue,
+      reason: owner.family.errorMessage,
+    );
+    expect(
+      [for (final k in fake.folderKeys[folderId]!) k['keyVersion']],
+      [1, 2, 3],
+    );
+    final remaining = fake.shares.firstWhere((s) => s['id'] == 'share-2');
+    expect(remaining['revoked'], isFalse);
+    expect(
+      {
+        for (final e in remaining['envelopes'] as List<dynamic>)
+          (e as Map<String, dynamic>)['keyVersion'],
+      },
+      {1, 2, 3},
+    );
+    expect(
+      fake.shares.firstWhere((s) => s['id'] == 'share-1')['revoked'],
+      isTrue,
+    );
+  });
+
+  test(
+    'one item that cannot be re-encrypted does not block the rest',
+    () async {
+      final fake = FakeNodeServer();
+      final server = await fake.start();
+      addTearDown(() => server.close(force: true));
+      final owner = await _signIn(server, 'admin', FakeNodeServer.userId);
+      final member = await _signIn(server, 'member', FakeNodeServer.memberId);
+      await _publishMemberDevice(fake, member);
+      expect(await owner.files.createFolder('Family'), isTrue);
+      await owner.engine.runOnce();
+      await owner.files.refresh();
+      final folder = owner.files.entries.single;
+      owner.files.openFolder(folder);
+      await owner.files.refresh();
+      for (final name in ['broken.txt', 'fine.txt']) {
+        expect(
+          await owner.files.uploadFile((await _tempFile(name, name)).path),
+          isTrue,
+        );
+      }
+      final broken = owner.files.entries.firstWhere(
+        (e) => e.name == 'broken.txt',
+      );
+      final fine = owner.files.entries.firstWhere((e) => e.name == 'fine.txt');
+      fake.replaceMetadataWithUndecryptable(broken.node.id);
+      await owner.engine.runOnce();
+
+      final candidate = (await owner.family.lookupRecipient(member.userId))!;
+      expect(
+        await owner.family.shareFolder(
+          folderId: folder.node.id,
+          candidate: candidate,
+          permission: SharePermission.read,
+        ),
+        isTrue,
+        reason: owner.family.errorMessage,
+      );
+      expect(
+        fake.nodeJson(fine.node.id)!['metadataKeyScopeId'],
+        folder.node.id,
+      );
+      expect(
+        fake.nodeJson(broken.node.id)!['metadataKeyScopeId'],
+        owner.userId,
+      );
+      expect(owner.family.noticeMessage, contains('1 item(s)'));
+    },
+  );
+
+  test('merging folder keys never drops a key this device just created', () {
+    final database = LocalDatabase.openInMemory();
+    addTearDown(database.dispose);
+    final store = FolderKeysStore(database.db);
+    store.add('folder', 2, Uint8List.fromList([2]));
+    store.mergeAll([
+      FolderKeyRecord(
+        folderId: 'folder',
+        keyVersion: 1,
+        ownerEnvelope: Uint8List.fromList([1]),
+      ),
+    ]);
+    expect(store.all()['folder']!.keys.toSet(), {1, 2});
   });
 }

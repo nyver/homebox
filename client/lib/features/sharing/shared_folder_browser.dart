@@ -9,6 +9,7 @@ import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/portable_name.dart';
+import '../../core/e2ee/scoped_metadata.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/util/local_path.dart';
 import '../../core/util/user_facing_error.dart';
@@ -336,36 +337,28 @@ final class SharedFolderBrowser extends ChangeNotifier {
     }
   }
 
-  Future<SensitiveNodeMetadata> _decrypt(transport.NodeInfo node) async {
-    final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
-    final key = await _keys.key(
-      node.metadataKeyScopeId ?? share.ownerUserId,
-      envelope.keyVersion,
-    );
-    return _cipher.decrypt(
-      envelope: envelope,
-      metadataKey: key.key,
-      nodeType: node.nodeType == 'DIRECTORY'
-          ? MetadataNodeType.directory
-          : MetadataNodeType.file,
-      scopeId: key.scopeIdBytes,
-      nodeId: uuidStringToBytes(node.id),
-    );
-  }
+  Future<SensitiveNodeMetadata> _decrypt(transport.NodeInfo node) =>
+      decryptNodeMetadata(
+        keys: _keys,
+        ciphertext: node.metadataCiphertext,
+        scopeId: node.metadataKeyScopeId ?? share.ownerUserId,
+        isDirectory: node.nodeType == 'DIRECTORY',
+        nodeId: node.id,
+        cipher: _cipher,
+      );
 
   Future<Uint8List> _encrypt(
     ScopedKey key,
     String nodeId,
     SensitiveNodeMetadata metadata,
     MetadataNodeType type,
-  ) async => (await _cipher.encrypt(
+  ) => encryptNodeMetadata(
+    key: key,
     metadata: metadata,
-    metadataKey: key.key,
-    keyVersion: key.version,
-    nodeType: type,
-    scopeId: key.scopeIdBytes,
-    nodeId: uuidStringToBytes(nodeId),
-  )).encode();
+    isDirectory: type == MetadataNodeType.directory,
+    nodeId: nodeId,
+    cipher: _cipher,
+  );
 
   Future<bool> _transfer(Future<bool> Function() body) async {
     if (_busy) return false;

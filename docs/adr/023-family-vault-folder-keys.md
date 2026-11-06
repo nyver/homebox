@@ -22,8 +22,9 @@ Shared folders never nest: the server refuses a first folder key for a folder in
 ### Folder keys
 
 - Each version of a Folder Key is generated on the owner's client and stored on the server wrapped by the owner's Vault Key (`folder_keys`, purpose `folderKey`, AEAD context: folder, owner, version), so every trusted owner device can open it and the server cannot.
+- Owner devices cache the wrapped keys locally and only ever add to that cache, so a key created while a refresh was in flight is never lost. Two owner devices creating the same version get a conflict, and the later one adopts the key that won.
 - New content placed below a shared folder is encrypted with the newest version of that folder's key. A rename or a new version of an existing node stays in the node's current scope.
-- When a folder is first shared, and whenever content is later moved or uploaded into it with the personal Vault Key, the owner's client **rekeys** it: it re-encrypts the node's metadata and rewraps every File DEK under the folder key (`POST /api/v1/nodes/rekey`). Ciphertext blobs never change. The reconciliation runs after every sync pass, skips nodes with queued local changes, and retries a batch that lost a revision race on the next pass.
+- When a folder is first shared, and whenever content is later moved or uploaded into it with the personal Vault Key, the owner's client **rekeys** it: it re-encrypts the node's metadata and rewraps every File DEK under the folder key (`POST /api/v1/nodes/rekey`). Ciphertext blobs never change. The reconciliation runs after sync passes (at most every two minutes in the background, and opens keys only when the local tree shows something to move), skips nodes with queued local changes, retries a batch that lost a revision race on the next pass, and skips, rather than stops at, a single node it cannot move.
 - A Folder Key is kept after its folder is purged from Trash for as long as any surviving node or file version is still encrypted with it.
 
 ### Delivering keys to members
@@ -40,7 +41,9 @@ Shared folders never nest: the server refuses a first folder key for a folder in
 
 ### Removing a member
 
-Revoking a share ends the member's server access immediately. The owner's client then creates the next Folder Key version and delivers it to the remaining members' certified devices. Content added from then on uses the new version. Content the removed member could read before cannot be taken back (spec §28.3, Risk 1C).
+The owner's client first re-reads the folder's key versions from the server (another owner device may have rotated already), creates the next Folder Key version, and delivers it to the remaining members' certified devices; only then does it revoke the share, which ends the member's server access immediately. If any step fails the share is still listed and the removal can simply be retried.
+
+From then on the server accepts member content only when it is encrypted with the newest key version, so a member whose device has not received the new version yet cannot add content the removed member could read. The owner may still use an older version: owner devices refresh folder keys on every sync pass, and refusing it would permanently fail a change queued offline just before another owner device rotated the key. Content the removed member could read before cannot be taken back (spec §28.3, Risk 1C).
 
 ## Consequences
 

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/metadata_cipher.dart';
+import '../../core/e2ee/scoped_metadata.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
 import '../../core/storage/pending_operations_store.dart';
@@ -235,17 +236,14 @@ final class VaultOutboxConflictResolver implements OutboxConflictResolver {
     String scope,
     MetadataNodeType nodeType,
     Uint8List nodeId,
-  ) async {
-    final envelope = EncryptedMetadataEnvelope.decode(ciphertext);
-    final key = await keys.key(scope, envelope.keyVersion);
-    return _cipher.decrypt(
-      envelope: envelope,
-      metadataKey: key.key,
-      nodeType: nodeType,
-      scopeId: key.scopeIdBytes,
-      nodeId: nodeId,
-    );
-  }
+  ) => decryptNodeMetadata(
+    keys: keys,
+    ciphertext: ciphertext,
+    scopeId: scope,
+    isDirectory: nodeType == MetadataNodeType.directory,
+    nodeId: bytesToUuidString(nodeId),
+    cipher: _cipher,
+  );
 
   @override
   Future<String?> displayName({

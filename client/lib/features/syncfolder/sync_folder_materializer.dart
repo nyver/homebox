@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/metadata_cipher.dart';
+import '../../core/e2ee/scoped_metadata.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
 import '../../core/platform/android_sync_folder.dart';
@@ -699,22 +700,14 @@ final class SyncFolderMaterializer extends ChangeNotifier {
   Future<SensitiveNodeMetadata> _decryptMetadata(
     LocalNode node,
     OwnerKeyRing keys,
-  ) async {
-    final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
-    final key = await keys.key(
-      node.scopeOrOwner(keys.userId),
-      envelope.keyVersion,
-    );
-    return _metadataCipher.decrypt(
-      envelope: envelope,
-      metadataKey: key.key,
-      nodeType: node.isDirectory
-          ? MetadataNodeType.directory
-          : MetadataNodeType.file,
-      scopeId: key.scopeIdBytes,
-      nodeId: uuidStringToBytes(node.id),
-    );
-  }
+  ) => decryptNodeMetadata(
+    keys: keys,
+    ciphertext: node.metadataCiphertext,
+    scopeId: node.scopeOrOwner(keys.userId),
+    isDirectory: node.isDirectory,
+    nodeId: node.id,
+    cipher: _metadataCipher,
+  );
 
   void _setStatus(SyncFolderStatus status) {
     _status = status;

@@ -652,7 +652,7 @@ final class SyncEngine extends ChangeNotifier {
     String accessToken,
   ) async {
     try {
-      folderKeys.replaceAll(await api.listFolderKeys(accessToken));
+      folderKeys.mergeAll(await api.listFolderKeys(accessToken));
     } on transport.HomeBoxApiException catch (e) {
       if (e.statusCode != 404) rethrow;
     }

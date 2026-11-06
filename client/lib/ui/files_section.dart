@@ -1019,10 +1019,6 @@ final class _FilesSectionState extends State<_FilesSection> {
               final sharedFolder =
                   entry.isDirectory &&
                   (familyVault?.isShared(entry.node.id) ?? false);
-              final canShareFolder =
-                  entry.isDirectory &&
-                  familyVault != null &&
-                  familyVault.canShare(entry.node);
               return ListTile(
                 leading: sharedFolder
                     ? _sharedFolderListIcon
@@ -1075,8 +1071,12 @@ final class _FilesSectionState extends State<_FilesSection> {
                     ),
                     _ => null,
                   },
+                  // Built only when the menu opens: whether a folder can be
+                  // shared walks its subtree, too costly for every row.
                   itemBuilder: (context) => [
-                    if (canShareFolder)
+                    if (entry.isDirectory &&
+                        familyVault != null &&
+                        familyVault.canShare(entry.node))
                       PopupMenuItem(
                         value: 'family_share',
                         child: Text(

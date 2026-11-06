@@ -524,7 +524,18 @@ final class FakeNodeServer {
     if (method == 'POST' && path.endsWith('/folder-keys')) {
       final folderId = segments[segments.length - 2];
       final input = await body();
-      folderKeys.putIfAbsent(folderId, () => []).add({
+      final versions = folderKeys.putIfAbsent(folderId, () => []);
+      if (versions.any((k) => k['keyVersion'] == input['keyVersion'])) {
+        _writeJson(request, 409, {
+          'error': {
+            'code': 'REVISION_CONFLICT',
+            'message': 'this folder key version already exists',
+            'requestId': 'req',
+          },
+        });
+        return true;
+      }
+      versions.add({
         'folderId': folderId,
         'keyVersion': input['keyVersion'],
         'ownerEnvelope': input['ownerEnvelope'],
