@@ -517,6 +517,13 @@ final class _FilesSectionState extends State<_FilesSection> {
   final FocusNode _focusNode = FocusNode(debugLabel: 'files');
   bool _refreshing = false;
 
+  /// The list row under the mouse pointer, which shows its checkbox.
+  String? _hoveredEntryId;
+
+  void _setHoveredEntry(String? id) {
+    if (_hoveredEntryId != id) setState(() => _hoveredEntryId = id);
+  }
+
   /// Keys of the visible folder rows, to find the folder under a file drag.
   final Map<String, GlobalKey> _folderKeys = {};
 
@@ -2382,81 +2389,90 @@ final class _FilesSectionState extends State<_FilesSection> {
     final selecting = controller.selectionMode;
     final selected = controller.isSelected(entry);
     final favorite = controller.isFavorite(entry);
-    return GestureDetector(
-      onSecondaryTapUp: (details) =>
-          unawaited(_showContextMenu(context, entry, details.globalPosition)),
-      child: ListTile(
-        selected: selecting && selected,
-        leading: selecting
-            ? SizedBox.square(
-                dimension: _fileListLeadingSize,
-                child: Checkbox(
-                  value: selected,
-                  onChanged: (_) => controller.toggleSelection(entry),
-                  semanticLabel: _localized(
-                    context,
-                    en: 'Select ${entry.name}',
-                    ru: 'Выбрать ${entry.name}',
-                  ),
-                ),
-              )
-            : entry.isDirectory
-            ? _folderListIcon(context, shared: sharedFolder)
-            : _FileListLeading(entry: entry, controller: controller),
-        title: entry.isConflictCopy || favorite
-            ? Row(
-                children: [
-                  Flexible(child: Text(entry.name)),
-                  if (favorite) ...[
-                    const SizedBox(width: 6),
-                    Icon(
-                      Icons.star,
-                      size: 16,
-                      color: Colors.amber,
-                      semanticLabel: _localized(
-                        context,
-                        en: 'Favorite',
-                        ru: 'В избранном',
-                      ),
+    // With a mouse, hovering a row offers its checkbox, so selecting does
+    // not need a long press or Ctrl+click.
+    final showCheckbox = selecting || _hoveredEntryId == entry.node.id;
+    return MouseRegion(
+      onEnter: (_) => _setHoveredEntry(entry.node.id),
+      onExit: (_) {
+        if (_hoveredEntryId == entry.node.id) _setHoveredEntry(null);
+      },
+      child: GestureDetector(
+        onSecondaryTapUp: (details) =>
+            unawaited(_showContextMenu(context, entry, details.globalPosition)),
+        child: ListTile(
+          selected: selecting && selected,
+          leading: showCheckbox
+              ? SizedBox.square(
+                  dimension: _fileListLeadingSize,
+                  child: Checkbox(
+                    value: selected,
+                    onChanged: (_) => controller.toggleSelection(entry),
+                    semanticLabel: _localized(
+                      context,
+                      en: 'Select ${entry.name}',
+                      ru: 'Выбрать ${entry.name}',
                     ),
-                  ],
-                  if (entry.isConflictCopy) ...[
-                    const SizedBox(width: 6),
-                    Tooltip(
-                      message: entry.metadata.conflictDetails!,
-                      child: Icon(
-                        Icons.call_split,
-                        size: 18,
-                        color: Theme.of(context).colorScheme.tertiary,
+                  ),
+                )
+              : entry.isDirectory
+              ? _folderListIcon(context, shared: sharedFolder)
+              : _FileListLeading(entry: entry, controller: controller),
+          title: entry.isConflictCopy || favorite
+              ? Row(
+                  children: [
+                    Flexible(child: Text(entry.name)),
+                    if (favorite) ...[
+                      const SizedBox(width: 6),
+                      Icon(
+                        Icons.star,
+                        size: 16,
+                        color: Colors.amber,
                         semanticLabel: _localized(
                           context,
-                          en: 'Conflict copy',
-                          ru: 'Конфликтная копия',
+                          en: 'Favorite',
+                          ru: 'В избранном',
                         ),
                       ),
-                    ),
+                    ],
+                    if (entry.isConflictCopy) ...[
+                      const SizedBox(width: 6),
+                      Tooltip(
+                        message: entry.metadata.conflictDetails!,
+                        child: Icon(
+                          Icons.call_split,
+                          size: 18,
+                          color: Theme.of(context).colorScheme.tertiary,
+                          semanticLabel: _localized(
+                            context,
+                            en: 'Conflict copy',
+                            ru: 'Конфликтная копия',
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
-                ],
-              )
-            : Text(entry.name),
-        subtitle: entry.isDirectory
-            ? null
-            : _entrySubtitle(context, controller, entry),
-        onTap: () => _onEntryTap(context, entry),
-        // A long press starts selecting, as in other file managers.
-        onLongPress: () => controller.toggleSelection(entry),
-        trailing: selecting
-            ? null
-            : PopupMenuButton<String>(
-                tooltip: _localized(
-                  context,
-                  en: 'More actions',
-                  ru: 'Другие действия',
+                )
+              : Text(entry.name),
+          subtitle: entry.isDirectory
+              ? null
+              : _entrySubtitle(context, controller, entry),
+          onTap: () => _onEntryTap(context, entry),
+          // A long press starts selecting, as in other file managers.
+          onLongPress: () => controller.toggleSelection(entry),
+          trailing: selecting
+              ? null
+              : PopupMenuButton<String>(
+                  tooltip: _localized(
+                    context,
+                    en: 'More actions',
+                    ru: 'Другие действия',
+                  ),
+                  onSelected: (value) =>
+                      _onEntryMenuSelected(context, entry, value),
+                  itemBuilder: (context) => _entryMenuItems(context, entry),
                 ),
-                onSelected: (value) =>
-                    _onEntryMenuSelected(context, entry, value),
-                itemBuilder: (context) => _entryMenuItems(context, entry),
-              ),
+        ),
       ),
     );
   }
