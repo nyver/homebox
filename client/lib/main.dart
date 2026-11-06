@@ -24,6 +24,7 @@ import 'core/platform/camera_photo_picker.dart';
 import 'core/platform/windows_autostart.dart';
 import 'core/platform/windows_file_drop.dart';
 import 'core/platform/windows_sync_folder.dart';
+import 'core/platform/windows_tray.dart';
 import 'core/storage/local_database.dart';
 import 'core/storage/sync_conflicts_store.dart';
 import 'core/util/local_path.dart';
@@ -326,6 +327,16 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
 
   /// Covers routes pushed above this page while it is relocked.
   OverlayEntry? _lockCover;
+
+  final WindowsTray _tray = const WindowsTray();
+  final AttentionTracker _attention = AttentionTracker();
+  String? _trayTooltip;
+  String? _trayLanguage;
+
+  /// The first attention update only records what already existed when
+  /// HomeBox started (e.g. conflicts from an earlier session).
+  bool _attentionSeeded = false;
+  AppLifecycleState _lifecycle = AppLifecycleState.resumed;
   SyncEngine? _syncEngine;
   FilesController? _filesController;
   FamilyVaultController? _familyVaultController;
@@ -411,6 +422,90 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     // FilesController._requireContext).
     _serverConnectionController.addListener(_onServerConnectionChanged);
     _vaultSetupController.addListener(_maybeRefreshFiles);
+    if (defaultTargetPlatform == TargetPlatform.windows) {
+      _localeController.addListener(_updateTray);
+      WidgetsBinding.instance.addPostFrameCallback((_) => _updateTray());
+    }
+  }
+
+  /// Keeps the notification-area icon's tooltip and menu in step with the
+  /// sync status and language, and raises a Windows notification for a new
+  /// conflict, failed transfer or sync error while HomeBox is not in front.
+  void _updateTray() {
+    if (!mounted || defaultTargetPlatform != TargetPlatform.windows) return;
+    final engine = _syncEngine;
+    final status = engine == null
+        ? _syncNotSetUpLabel(context)
+        : _effectiveSyncStatusPresentation(
+            context,
+            engine: engine,
+            materializer: _syncFolderMaterializer,
+          ).$2;
+    final tooltip = 'HomeBox — $status';
+    final language = _localeController.language.languageCode;
+    if (tooltip != _trayTooltip || language != _trayLanguage) {
+      _trayTooltip = tooltip;
+      _trayLanguage = language;
+      unawaited(
+        _tray.setStatus(
+          tooltip: tooltip,
+          showLabel: _localized(
+            context,
+            en: 'Show HomeBox',
+            ru: 'Открыть HomeBox',
+          ),
+          openFolderLabel: _localized(
+            context,
+            en: 'Open sync folder',
+            ru: 'Открыть папку синхронизации',
+          ),
+          exitLabel: _localized(context, en: 'Exit', ru: 'Выход'),
+        ),
+      );
+    }
+    final news = _attention.update(
+      openConflicts: engine?.conflicts.openCount ?? 0,
+      unseenFailedTransfers: _filesController?.unseenFailedTransfers ?? 0,
+      syncError: engine?.status == SyncStatus.error,
+    );
+    if (!_attentionSeeded) {
+      _attentionSeeded = engine != null;
+      return;
+    }
+    // In front, the header already shows all of this.
+    if (news.isEmpty || _lifecycle == AppLifecycleState.resumed) return;
+    final (title, body) = switch (news.first) {
+      AttentionKind.syncConflict => (
+        _localized(context, en: 'Sync conflict', ru: 'Конфликт синхронизации'),
+        _localized(
+          context,
+          en: 'An item was changed on two devices. Nothing was lost — open Sync to review it.',
+          ru: 'Элемент изменили на двух устройствах. Ничего не потеряно — откройте «Синхронизацию», чтобы проверить.',
+        ),
+      ),
+      AttentionKind.failedTransfer => (
+        _localized(context, en: 'Transfer failed', ru: 'Ошибка передачи'),
+        _filesController?.transfers
+                .where((record) => record.state == TransferState.failed)
+                .firstOrNull
+                ?.error ??
+            _localized(
+              context,
+              en: 'An upload or download did not finish.',
+              ru: 'Загрузка или скачивание не завершились.',
+            ),
+      ),
+      AttentionKind.syncError => (
+        _localized(context, en: 'Sync error', ru: 'Ошибка синхронизации'),
+        engine?.errorMessage ??
+            _localized(
+              context,
+              en: 'HomeBox could not sync.',
+              ru: 'HomeBox не удалось синхронизироваться.',
+            ),
+      ),
+    };
+    unawaited(_tray.notify(title: title, body: body));
   }
 
   Future<void> _initializeServerConnection() async {
@@ -537,6 +632,18 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
           _localFolderUploader = uploader;
         });
         engine.addListener(_onSyncEngineSettled);
+        if (defaultTargetPlatform == TargetPlatform.windows) {
+          // Disposed together with these objects on the next rebuild.
+          for (final source in <Listenable>[
+            engine,
+            engine.conflicts,
+            materializer,
+            files,
+          ]) {
+            source.addListener(_updateTray);
+          }
+          _updateTray();
+        }
         engine.start();
         _maybeRefreshFiles();
         unawaited(_uploadRecoveredCameraPhotoIfReady());
@@ -972,6 +1079,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
   /// than [AppLockPreferences.autoLock] allows.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _lifecycle = state;
     switch (state) {
       case AppLifecycleState.hidden || AppLifecycleState.paused:
         if (!_biometricLocked) _backgroundedAt ??= _clock();
@@ -999,6 +1107,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     WidgetsBinding.instance.removeObserver(this);
     _uncoverOpenRoutes();
     _serverConnectionController.removeListener(_onServerConnectionChanged);
+    _localeController.removeListener(_updateTray);
     _vaultSetupController.removeListener(_maybeRefreshFiles);
     _filesController?.dispose();
     _familyVaultController?.dispose();

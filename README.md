@@ -232,6 +232,10 @@ The Windows Files view accepts files dropped from Explorer. Each drop captures t
 
 When an uploaded file's name already exists in the folder, HomeBox asks whether to **Replace** it (the old content stays in version history), **Keep both** (the new file is stored as `name (1).ext`, `name (2).ext`, …), **Skip** it, or **Cancel** the rest; **Do the same for the other N** applies the answer to every remaining clash of that upload. Two dropped files with the same name are kept side by side the same way.
 
+### Windows notification area
+
+The tray icon's tooltip shows the current sync status (for example "HomeBox — Up to date"), and its menu follows the app language. While the HomeBox window is not in front, a Windows notification announces each new sync conflict, failed upload or download, and sync error once (Focus Assist is respected); clicking it brings the window back. Conflicts that already existed when HomeBox started are not announced again. The icon is re-added automatically when Explorer restarts.
+
 ### Working with files
 
 - **Move to Trash** acts immediately, without a confirmation dialog, and shows an **Undo** action for a few seconds that restores everything it moved; Trash itself remains the long-term way back. Permanent deletion from Trash and **Resync** still ask first.

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "flutter/generated_plugin_registrant.h"
+#include <flutter/encodable_value.h>
 #include <flutter/standard_method_codec.h>
 #include "resource.h"
 #include "single_instance.h"
@@ -84,6 +85,15 @@ bool IsExecutableExtension(const std::wstring& path) {
   return AssocIsDangerous(extension.c_str()) != FALSE;
 }
 
+// The string stored under |key| in a method-call argument map, or nullptr
+// when it is missing or not a string.
+const std::string* StringArgument(const flutter::EncodableMap& args,
+                                  const char* key) {
+  const auto entry = args.find(flutter::EncodableValue(key));
+  return entry == args.end() ? nullptr
+                             : std::get_if<std::string>(&entry->second);
+}
+
 }  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -122,6 +132,7 @@ bool FlutterWindow::OnCreate() {
 
   // A notification-area policy may block icon registration. The main window
   // must remain usable in that case instead of failing the entire startup.
+  taskbar_created_message_ = RegisterWindowMessage(L"TaskbarCreated");
   AddTrayIcon();
   MarkPrimaryInstanceWindow(GetHandle());
   return true;
@@ -154,6 +165,11 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     ShowFromTray();
     return 0;
   }
+  if (message != 0 && message == taskbar_created_message_) {
+    tray_icon_added_ = false;
+    AddTrayIcon();
+    return 0;
+  }
 
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
@@ -172,18 +188,21 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       ShowWindow(hwnd, SW_HIDE);
       return 0;
     case kTrayCallbackMessage:
-      if (lparam == WM_LBUTTONUP) {
+      if (lparam == WM_LBUTTONUP || lparam == NIN_BALLOONUSERCLICK) {
         ShowFromTray();
       } else if (lparam == WM_RBUTTONUP) {
         HMENU menu = CreatePopupMenu();
         if (menu != nullptr) {
-          AppendMenu(menu, MF_STRING, kTrayShowCommand, L"Show HomeBox");
+          AppendMenu(menu, MF_STRING, kTrayShowCommand,
+                     tray_show_label_.c_str());
           AppendMenu(menu,
                      MF_STRING |
                          (HasOpenableSyncFolder() ? MF_ENABLED : MF_GRAYED),
-                     kTrayOpenSyncFolderCommand, L"Open sync folder");
+                     kTrayOpenSyncFolderCommand,
+                     tray_open_folder_label_.c_str());
           AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
-          AppendMenu(menu, MF_STRING, kTrayExitCommand, L"Exit");
+          AppendMenu(menu, MF_STRING, kTrayExitCommand,
+                     tray_exit_label_.c_str());
           POINT cursor;
           GetCursorPos(&cursor);
           SetForegroundWindow(hwnd);
@@ -244,9 +263,31 @@ bool FlutterWindow::AddTrayIcon() {
   tray_icon_.uCallbackMessage = kTrayCallbackMessage;
   tray_icon_.hIcon = LoadIcon(GetModuleHandle(nullptr),
                               MAKEINTRESOURCE(IDI_APP_ICON));
-  wcscpy_s(tray_icon_.szTip, L"HomeBox");
+  if (tray_icon_.szTip[0] == L'\0') wcscpy_s(tray_icon_.szTip, L"HomeBox");
   tray_icon_added_ = Shell_NotifyIcon(NIM_ADD, &tray_icon_) == TRUE;
   return tray_icon_added_;
+}
+
+void FlutterWindow::SetTrayStatus(const std::wstring& tooltip) {
+  // szTip holds at most 127 characters plus the terminator.
+  wcsncpy_s(tray_icon_.szTip, tooltip.c_str(), _TRUNCATE);
+  if (!tray_icon_added_) return;
+  tray_icon_.uFlags = NIF_TIP;
+  Shell_NotifyIcon(NIM_MODIFY, &tray_icon_);
+  tray_icon_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+}
+
+void FlutterWindow::ShowTrayNotification(const std::wstring& title,
+                                         const std::wstring& body) {
+  if (!tray_icon_added_) return;
+  NOTIFYICONDATA notification = tray_icon_;
+  notification.uFlags = NIF_INFO;
+  wcsncpy_s(notification.szInfoTitle, title.c_str(), _TRUNCATE);
+  wcsncpy_s(notification.szInfo, body.c_str(), _TRUNCATE);
+  // Focus assist and quiet hours are respected; the user can click the
+  // notification to bring the window back (NIN_BALLOONUSERCLICK).
+  notification.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+  Shell_NotifyIcon(NIM_MODIFY, &notification);
 }
 
 void FlutterWindow::RemoveTrayIcon() {
@@ -364,6 +405,47 @@ void FlutterWindow::ConfigurePlatformChannel() {
             return;
           }
           sync_folder_path_ = wide_path;
+          result->Success();
+          return;
+        }
+        if (call.method_name() == "setTrayStatus") {
+          const auto* args = call.arguments() == nullptr
+                                 ? nullptr
+                                 : std::get_if<flutter::EncodableMap>(
+                                       call.arguments());
+          if (args == nullptr) {
+            result->Error("invalid-argument", "Expected a status map.");
+            return;
+          }
+          const auto text = [args](const char* key) -> std::wstring {
+            const std::string* value = StringArgument(*args, key);
+            return value == nullptr ? std::wstring() : WideFromUtf8(*value);
+          };
+          const std::wstring tooltip = text("tooltip");
+          const std::wstring show = text("show");
+          const std::wstring open_folder = text("openFolder");
+          const std::wstring exit = text("exit");
+          if (!show.empty()) tray_show_label_ = show;
+          if (!open_folder.empty()) tray_open_folder_label_ = open_folder;
+          if (!exit.empty()) tray_exit_label_ = exit;
+          if (!tooltip.empty()) SetTrayStatus(tooltip);
+          result->Success();
+          return;
+        }
+        if (call.method_name() == "showNotification") {
+          const auto* args = call.arguments() == nullptr
+                                 ? nullptr
+                                 : std::get_if<flutter::EncodableMap>(
+                                       call.arguments());
+          const std::string* title =
+              args == nullptr ? nullptr : StringArgument(*args, "title");
+          const std::string* body =
+              args == nullptr ? nullptr : StringArgument(*args, "body");
+          if (title == nullptr || body == nullptr) {
+            result->Error("invalid-argument", "Expected a title and a body.");
+            return;
+          }
+          ShowTrayNotification(WideFromUtf8(*title), WideFromUtf8(*body));
           result->Success();
           return;
         }

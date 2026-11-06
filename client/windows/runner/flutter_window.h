@@ -28,6 +28,9 @@ class FlutterWindow : public Win32Window {
  private:
   bool AddTrayIcon();
   void RemoveTrayIcon();
+  void SetTrayStatus(const std::wstring& tooltip);
+  void ShowTrayNotification(const std::wstring& title,
+                            const std::wstring& body);
   void ShowFromTray();
   bool HasOpenableSyncFolder() const;
   bool OpenSyncFolder();
@@ -48,6 +51,13 @@ class FlutterWindow : public Win32Window {
   NOTIFYICONDATA tray_icon_{};
   bool tray_icon_added_ = false;
   std::wstring sync_folder_path_;
+  // Tray menu labels in the app's language; set from Dart.
+  std::wstring tray_show_label_ = L"Show HomeBox";
+  std::wstring tray_open_folder_label_ = L"Open sync folder";
+  std::wstring tray_exit_label_ = L"Exit";
+  // Sent by Explorer when the taskbar is recreated (e.g. after a crash),
+  // which drops every notification-area icon.
+  UINT taskbar_created_message_ = 0;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_
