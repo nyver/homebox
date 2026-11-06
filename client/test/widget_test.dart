@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
 import 'package:homebox_client/core/e2ee/vault_key_store.dart';
 import 'package:homebox_client/core/localization/app_locale_controller.dart';
+import 'package:homebox_client/core/platform/app_lock_preferences.dart';
 import 'package:homebox_client/core/platform/biometric_authenticator.dart';
 import 'package:homebox_client/core/transport/pinned_server_store.dart';
 import 'package:homebox_client/features/server/server_connection_controller.dart';
@@ -31,12 +32,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byTooltip(_vaultLockedTooltip), findsOneWidget);
-    expect(
-      find.text(
-        'Connect to a server, sign in, and set up the vault in Settings to see your files.',
-      ),
-      findsOneWidget,
-    );
+    // A new device sees the setup guide, starting at the server step.
+    expect(find.text('Welcome to HomeBox'), findsOneWidget);
+    expect(find.byKey(const ValueKey('setup-connect')), findsOneWidget);
+    expect(find.byKey(const ValueKey('setup-sign-in')), findsNothing);
+    expect(find.byKey(const ValueKey('setup-create-vault')), findsNothing);
   });
 
   testWidgets('sync page makes the locked state explicit', (tester) async {
@@ -70,7 +70,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Синхронизация не настроена'), findsOneWidget);
-    expect(find.text('Открыть настройки'), findsOneWidget);
+    expect(find.text('Добро пожаловать в HomeBox'), findsOneWidget);
+    expect(find.text('Подключитесь к серверу'), findsOneWidget);
 
     await tester.tap(find.text('Настройки'));
     await tester.pumpAndSettle();
@@ -98,10 +99,21 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('This device'), findsOneWidget);
 
-    // The Files empty state offers a direct way to Settings too.
+    // The setup guide offers a direct way to Settings too.
     await tester.tap(find.text('Files'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open Settings'));
+    final settingsLink = find.text('All options are also in Settings');
+    await tester.scrollUntilVisible(
+      settingsLink,
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(ListView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await tester.tap(settingsLink);
     await tester.pumpAndSettle();
     expect(find.text('This device'), findsOneWidget);
   });
@@ -199,11 +211,99 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     },
   );
+
+  testWidgets(
+    'Android locks again after longer in the background than allowed',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final authenticator = _ControlledBiometricAuthenticator();
+      var now = DateTime.utc(2026, 1, 1, 12);
+      final lock = AppLockPreferences(_MemoryLockStorage());
+      addTearDown(lock.dispose);
+      await lock.setAutoLock(AppAutoLock.after1Minute);
+
+      await tester.pumpWidget(
+        _testApp(
+          biometricAuthenticator: authenticator,
+          appLockPreferences: lock,
+          clock: () => now,
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      authenticator.completeAuthentication(true);
+      await tester.pumpAndSettle();
+      expect(find.text('HomeBox locked'), findsNothing);
+
+      // Thirty seconds away (e.g. a file picker) keeps it unlocked.
+      _sendToBackground(tester);
+      now = now.add(const Duration(seconds: 30));
+      _bringToForeground(tester);
+      await tester.pump();
+      expect(find.text('HomeBox locked'), findsNothing);
+      expect(authenticator.authenticationCalls, 1);
+
+      // Two minutes away locks and prompts again.
+      _sendToBackground(tester);
+      now = now.add(const Duration(minutes: 2));
+      _bringToForeground(tester);
+      await tester.pump();
+      expect(find.text('HomeBox locked'), findsOneWidget);
+      expect(authenticator.authenticationCalls, 2);
+
+      authenticator.completeAuthentication(true);
+      await tester.pumpAndSettle();
+      expect(find.text('HomeBox locked'), findsNothing);
+
+      // A relock also hides whatever is open above the page, without
+      // closing it: here the server dialog of the setup guide.
+      await tester.tap(find.byKey(const ValueKey('setup-connect')));
+      await tester.pumpAndSettle();
+      final dialogTitle = find.text('Connect to a HomeBox server');
+      expect(dialogTitle.hitTestable(), findsOneWidget);
+      _sendToBackground(tester);
+      now = now.add(const Duration(minutes: 2));
+      _bringToForeground(tester);
+      await tester.pump();
+      expect(dialogTitle.hitTestable(), findsNothing);
+      expect(find.text('HomeBox locked').hitTestable(), findsOneWidget);
+
+      authenticator.completeAuthentication(true);
+      await tester.pumpAndSettle();
+      expect(dialogTitle.hitTestable(), findsOneWidget);
+
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+}
+
+/// Walks the real lifecycle sequence, which framework listeners assert on.
+void _sendToBackground(WidgetTester tester) {
+  for (final state in [
+    AppLifecycleState.inactive,
+    AppLifecycleState.hidden,
+    AppLifecycleState.paused,
+  ]) {
+    tester.binding.handleAppLifecycleStateChanged(state);
+  }
+}
+
+void _bringToForeground(WidgetTester tester) {
+  for (final state in [
+    AppLifecycleState.hidden,
+    AppLifecycleState.inactive,
+    AppLifecycleState.resumed,
+  ]) {
+    tester.binding.handleAppLifecycleStateChanged(state);
+  }
 }
 
 HomeBoxApp _testApp({
   BiometricAuthenticator? biometricAuthenticator,
   AppLocaleController? localeController,
+  AppLockPreferences? appLockPreferences,
+  DateTime Function()? clock,
 }) {
   final deviceIdentityStore = DeviceIdentityStore(
     MemoryDevicePrivateKeyStorage(),
@@ -223,7 +323,20 @@ HomeBoxApp _testApp({
     biometricAuthenticator:
         biometricAuthenticator ?? const _UnavailableBiometricAuthenticator(),
     localeController: localeController,
+    appLockPreferences:
+        appLockPreferences ?? AppLockPreferences(_MemoryLockStorage()),
+    clock: clock,
   );
+}
+
+final class _MemoryLockStorage implements AppLockStorage {
+  final Map<String, String> values = {};
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async => values[key] = value;
 }
 
 final class _MemoryLanguageStorage implements AppLanguageStorage {

@@ -484,6 +484,8 @@ class _SectionContent extends StatelessWidget {
     required this.androidSyncFolder,
     required this.localeController,
     required this.themeController,
+    required this.appLock,
+    required this.onSetAppLockEnabled,
     required this.onPullToRefresh,
     required this.onRefresh,
     required this.onOpenSettings,
@@ -516,6 +518,10 @@ class _SectionContent extends StatelessWidget {
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController localeController;
   final AppThemeController themeController;
+
+  /// Null where biometric app lock is unavailable.
+  final AppLockPreferences? appLock;
+  final Future<void> Function(bool enabled) onSetAppLockEnabled;
   final Future<void> Function()? onPullToRefresh;
   final Future<void> Function() onRefresh;
   final VoidCallback onOpenSettings;
@@ -524,18 +530,31 @@ class _SectionContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => switch (section) {
-    AppSection.files => _FilesSection(
-      controller: filesController,
-      familyVault: familyVaultController,
-      onCapturePhoto: onCapturePhoto,
-      androidFileSaver: androidFileSaver,
-      androidFileSharer: androidFileSharer,
-      syncFolder: syncFolder,
-      androidSyncFolder: androidSyncFolder,
-      onPullToRefresh: onPullToRefresh,
-      onRefresh: onRefresh,
-      onOpenSettings: onOpenSettings,
-      onDownloadCompleted: onDownloadCompleted,
+    AppSection.files => _SetupGate(
+      server: serverConnectionController,
+      vault: vaultSetupController,
+      guide: _SetupGuide(
+        server: serverConnectionController,
+        deviceSetup: deviceSetupController,
+        provisioning: deviceProvisioningController,
+        vault: vaultSetupController,
+        recovery: recoveryController,
+        onVaultProvisioned: onVaultProvisioned,
+        onOpenSettings: onOpenSettings,
+      ),
+      child: _FilesSection(
+        controller: filesController,
+        familyVault: familyVaultController,
+        onCapturePhoto: onCapturePhoto,
+        androidFileSaver: androidFileSaver,
+        androidFileSharer: androidFileSharer,
+        syncFolder: syncFolder,
+        androidSyncFolder: androidSyncFolder,
+        onPullToRefresh: onPullToRefresh,
+        onRefresh: onRefresh,
+        onOpenSettings: onOpenSettings,
+        onDownloadCompleted: onDownloadCompleted,
+      ),
     ),
     AppSection.family => _FamilySection(
       controller: familyVaultController,
@@ -564,6 +583,8 @@ class _SectionContent extends StatelessWidget {
       onVaultProvisioned: onVaultProvisioned,
       localeController: localeController,
       themeController: themeController,
+      appLock: appLock,
+      onSetAppLockEnabled: onSetAppLockEnabled,
     ),
   };
 }

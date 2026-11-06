@@ -11,12 +11,14 @@ import 'package:path_provider/path_provider.dart';
 
 import 'core/e2ee/account_identity.dart';
 import 'core/e2ee/device_identity.dart';
+import 'core/e2ee/recovery.dart' show RecoverySecret;
 import 'core/e2ee/vault_key_store.dart';
 import 'core/localization/app_locale_controller.dart';
 import 'core/localization/app_theme_controller.dart';
 import 'core/platform/android_file_saver.dart';
 import 'core/platform/android_file_sharer.dart';
 import 'core/platform/android_sync_folder.dart';
+import 'core/platform/app_lock_preferences.dart';
 import 'core/platform/biometric_authenticator.dart';
 import 'core/platform/camera_photo_picker.dart';
 import 'core/platform/windows_autostart.dart';
@@ -50,6 +52,7 @@ part 'ui/family_section.dart';
 part 'ui/file_history.dart';
 part 'ui/files_section.dart';
 part 'ui/settings_section.dart';
+part 'ui/setup_guide.dart';
 part 'ui/shell_widgets.dart';
 part 'ui/sync_section.dart';
 
@@ -69,6 +72,8 @@ class HomeBoxApp extends StatefulWidget {
     this.androidSyncFolder,
     this.localeController,
     this.themeController,
+    this.appLockPreferences,
+    this.clock,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
@@ -82,6 +87,10 @@ class HomeBoxApp extends StatefulWidget {
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController? localeController;
   final AppThemeController? themeController;
+  final AppLockPreferences? appLockPreferences;
+
+  /// The time source for auto-lock; overridable for tests.
+  final DateTime Function()? clock;
 
   @override
   State<HomeBoxApp> createState() => _HomeBoxAppState();
@@ -147,6 +156,8 @@ class _HomeBoxAppState extends State<HomeBoxApp> {
         androidSyncFolder: widget.androidSyncFolder,
         localeController: _localeController,
         themeController: _themeController,
+        appLockPreferences: widget.appLockPreferences,
+        clock: widget.clock,
       ),
     ),
   );
@@ -257,6 +268,8 @@ class HomeBoxDesktopPage extends StatefulWidget {
     this.androidSyncFolder,
     this.localeController,
     this.themeController,
+    this.appLockPreferences,
+    this.clock,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
@@ -274,6 +287,8 @@ class HomeBoxDesktopPage extends StatefulWidget {
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController? localeController;
   final AppThemeController? themeController;
+  final AppLockPreferences? appLockPreferences;
+  final DateTime Function()? clock;
 
   @override
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
@@ -301,6 +316,15 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
   late final AppThemeController _themeController;
   late final bool _ownsThemeController;
   BiometricAuthenticator? _biometricAuthenticator;
+  late final AppLockPreferences _appLock;
+  late final DateTime Function() _clock;
+
+  /// When the app last left the foreground while unlocked; see
+  /// [didChangeAppLifecycleState].
+  DateTime? _backgroundedAt;
+
+  /// Covers routes pushed above this page while it is relocked.
+  OverlayEntry? _lockCover;
   SyncEngine? _syncEngine;
   FilesController? _filesController;
   FamilyVaultController? _familyVaultController;
@@ -365,6 +389,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     _ownsThemeController = widget.themeController == null;
     _themeController = widget.themeController ?? AppThemeController();
     if (_ownsThemeController) unawaited(_themeController.initialize());
+    _appLock = widget.appLockPreferences ?? AppLockPreferences();
+    _clock = widget.clock ?? DateTime.now;
     if (supportsBiometricAppLock(defaultTargetPlatform)) {
       _biometricAuthenticator =
           widget.biometricAuthenticator ?? LocalAuthBiometricAuthenticator();
@@ -839,8 +865,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     );
   }
 
-  /// Runs once, from [initState] — see [BiometricAuthenticator]'s doc
-  /// comment for why this is not repeated on every app resume.
+  /// Runs once, from [initState]. Later locks only follow a long enough
+  /// stay in the background ([AppLockPreferences.autoLock]) — see
+  /// [BiometricAuthenticator]'s doc comment for why not every resume.
   Future<void> _initializeBiometricGate() async {
     final authenticator = _biometricAuthenticator;
     if (authenticator == null) return;
@@ -851,13 +878,30 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
       // Authentication is an optional Android capability. A platform error
       // must not make the rest of the local client inaccessible.
     }
+    await _appLock.initialize();
     if (!mounted) return;
+    final lock = available && _appLock.enabled;
     setState(() {
       _biometricGateReady = true;
       _biometricAvailable = available;
-      _biometricLocked = available;
+      _biometricLocked = lock;
     });
-    if (available) unawaited(_unlockWithBiometrics());
+    if (lock) unawaited(_unlockWithBiometrics());
+  }
+
+  /// Asks for biometrics before turning the app lock off, so someone
+  /// holding an unlocked phone cannot quietly disable it.
+  Future<void> _setAppLockEnabled(bool enabled) async {
+    if (!enabled) {
+      var authenticated = false;
+      try {
+        authenticated = await _biometricAuthenticator?.authenticate() ?? false;
+      } catch (_) {
+        // A cancelled prompt simply keeps the lock on.
+      }
+      if (!authenticated) return;
+    }
+    await _appLock.setEnabled(enabled);
   }
 
   Future<void> _unlockWithBiometrics() async {
@@ -870,6 +914,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
       return;
     }
     setState(() => _biometricAuthenticationInProgress = true);
+    _lockCover?.markNeedsBuild();
     var authenticated = false;
     try {
       authenticated = await authenticator.authenticate();
@@ -882,24 +927,74 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     if (!mounted) return;
     if (authenticated) {
       setState(() => _biometricLocked = false);
+      _uncoverOpenRoutes();
     } else {
       setState(() {});
+      _lockCover?.markNeedsBuild();
     }
+  }
+
+  /// The lock screen replaces this page, but routes pushed above it
+  /// (dialogs, Trash, Search) would stay visible. A root overlay entry
+  /// hides them without closing them, so for example a Recovery Secret
+  /// dialog that is shown only once survives a relock.
+  void _coverOpenRoutes() {
+    final navigator = Navigator.maybeOf(context);
+    final overlay = navigator?.overlay;
+    if (_lockCover != null || overlay == null || !navigator!.canPop()) {
+      return;
+    }
+    final cover = OverlayEntry(
+      builder: (context) => _BiometricLockScreen(
+        authenticating: _biometricAuthenticationInProgress,
+        onUnlock: _unlockWithBiometrics,
+      ),
+    );
+    overlay.insert(cover);
+    _lockCover = cover;
+  }
+
+  void _uncoverOpenRoutes() {
+    final cover = _lockCover;
+    _lockCover = null;
+    cover
+      ?..remove()
+      ..dispose();
   }
 
   /// An edit is usually made by opening a mirrored file in another app, so
   /// returning to HomeBox publishes it at once instead of on the next cycle.
+  ///
+  /// It also relocks the app when it returns after longer in the background
+  /// than [AppLockPreferences.autoLock] allows.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed &&
-        defaultTargetPlatform == TargetPlatform.android) {
-      unawaited(_runSyncFolderPass());
+    switch (state) {
+      case AppLifecycleState.hidden || AppLifecycleState.paused:
+        if (!_biometricLocked) _backgroundedAt ??= _clock();
+      case AppLifecycleState.resumed:
+        final backgroundedAt = _backgroundedAt;
+        _backgroundedAt = null;
+        if (backgroundedAt != null &&
+            _biometricAvailable &&
+            !_biometricLocked &&
+            _appLock.shouldLockAfter(_clock().difference(backgroundedAt))) {
+          setState(() => _biometricLocked = true);
+          _coverOpenRoutes();
+          unawaited(_unlockWithBiometrics());
+        }
+        if (defaultTargetPlatform == TargetPlatform.android) {
+          unawaited(_runSyncFolderPass());
+        }
+      case AppLifecycleState.inactive || AppLifecycleState.detached:
+        break;
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _uncoverOpenRoutes();
     _serverConnectionController.removeListener(_onServerConnectionChanged);
     _vaultSetupController.removeListener(_maybeRefreshFiles);
     _filesController?.dispose();
@@ -916,6 +1011,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     _serverConnectionController.dispose();
     if (_ownsLocaleController) _localeController.dispose();
     if (_ownsThemeController) _themeController.dispose();
+    if (widget.appLockPreferences == null) _appLock.dispose();
     super.dispose();
   }
 
@@ -1110,6 +1206,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
           : null,
       localeController: _localeController,
       themeController: _themeController,
+      appLock: _biometricAvailable ? _appLock : null,
+      onSetAppLockEnabled: _setAppLockEnabled,
       onPullToRefresh: defaultTargetPlatform == TargetPlatform.android
           ? _refreshFromServer
           : null,

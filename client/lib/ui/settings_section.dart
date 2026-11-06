@@ -10,6 +10,8 @@ class _SettingsSection extends StatelessWidget {
     required this.onVaultProvisioned,
     required this.localeController,
     required this.themeController,
+    required this.appLock,
+    required this.onSetAppLockEnabled,
   });
 
   final DeviceSetupController deviceSetupController;
@@ -20,6 +22,8 @@ class _SettingsSection extends StatelessWidget {
   final Future<void> Function() onVaultProvisioned;
   final AppLocaleController localeController;
   final AppThemeController themeController;
+  final AppLockPreferences? appLock;
+  final Future<void> Function(bool enabled) onSetAppLockEnabled;
 
   @override
   Widget build(BuildContext context) => _PageFrame(
@@ -70,6 +74,11 @@ class _SettingsSection extends StatelessWidget {
         _SettingsGroupHeading(
           _localized(context, en: 'Application', ru: 'Приложение'),
         ),
+        if (appLock != null)
+          _AppLockCard(
+            preferences: appLock!,
+            onSetEnabled: onSetAppLockEnabled,
+          ),
         _LanguageCard(controller: localeController),
         _ThemeCard(controller: themeController),
         // Autostart is a Windows sign-in feature; elsewhere it would only
@@ -93,6 +102,93 @@ final class _SettingsGroupHeading extends StatelessWidget {
       text,
       style: Theme.of(context).textTheme.titleSmall
           ?.copyWith(color: Theme.of(context).colorScheme.primary),
+    ),
+  );
+}
+
+/// Biometric app lock: on/off (turning it off asks for biometrics first)
+/// and when to lock again after HomeBox was in the background.
+final class _AppLockCard extends StatelessWidget {
+  const _AppLockCard({required this.preferences, required this.onSetEnabled});
+
+  final AppLockPreferences preferences;
+  final Future<void> Function(bool enabled) onSetEnabled;
+
+  String _autoLockLabel(BuildContext context, AppAutoLock value) =>
+      switch (value) {
+        AppAutoLock.onLaunchOnly => _localized(
+          context,
+          en: 'Only when HomeBox starts',
+          ru: 'Только при запуске',
+        ),
+        AppAutoLock.after1Minute => _localized(
+          context,
+          en: 'After 1 minute away',
+          ru: 'Через 1 минуту в фоне',
+        ),
+        AppAutoLock.after5Minutes => _localized(
+          context,
+          en: 'After 5 minutes away',
+          ru: 'Через 5 минут в фоне',
+        ),
+        AppAutoLock.after15Minutes => _localized(
+          context,
+          en: 'After 15 minutes away',
+          ru: 'Через 15 минут в фоне',
+        ),
+      };
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: preferences,
+    builder: (context, _) => Card(
+      child: Column(
+        children: [
+          SwitchListTile(
+            secondary: const Icon(Icons.fingerprint),
+            title: Text(
+              _localized(
+                context,
+                en: 'Lock with biometrics',
+                ru: 'Блокировка биометрией',
+              ),
+            ),
+            subtitle: Text(
+              _localized(
+                context,
+                en: 'Hide your files until your fingerprint or face is confirmed.',
+                ru: 'Скрывать файлы, пока не подтверждены отпечаток или лицо.',
+              ),
+            ),
+            value: preferences.enabled,
+            onChanged: (value) => unawaited(onSetEnabled(value)),
+          ),
+          if (preferences.enabled)
+            ListTile(
+              leading: const Icon(Icons.timer_outlined),
+              title: Text(
+                _localized(context, en: 'Lock again', ru: 'Блокировать снова'),
+              ),
+              trailing: DropdownButtonHideUnderline(
+                child: DropdownButton<AppAutoLock>(
+                  value: preferences.autoLock,
+                  onChanged: (value) {
+                    if (value != null) {
+                      unawaited(preferences.setAutoLock(value));
+                    }
+                  },
+                  items: [
+                    for (final value in AppAutoLock.values)
+                      DropdownMenuItem(
+                        value: value,
+                        child: Text(_autoLockLabel(context, value)),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
     ),
   );
 }
@@ -298,10 +394,7 @@ final class _DeviceProvisioningCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 12),
-                SelectableText(
-                  targetFingerprint,
-                  style: const TextStyle(fontFamily: 'monospace'),
-                ),
+                _FingerprintText(targetFingerprint),
                 const SizedBox(height: 12),
                 CheckboxListTile(
                   contentPadding: EdgeInsets.zero,
@@ -366,32 +459,6 @@ final class _DeviceProvisioningCard extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  Future<void> _checkApproval(BuildContext context) async {
-    final provisioned = await controller.collectProvisioning();
-    if (provisioned) await onVaultProvisioned();
-    if (!context.mounted) return;
-    final message = provisioned
-        ? _localized(
-            context,
-            en: 'This device is approved and the vault is unlocked.',
-            ru: 'Устройство подтверждено, хранилище разблокировано.',
-          )
-        : controller.status == DeviceProvisioningStatus.awaitingApproval
-        ? _localized(
-            context,
-            en: 'Waiting for approval from a trusted device.',
-            ru: 'Ожидается подтверждение с доверенного устройства.',
-          )
-        : (controller.errorMessage ??
-              _localized(
-                context,
-                en: 'Could not check device approval.',
-                ru: 'Не удалось проверить подтверждение устройства.',
-              ));
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -483,7 +550,11 @@ final class _DeviceProvisioningCard extends StatelessWidget {
             )
           : canCollectApproval
           ? FilledButton(
-              onPressed: () => _checkApproval(context),
+              onPressed: () => _checkApprovalFlow(
+                context,
+                controller: controller,
+                onVaultProvisioned: onVaultProvisioned,
+              ),
               child: Text(
                 _localized(
                   context,
@@ -1028,56 +1099,6 @@ final class _ServerConnectionCard extends StatelessWidget {
 
   final ServerConnectionController controller;
 
-  Future<void> _promptForServer(BuildContext context) async {
-    final urlController = TextEditingController();
-    final entered = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          _localized(
-            context,
-            en: 'Connect to a HomeBox server',
-            ru: 'Подключение к серверу HomeBox',
-          ),
-        ),
-        content: TextField(
-          controller: urlController,
-          autofocus: true,
-          decoration: InputDecoration(
-            labelText: _localized(
-              context,
-              en: 'Server address',
-              ru: 'Адрес сервера',
-            ),
-            hintText: 'homebox.local:8787',
-          ),
-          onSubmitted: (value) => Navigator.pop(context, value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, urlController.text),
-            child: Text(_localized(context, en: 'Continue', ru: 'Продолжить')),
-          ),
-        ],
-      ),
-    );
-    if (entered == null || entered.trim().isEmpty) return;
-    await controller.discover(entered);
-    // Shown from here, once per discovery, rather than from build(): a
-    // rebuild while awaiting trust must not stack a second dialog.
-    final fingerprint = controller.discoveredFingerprint;
-    if (!context.mounted ||
-        controller.status != ServerConnectionStatus.awaitingTrust ||
-        fingerprint == null) {
-      return;
-    }
-    await _confirmFingerprint(context, fingerprint);
-  }
-
   Future<void> _confirmForget(BuildContext context) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1117,117 +1138,6 @@ final class _ServerConnectionCard extends StatelessWidget {
     if (confirmed == true) await controller.forgetServer();
   }
 
-  Future<void> _confirmFingerprint(
-    BuildContext context,
-    String fingerprint,
-  ) async {
-    final trust = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          _localized(
-            context,
-            en: 'Verify server identity',
-            ru: 'Проверьте подлинность сервера',
-          ),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              _localized(
-                context,
-                en:
-                    'Compare this fingerprint with the one printed by "homebox server fingerprint" '
-                    'on the server, over a channel you trust, before continuing.',
-                ru:
-                    'Сравните этот отпечаток с выводом команды «homebox server fingerprint» '
-                    'на сервере по надёжному каналу, прежде чем продолжить.',
-              ),
-            ),
-            const SizedBox(height: 12),
-            SelectableText(
-              fingerprint,
-              style: const TextStyle(
-                fontFeatures: [FontFeature.tabularFigures()],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text(
-              _localized(
-                context,
-                en: 'Trust this server',
-                ru: 'Доверять серверу',
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (trust == true) {
-      await controller.confirmTrust();
-    } else {
-      controller.cancelTrust();
-    }
-  }
-
-  Future<void> _promptForLogin(BuildContext context) async {
-    final usernameController = TextEditingController();
-    final passwordController = TextEditingController();
-    final submitted = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(_localized(context, en: 'Sign in', ru: 'Войти')),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: usernameController,
-              autofocus: true,
-              decoration: InputDecoration(
-                labelText: _localized(
-                  context,
-                  en: 'Username',
-                  ru: 'Имя пользователя',
-                ),
-              ),
-            ),
-            TextField(
-              controller: passwordController,
-              obscureText: true,
-              decoration: InputDecoration(
-                labelText: _localized(context, en: 'Password', ru: 'Пароль'),
-              ),
-              onSubmitted: (_) => Navigator.pop(context, true),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text(_localized(context, en: 'Sign in', ru: 'Войти')),
-          ),
-        ],
-      ),
-    );
-    if (submitted == true) {
-      await controller.login(usernameController.text, passwordController.text);
-    }
-  }
-
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: controller,
@@ -1249,7 +1159,7 @@ final class _ServerConnectionCard extends StatelessWidget {
               ),
               ServerConnectionStatus.disconnected ||
               ServerConnectionStatus.failed => FilledButton(
-                onPressed: () => _promptForServer(context),
+                onPressed: () => _connectToServerFlow(context, controller),
                 child: Text(
                   _localized(context, en: 'Connect', ru: 'Подключить'),
                 ),
@@ -1317,7 +1227,7 @@ final class _ServerConnectionCard extends StatelessWidget {
                       ),
                     )
                   : FilledButton(
-                      onPressed: () => _promptForLogin(context),
+                      onPressed: () => _signInFlow(context, controller),
                       child: Text(
                         _localized(context, en: 'Sign in', ru: 'Войти'),
                       ),
@@ -1346,215 +1256,6 @@ final class _VaultSetupCard extends StatelessWidget {
   final DeviceProvisioningController deviceProvisioningController;
   final RecoveryController recoveryController;
   final Future<void> Function() onVaultProvisioned;
-
-  Future<void> _createVault(BuildContext context) async {
-    final userId = serverConnectionController.session?.user.id;
-    if (userId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            _localized(
-              context,
-              en: 'Sign in to the server before creating a vault.',
-              ru: 'Войдите на сервер, прежде чем создавать хранилище.',
-            ),
-          ),
-        ),
-      );
-      return;
-    }
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          _localized(
-            context,
-            en: 'Create this account\'s vault?',
-            ru: 'Создать хранилище этого аккаунта?',
-          ),
-        ),
-        content: Text(
-          _localized(
-            context,
-            en:
-                'HomeBox generates the encryption keys that protect your files on this server, plus a Recovery Secret you must save. '
-                'If every trusted device and the Recovery Secret are lost, nobody — including HomeBox — can recover your files.',
-            ru:
-                'HomeBox создаст ключи шифрования, защищающие ваши файлы на сервере, и Recovery Secret, который нужно сохранить. '
-                'Если потерять все доверенные устройства и Recovery Secret, восстановить файлы не сможет никто — даже HomeBox.',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text(
-              _localized(context, en: 'Create vault', ru: 'Создать хранилище'),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    final secret = await controller.createVault(userId);
-    if (secret == null) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              controller.errorMessage ??
-                  _localized(
-                    context,
-                    en: 'Could not create the vault.',
-                    ru: 'Не удалось создать хранилище.',
-                  ),
-            ),
-          ),
-        );
-      }
-      return;
-    }
-    // This device is the vault's root of trust and never goes through
-    // collectProvisioning, so without this it would show as still pending
-    // approval in Account devices. Best-effort: the vault itself already
-    // exists and its Recovery Secret must still be shown either way.
-    final selfApproved = await deviceProvisioningController.selfApprove();
-    if (!context.mounted) return;
-    await _showRecoverySecretDialog(context, secret);
-    if (!selfApproved && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            _localized(
-              context,
-              en:
-                  'Vault created, but this device could not record its own approval: '
-                  '${deviceProvisioningController.errorMessage ?? 'unknown error'}. '
-                  'It may show as pending in Account devices until this is retried.',
-              ru:
-                  'Хранилище создано, но устройство не смогло записать своё подтверждение: '
-                  '${deviceProvisioningController.errorMessage ?? 'неизвестная ошибка'}. '
-                  'В списке устройств оно может отображаться как ожидающее, пока это не будет повторено.',
-            ),
-          ),
-        ),
-      );
-    }
-  }
-
-  Future<void> _restoreVault(BuildContext context) async {
-    if (serverConnectionController.session == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            _localized(
-              context,
-              en: 'Sign in to the account you want to recover first.',
-              ru: 'Сначала войдите в аккаунт, который нужно восстановить.',
-            ),
-          ),
-        ),
-      );
-      return;
-    }
-    final secretController = TextEditingController();
-    final secret = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          _localized(
-            context,
-            en: 'Restore with Recovery Secret',
-            ru: 'Восстановить по Recovery Secret',
-          ),
-        ),
-        content: SizedBox(
-          width: 460,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                _localized(
-                  context,
-                  en: 'Enter the Recovery Secret you saved when the vault was created. It unlocks the existing vault on this device without another trusted device.',
-                  ru: 'Введите Recovery Secret, сохранённый при создании vault. Он разблокирует существующий vault на этом устройстве без другого доверенного устройства.',
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: secretController,
-                autofocus: true,
-                autocorrect: false,
-                enableSuggestions: false,
-                style: const TextStyle(fontFamily: 'monospace'),
-                decoration: const InputDecoration(
-                  labelText: 'Recovery Secret',
-                  hintText: 'HBXR1-…',
-                ),
-                onSubmitted: (value) => Navigator.pop(context, value),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, secretController.text),
-            child: Text(_localized(context, en: 'Restore', ru: 'Восстановить')),
-          ),
-        ],
-      ),
-    );
-    // Not disposed here: the dialog's exit animation may still rebuild the
-    // field, matching how the sign-in dialog leaves its controllers to GC.
-    if (secret == null || secret.trim().isEmpty) return;
-    final restored = await recoveryController.restoreVault(secret);
-    if (!context.mounted) return;
-    if (!restored) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            recoveryController.errorMessage ??
-                _localized(
-                  context,
-                  en: 'Could not restore the vault.',
-                  ru: 'Не удалось восстановить vault.',
-                ),
-          ),
-        ),
-      );
-      return;
-    }
-    // Like a newly created vault, a recovered device holds the Vault Key
-    // without ever having been approved, so it certifies itself.
-    final selfApproved = await deviceProvisioningController.selfApprove();
-    await onVaultProvisioned();
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          selfApproved
-              ? _localized(
-                  context,
-                  en: 'Vault restored. This device is unlocked and approved.',
-                  ru: 'Vault восстановлен. Это устройство разблокировано и подтверждено.',
-                )
-              : _localized(
-                  context,
-                  en: 'Vault restored, but this device could not record its approval: ${deviceProvisioningController.errorMessage ?? 'unknown error'}.',
-                  ru: 'Vault восстановлен, но устройство не смогло записать своё подтверждение: ${deviceProvisioningController.errorMessage ?? 'неизвестная ошибка'}.',
-                ),
-        ),
-      ),
-    );
-  }
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -1637,7 +1338,15 @@ final class _VaultSetupCard extends StatelessWidget {
                     OutlinedButton.icon(
                       onPressed: restoring
                           ? null
-                          : () => _restoreVault(context),
+                          : () => _restoreVaultFlow(
+                              context,
+                              serverConnectionController:
+                                  serverConnectionController,
+                              recoveryController: recoveryController,
+                              deviceProvisioningController:
+                                  deviceProvisioningController,
+                              onVaultProvisioned: onVaultProvisioned,
+                            ),
                       icon: const Icon(Icons.key_outlined),
                       label: Text(
                         _localized(
@@ -1648,7 +1357,16 @@ final class _VaultSetupCard extends StatelessWidget {
                       ),
                     ),
                     FilledButton(
-                      onPressed: restoring ? null : () => _createVault(context),
+                      onPressed: restoring
+                          ? null
+                          : () => _createVaultFlow(
+                              context,
+                              controller: controller,
+                              serverConnectionController:
+                                  serverConnectionController,
+                              deviceProvisioningController:
+                                  deviceProvisioningController,
+                            ),
                       child: Text(
                         _localized(
                           context,
@@ -1671,71 +1389,225 @@ Future<void> _showRecoverySecretDialog(BuildContext context, String secret) =>
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (context) {
-        var confirmedSaved = false;
-        // A single StatefulBuilder wraps the whole dialog so toggling the
-        // checkbox also rebuilds the "Done" button's enabled state — two
-        // separate StatefulBuilders (one per widget) would each keep their
-        // own rebuild scope and never see the other's state change.
-        return StatefulBuilder(
-          builder: (context, setState) => AlertDialog(
-            title: Text(
-              _localized(
-                context,
-                en: 'Save your Recovery Secret',
-                ru: 'Сохраните Recovery Secret',
+      builder: (context) => _RecoverySecretDialog(secret: secret),
+    );
+
+/// How many trailing characters of the Recovery Secret the user retypes to
+/// show it was actually written down, not just acknowledged.
+const int _recoveryCheckLength = 4;
+
+/// How long a copied Recovery Secret may stay on the clipboard.
+const Duration _sensitiveClipboardLifetime = Duration(seconds: 60);
+
+/// Copies [text] and removes it from the clipboard after
+/// [_sensitiveClipboardLifetime], unless something else was copied since.
+Future<void> _copySensitive(String text) async {
+  await Clipboard.setData(ClipboardData(text: text));
+  unawaited(
+    Future<void>.delayed(_sensitiveClipboardLifetime, () async {
+      final current = await Clipboard.getData(Clipboard.kTextPlain);
+      if (current?.text == text) {
+        await Clipboard.setData(const ClipboardData(text: ''));
+      }
+    }),
+  );
+}
+
+/// The Recovery Secret split into groups of six for writing it down; the
+/// restore dialog ignores the spaces when it is typed back.
+String _groupRecoverySecret(String secret) {
+  const prefix = RecoverySecret.prefix;
+  final body = secret.startsWith(prefix)
+      ? secret.substring(prefix.length)
+      : secret;
+  final groups = [
+    for (var i = 0; i < body.length; i += 6)
+      body.substring(i, (i + 6).clamp(0, body.length)),
+  ];
+  return '${secret.startsWith(prefix) ? prefix : ''}${groups.join(' ')}';
+}
+
+/// Shows a new Recovery Secret once. "Done" unlocks only after the user
+/// confirms saving it and retypes its last characters.
+final class _RecoverySecretDialog extends StatefulWidget {
+  const _RecoverySecretDialog({required this.secret});
+
+  final String secret;
+
+  @override
+  State<_RecoverySecretDialog> createState() => _RecoverySecretDialogState();
+}
+
+final class _RecoverySecretDialogState extends State<_RecoverySecretDialog> {
+  final TextEditingController _check = TextEditingController();
+  bool _confirmedSaved = false;
+
+  @override
+  void dispose() {
+    _check.dispose();
+    super.dispose();
+  }
+
+  bool get _checkMatches {
+    final secret = widget.secret;
+    final expected = secret.substring(secret.length - _recoveryCheckLength);
+    return _check.text.trim() == expected;
+  }
+
+  Future<void> _copy() async {
+    await _copySensitive(widget.secret);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          _localized(
+            context,
+            en: 'Copied. It is removed from the clipboard after a minute.',
+            ru: 'Скопировано. Через минуту секрет будет удалён из буфера обмена.',
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveToFile() async {
+    final title = _localized(
+      context,
+      en: 'HomeBox Recovery Secret',
+      ru: 'Recovery Secret HomeBox',
+    );
+    final note = _localized(
+      context,
+      en: 'Keep this file offline and private. Anyone with this secret and your account password can read your files.',
+      ru: 'Храните файл офлайн и никому не передавайте. Любой, у кого есть этот секрет и пароль от аккаунта, сможет прочитать ваши файлы.',
+    );
+    final failed = _localized(
+      context,
+      en: 'Could not save the file.',
+      ru: 'Не удалось сохранить файл.',
+    );
+    final location = await getSaveLocation(
+      suggestedName: 'HomeBox Recovery Secret.txt',
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'Text', extensions: ['txt']),
+      ],
+    );
+    if (location == null) return;
+    try {
+      await File(location.path)
+          .writeAsString('$title\n\n${widget.secret}\n\n$note\n', flush: true);
+    } on FileSystemException {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(failed)));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canSaveToFile = defaultTargetPlatform == TargetPlatform.windows;
+    return AlertDialog(
+      title: Text(
+        _localized(
+          context,
+          en: 'Save your Recovery Secret',
+          ru: 'Сохраните Recovery Secret',
+        ),
+      ),
+      content: SizedBox(
+        width: 480,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                _localized(
+                  context,
+                  en: 'This is shown only once. Without it — and without another trusted device — your files can never be recovered. Write it down or save it offline.',
+                  ru: 'Он показывается только один раз. Без него и без другого доверенного устройства восстановить файлы будет невозможно. Запишите его или сохраните офлайн.',
+                ),
               ),
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _localized(
-                    context,
-                    en: 'This is shown only once. Without it — and without another trusted device — your files can never be recovered.',
-                    ru: 'Он показывается только один раз. Без него и без другого доверенного устройства восстановить файлы будет невозможно.',
-                  ),
+              const SizedBox(height: 12),
+              SelectableText(
+                _groupRecoverySecret(widget.secret),
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontFamily: 'monospace',
+                  fontFamilyFallback: const ['Consolas', 'Courier New'],
+                  height: 1.5,
                 ),
-                const SizedBox(height: 12),
-                SelectableText(
-                  secret,
-                  style: const TextStyle(
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
-                ),
-                const SizedBox(height: 12),
-                CheckboxListTile(
-                  value: confirmedSaved,
-                  contentPadding: EdgeInsets.zero,
-                  controlAffinity: ListTileControlAffinity.leading,
-                  onChanged: (value) =>
-                      setState(() => confirmedSaved = value ?? false),
-                  title: Text(
-                    _localized(
-                      context,
-                      en: 'I have saved this Recovery Secret somewhere safe.',
-                      ru: 'Я сохранил(а) Recovery Secret в надёжном месте.',
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _copy,
+                    icon: const Icon(Icons.copy_outlined),
+                    label: Text(
+                      _localized(context, en: 'Copy', ru: 'Копировать'),
                     ),
                   ),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton.icon(
-                onPressed: () => Clipboard.setData(ClipboardData(text: secret)),
-                icon: const Icon(Icons.copy_outlined),
-                label: Text(_localized(context, en: 'Copy', ru: 'Копировать')),
+                  if (canSaveToFile)
+                    OutlinedButton.icon(
+                      onPressed: _saveToFile,
+                      icon: const Icon(Icons.save_alt_outlined),
+                      label: Text(
+                        _localized(
+                          context,
+                          en: 'Save to file…',
+                          ru: 'Сохранить в файл…',
+                        ),
+                      ),
+                    ),
+                ],
               ),
-              FilledButton(
-                onPressed: confirmedSaved ? () => Navigator.pop(context) : null,
-                child: Text(_localized(context, en: 'Done', ru: 'Готово')),
+              const SizedBox(height: 12),
+              CheckboxListTile(
+                value: _confirmedSaved,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                onChanged: (value) =>
+                    setState(() => _confirmedSaved = value ?? false),
+                title: Text(
+                  _localized(
+                    context,
+                    en: 'I have saved this Recovery Secret somewhere safe.',
+                    ru: 'Я сохранил(а) Recovery Secret в надёжном месте.',
+                  ),
+                ),
+              ),
+              TextField(
+                key: const ValueKey('recovery-check'),
+                controller: _check,
+                autocorrect: false,
+                enableSuggestions: false,
+                onChanged: (_) => setState(() {}),
+                style: const TextStyle(fontFamily: 'monospace'),
+                decoration: InputDecoration(
+                  labelText: _localized(
+                    context,
+                    en: 'Type the last $_recoveryCheckLength characters to confirm',
+                    ru: 'Введите последние $_recoveryCheckLength символа для проверки',
+                  ),
+                ),
               ),
             ],
           ),
-        );
-      },
+        ),
+      ),
+      actions: [
+        FilledButton(
+          onPressed: _confirmedSaved && _checkMatches
+              ? () => Navigator.pop(context)
+              : null,
+          child: Text(_localized(context, en: 'Done', ru: 'Готово')),
+        ),
+      ],
     );
+  }
+}
 
 /// Shows whether the server holds this account's recovery bundle, uploads
 /// it automatically from the device that created the vault, and lets any
@@ -1930,4 +1802,421 @@ final class _RecoveryCardState extends State<_RecoveryCard> {
       );
     },
   );
+}
+
+/// Asks for a server address, then shows its fingerprint for verification.
+Future<void> _connectToServerFlow(
+  BuildContext context,
+  ServerConnectionController controller,
+) async {
+  final urlController = TextEditingController();
+  final entered = await showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(
+        _localized(
+          context,
+          en: 'Connect to a HomeBox server',
+          ru: 'Подключение к серверу HomeBox',
+        ),
+      ),
+      content: TextField(
+        controller: urlController,
+        autofocus: true,
+        decoration: InputDecoration(
+          labelText: _localized(
+            context,
+            en: 'Server address',
+            ru: 'Адрес сервера',
+          ),
+          hintText: 'homebox.local:8787',
+        ),
+        onSubmitted: (value) => Navigator.pop(context, value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, urlController.text),
+          child: Text(_localized(context, en: 'Continue', ru: 'Продолжить')),
+        ),
+      ],
+    ),
+  );
+  if (entered == null || entered.trim().isEmpty) return;
+  await controller.discover(entered);
+  // Shown from here, once per discovery, rather than from build(): a
+  // rebuild while awaiting trust must not stack a second dialog.
+  final fingerprint = controller.discoveredFingerprint;
+  if (!context.mounted ||
+      controller.status != ServerConnectionStatus.awaitingTrust ||
+      fingerprint == null) {
+    return;
+  }
+  await _confirmServerFingerprint(context, controller, fingerprint);
+}
+
+Future<void> _confirmServerFingerprint(
+  BuildContext context,
+  ServerConnectionController controller,
+  String fingerprint,
+) async {
+  final trust = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(
+        _localized(
+          context,
+          en: 'Verify server identity',
+          ru: 'Проверьте подлинность сервера',
+        ),
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _localized(
+              context,
+              en:
+                  'Compare this fingerprint with the one printed by "homebox server fingerprint" '
+                  'on the server, over a channel you trust, before continuing.',
+              ru:
+                  'Сравните этот отпечаток с выводом команды «homebox server fingerprint» '
+                  'на сервере по надёжному каналу, прежде чем продолжить.',
+            ),
+          ),
+          const SizedBox(height: 12),
+          _FingerprintText(fingerprint),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(
+            _localized(
+              context,
+              en: 'Trust this server',
+              ru: 'Доверять серверу',
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+  if (trust == true) {
+    await controller.confirmTrust();
+  } else {
+    controller.cancelTrust();
+  }
+}
+
+Future<void> _signInFlow(
+  BuildContext context,
+  ServerConnectionController controller,
+) async {
+  final usernameController = TextEditingController();
+  final passwordController = TextEditingController();
+  final submitted = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(_localized(context, en: 'Sign in', ru: 'Войти')),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: usernameController,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: _localized(
+                context,
+                en: 'Username',
+                ru: 'Имя пользователя',
+              ),
+            ),
+          ),
+          TextField(
+            controller: passwordController,
+            obscureText: true,
+            decoration: InputDecoration(
+              labelText: _localized(context, en: 'Password', ru: 'Пароль'),
+            ),
+            onSubmitted: (_) => Navigator.pop(context, true),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(_localized(context, en: 'Sign in', ru: 'Войти')),
+        ),
+      ],
+    ),
+  );
+  if (submitted == true) {
+    await controller.login(usernameController.text, passwordController.text);
+  }
+}
+
+/// Creates this account's vault after confirmation and shows its Recovery
+/// Secret.
+Future<void> _createVaultFlow(
+  BuildContext context, {
+  required VaultSetupController controller,
+  required ServerConnectionController serverConnectionController,
+  required DeviceProvisioningController deviceProvisioningController,
+}) async {
+  final userId = serverConnectionController.session?.user.id;
+  if (userId == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          _localized(
+            context,
+            en: 'Sign in to the server before creating a vault.',
+            ru: 'Войдите на сервер, прежде чем создавать хранилище.',
+          ),
+        ),
+      ),
+    );
+    return;
+  }
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(
+        _localized(
+          context,
+          en: 'Create this account\'s vault?',
+          ru: 'Создать хранилище этого аккаунта?',
+        ),
+      ),
+      content: Text(
+        _localized(
+          context,
+          en:
+              'HomeBox generates the encryption keys that protect your files on this server, plus a Recovery Secret you must save. '
+              'If every trusted device and the Recovery Secret are lost, nobody — including HomeBox — can recover your files.',
+          ru:
+              'HomeBox создаст ключи шифрования, защищающие ваши файлы на сервере, и Recovery Secret, который нужно сохранить. '
+              'Если потерять все доверенные устройства и Recovery Secret, восстановить файлы не сможет никто — даже HomeBox.',
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(
+            _localized(context, en: 'Create vault', ru: 'Создать хранилище'),
+          ),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+  final secret = await controller.createVault(userId);
+  if (secret == null) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            controller.errorMessage ??
+                _localized(
+                  context,
+                  en: 'Could not create the vault.',
+                  ru: 'Не удалось создать хранилище.',
+                ),
+          ),
+        ),
+      );
+    }
+    return;
+  }
+  // This device is the vault's root of trust and never goes through
+  // collectProvisioning, so without this it would show as still pending
+  // approval in Account devices. Best-effort: the vault itself already
+  // exists and its Recovery Secret must still be shown either way.
+  final selfApproved = await deviceProvisioningController.selfApprove();
+  if (!context.mounted) return;
+  await _showRecoverySecretDialog(context, secret);
+  if (!selfApproved && context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          _localized(
+            context,
+            en:
+                'Vault created, but this device could not record its own approval: '
+                '${deviceProvisioningController.errorMessage ?? 'unknown error'}. '
+                'It may show as pending in Account devices until this is retried.',
+            ru:
+                'Хранилище создано, но устройство не смогло записать своё подтверждение: '
+                '${deviceProvisioningController.errorMessage ?? 'неизвестная ошибка'}. '
+                'В списке устройств оно может отображаться как ожидающее, пока это не будет повторено.',
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Unlocks the existing vault on this device with the Recovery Secret.
+Future<void> _restoreVaultFlow(
+  BuildContext context, {
+  required ServerConnectionController serverConnectionController,
+  required RecoveryController recoveryController,
+  required DeviceProvisioningController deviceProvisioningController,
+  required Future<void> Function() onVaultProvisioned,
+}) async {
+  if (serverConnectionController.session == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          _localized(
+            context,
+            en: 'Sign in to the account you want to recover first.',
+            ru: 'Сначала войдите в аккаунт, который нужно восстановить.',
+          ),
+        ),
+      ),
+    );
+    return;
+  }
+  final secretController = TextEditingController();
+  final secret = await showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(
+        _localized(
+          context,
+          en: 'Restore with Recovery Secret',
+          ru: 'Восстановить по Recovery Secret',
+        ),
+      ),
+      content: SizedBox(
+        width: 460,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _localized(
+                context,
+                en: 'Enter the Recovery Secret you saved when the vault was created. It unlocks the existing vault on this device without another trusted device.',
+                ru: 'Введите Recovery Secret, сохранённый при создании vault. Он разблокирует существующий vault на этом устройстве без другого доверенного устройства.',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: secretController,
+              autofocus: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              style: const TextStyle(fontFamily: 'monospace'),
+              decoration: const InputDecoration(
+                labelText: 'Recovery Secret',
+                hintText: 'HBXR1-…',
+              ),
+              onSubmitted: (value) => Navigator.pop(context, value),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, secretController.text),
+          child: Text(_localized(context, en: 'Restore', ru: 'Восстановить')),
+        ),
+      ],
+    ),
+  );
+  // Not disposed here: the dialog's exit animation may still rebuild the
+  // field, matching how the sign-in dialog leaves its controllers to GC.
+  if (secret == null || secret.trim().isEmpty) return;
+  final restored = await recoveryController.restoreVault(secret);
+  if (!context.mounted) return;
+  if (!restored) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          recoveryController.errorMessage ??
+              _localized(
+                context,
+                en: 'Could not restore the vault.',
+                ru: 'Не удалось восстановить vault.',
+              ),
+        ),
+      ),
+    );
+    return;
+  }
+  // Like a newly created vault, a recovered device holds the Vault Key
+  // without ever having been approved, so it certifies itself.
+  final selfApproved = await deviceProvisioningController.selfApprove();
+  await onVaultProvisioned();
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        selfApproved
+            ? _localized(
+                context,
+                en: 'Vault restored. This device is unlocked and approved.',
+                ru: 'Vault восстановлен. Это устройство разблокировано и подтверждено.',
+              )
+            : _localized(
+                context,
+                en: 'Vault restored, but this device could not record its approval: ${deviceProvisioningController.errorMessage ?? 'unknown error'}.',
+                ru: 'Vault восстановлен, но устройство не смогло записать своё подтверждение: ${deviceProvisioningController.errorMessage ?? 'неизвестная ошибка'}.',
+              ),
+      ),
+    ),
+  );
+}
+
+/// Collects this device's approval from a trusted device, if it arrived.
+Future<void> _checkApprovalFlow(
+  BuildContext context, {
+  required DeviceProvisioningController controller,
+  required Future<void> Function() onVaultProvisioned,
+}) async {
+  final provisioned = await controller.collectProvisioning();
+  if (provisioned) await onVaultProvisioned();
+  if (!context.mounted) return;
+  final message = provisioned
+      ? _localized(
+          context,
+          en: 'This device is approved and the vault is unlocked.',
+          ru: 'Устройство подтверждено, хранилище разблокировано.',
+        )
+      : controller.status == DeviceProvisioningStatus.awaitingApproval
+      ? _localized(
+          context,
+          en: 'Waiting for approval from a trusted device.',
+          ru: 'Ожидается подтверждение с доверенного устройства.',
+        )
+      : (controller.errorMessage ??
+            _localized(
+              context,
+              en: 'Could not check device approval.',
+              ru: 'Не удалось проверить подтверждение устройства.',
+            ));
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }

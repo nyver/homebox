@@ -271,6 +271,7 @@ final class _IdentityCard extends StatelessWidget {
                 ru: 'Отпечаток аккаунта',
               ),
               value: fingerprint,
+              fingerprint: true,
             ),
           ],
         ),
@@ -280,10 +281,17 @@ final class _IdentityCard extends StatelessWidget {
 }
 
 final class _CopyableValue extends StatelessWidget {
-  const _CopyableValue({required this.label, required this.value});
+  const _CopyableValue({
+    required this.label,
+    required this.value,
+    this.fingerprint = false,
+  });
 
   final String label;
   final String? value;
+
+  /// Lays the value out as a fingerprint for comparing by eye.
+  final bool fingerprint;
 
   @override
   Widget build(BuildContext context) {
@@ -296,10 +304,12 @@ final class _CopyableValue extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(label, style: Theme.of(context).textTheme.labelMedium),
-              SelectableText(
-                text ?? '…',
-                style: const TextStyle(fontFamily: 'monospace'),
-              ),
+              fingerprint && text != null
+                  ? _FingerprintText(text)
+                  : SelectableText(
+                      text ?? '…',
+                      style: const TextStyle(fontFamily: 'monospace'),
+                    ),
             ],
           ),
         ),
@@ -594,10 +604,7 @@ Future<bool> _confirmFingerprint(
           children: [
             Text(explanation),
             const SizedBox(height: 12),
-            SelectableText(
-              fingerprint,
-              style: const TextStyle(fontFamily: 'monospace'),
-            ),
+            _FingerprintText(fingerprint),
             const SizedBox(height: 12),
             CheckboxListTile(
               contentPadding: EdgeInsets.zero,
@@ -799,10 +806,7 @@ Future<void> _showShareFolderDialog(
                         ),
                       ),
                       const SizedBox(height: 8),
-                      SelectableText(
-                        candidate!.fingerprint,
-                        style: const TextStyle(fontFamily: 'monospace'),
-                      ),
+                      _FingerprintText(candidate!.fingerprint),
                       CheckboxListTile(
                         contentPadding: EdgeInsets.zero,
                         value: compared,

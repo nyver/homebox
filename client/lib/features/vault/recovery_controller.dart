@@ -164,7 +164,11 @@ final class RecoveryController extends ChangeNotifier {
         );
       }
       try {
-        recoverySecret = RecoverySecret.parse(recoverySecretText.trim());
+        // Spaces and line breaks are ignored: the secret is shown in groups
+        // and is often typed back from paper.
+        recoverySecret = RecoverySecret.parse(
+          recoverySecretText.replaceAll(RegExp(r'\s'), ''),
+        );
       } on FormatException {
         throw FormatException(
           UserText.of(
