@@ -374,23 +374,200 @@ class _TransferProgressIndicator extends StatelessWidget {
           FileTransferDirection.download => Icons.arrow_downward,
           null => Icons.sync,
         };
-        final content = Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(directionIcon, size: dense ? 18 : 16),
-            const SizedBox(width: 2),
-            Text('$percent%'),
-          ],
-        );
-        if (dense) return Tooltip(message: label, child: content);
-        return Tooltip(
-          message: label,
-          child: Chip(
-            avatar: Icon(directionIcon, size: 18),
-            label: Text('$percent%'),
-          ),
+        void open() => unawaited(_showTransfersPanel(context, controller));
+        if (dense) {
+          return Tooltip(
+            message: label,
+            child: InkWell(
+              onTap: open,
+              borderRadius: BorderRadius.circular(16),
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(directionIcon, size: 18),
+                    const SizedBox(width: 2),
+                    Text('$percent%'),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+        return ActionChip(
+          avatar: Icon(directionIcon, size: 18),
+          label: Text('$percent%'),
+          tooltip: label,
+          onPressed: open,
         );
       },
+    );
+  }
+}
+
+/// Shown in the header while finished transfers failed and the user has
+/// not opened the Transfers panel since, so a failure outlives its
+/// snackbar.
+class _TransferFailuresIndicator extends StatelessWidget {
+  const _TransferFailuresIndicator({
+    required this.filesController,
+    this.dense = false,
+  });
+
+  final FilesController filesController;
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final failed = filesController.unseenFailedTransfers;
+    final label = _localized(
+      context,
+      en: failed == 1 ? '1 transfer failed' : '$failed transfers failed',
+      ru: 'Ошибки передачи: $failed',
+    );
+    return _headerStatusIndicator(
+      icon: Icons.sync_problem_outlined,
+      label: label,
+      color: Theme.of(context).colorScheme.error,
+      dense: dense,
+      onTap: () => unawaited(_showTransfersPanel(context, filesController)),
+    );
+  }
+}
+
+/// The Transfers panel: the running transfer with its progress, queued
+/// ones, and the recent finished ones with any error.
+Future<void> _showTransfersPanel(
+  BuildContext context,
+  FilesController controller,
+) {
+  controller.markTransfersSeen();
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    constraints: const BoxConstraints(maxWidth: 640),
+    builder: (context) => DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.5,
+      maxChildSize: 0.9,
+      builder: (context, scrollController) => AnimatedBuilder(
+        animation: controller,
+        builder: (context, _) {
+          final records = controller.transfers;
+          final hasFinished = records.any((record) => record.finished);
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 0, 16, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _localized(context, en: 'Transfers', ru: 'Передачи'),
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: hasFinished
+                          ? controller.clearFinishedTransfers
+                          : null,
+                      child: Text(
+                        _localized(
+                          context,
+                          en: 'Clear finished',
+                          ru: 'Очистить завершённые',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: records.isEmpty
+                    ? Center(
+                        child: Text(
+                          _localized(
+                            context,
+                            en: 'No uploads or downloads yet.',
+                            ru: 'Загрузок и скачиваний пока не было.',
+                          ),
+                        ),
+                      )
+                    : ListView.builder(
+                        controller: scrollController,
+                        itemCount: records.length,
+                        itemBuilder: (context, index) => _TransferTile(
+                          record: records[index],
+                          controller: controller,
+                        ),
+                      ),
+              ),
+            ],
+          );
+        },
+      ),
+    ),
+  );
+}
+
+final class _TransferTile extends StatelessWidget {
+  const _TransferTile({required this.record, required this.controller});
+
+  final TransferRecord record;
+  final FilesController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final upload = record.direction == FileTransferDirection.upload;
+    final direction = upload
+        ? _localized(context, en: 'Upload', ru: 'Отправка')
+        : _localized(context, en: 'Download', ru: 'Скачивание');
+    final finishedAt = record.finishedAt;
+    final (Widget leading, String status) = switch (record.state) {
+      TransferState.queued => (
+        const Icon(Icons.schedule),
+        _localized(context, en: 'Waiting', ru: 'В очереди'),
+      ),
+      TransferState.running => (
+        Icon(upload ? Icons.arrow_upward : Icons.arrow_downward),
+        '${_transferProgressPercent(controller)}%',
+      ),
+      TransferState.succeeded => (
+        Icon(Icons.check_circle_outline, color: _successColor(context)),
+        _localized(context, en: 'Done', ru: 'Готово'),
+      ),
+      TransferState.failed => (
+        Icon(Icons.error_outline, color: scheme.error),
+        record.error ?? _localized(context, en: 'Failed', ru: 'Ошибка'),
+      ),
+    };
+    return ListTile(
+      leading: leading,
+      title: Text(record.label, overflow: TextOverflow.ellipsis),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            [
+              direction,
+              status,
+              if (finishedAt != null)
+                _formatRelativeTime(context, finishedAt, DateTime.now()),
+            ].join(' · '),
+            style: record.state == TransferState.failed
+                ? TextStyle(color: scheme.error)
+                : null,
+          ),
+          if (record.state == TransferState.running) ...[
+            const SizedBox(height: 4),
+            LinearProgressIndicator(value: controller.progress),
+          ],
+        ],
+      ),
     );
   }
 }

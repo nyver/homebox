@@ -123,4 +123,89 @@ void main() {
     expect(engine.pendingChangeCount, 0);
     expect(engine.lastSyncedAt, isNotNull);
   });
+
+  test('files sort by size and any order can be reversed', () async {
+    final (_, files) = await _setUp();
+    final dir = await Directory.systemTemp.createTemp('homebox_ux_sizes_');
+    addTearDown(() => dir.delete(recursive: true));
+    for (final (name, length) in [
+      ('small.txt', 1),
+      ('big.txt', 300),
+      ('mid.txt', 20),
+    ]) {
+      final file = File('${dir.path}${Platform.pathSeparator}$name');
+      await file.writeAsString('x' * length);
+      expect(await files.uploadFile(file.path), isTrue);
+    }
+    expect(await files.createFolder('B folder'), isTrue);
+    expect(await files.createFolder('A folder'), isTrue);
+
+    files.setSort(FileListSort.size);
+    expect(_names(files.entries), [
+      'A folder',
+      'B folder',
+      'big.txt',
+      'mid.txt',
+      'small.txt',
+    ]);
+
+    files.toggleSortReversed();
+    expect(files.sortReversed, isTrue);
+    // Folders stay first and alphabetical for non-name orders.
+    expect(_names(files.entries), [
+      'A folder',
+      'B folder',
+      'small.txt',
+      'mid.txt',
+      'big.txt',
+    ]);
+
+    files.setSort(FileListSort.name);
+    expect(files.sortReversed, isFalse, reason: 'a new order starts natural');
+    files.toggleSortReversed();
+    expect(_names(files.entries), [
+      'B folder',
+      'A folder',
+      'small.txt',
+      'mid.txt',
+      'big.txt',
+    ]);
+  });
+
+  test('a file waiting to upload a change is marked until it syncs', () async {
+    final (engine, files) = await _setUp();
+    expect(await files.uploadFile(await _localFile('draft.txt')), isTrue);
+    FileEntry draft() => files.entries.single;
+    expect(files.syncStateOf(draft()), FileSyncState.serverOnly);
+
+    expect(await files.renameNode(draft(), 'final.txt'), isTrue);
+    expect(files.syncStateOf(draft()), FileSyncState.pendingUpload);
+
+    await engine.runOnce();
+    await files.refresh();
+    expect(files.syncStateOf(draft()), FileSyncState.serverOnly);
+  });
+
+  test('transfers are logged, and failures stay visible until seen', () async {
+    final (_, files) = await _setUp();
+    expect(await files.uploadFile(await _localFile('ok.txt')), isTrue);
+    final missing =
+        '${Directory.systemTemp.path}${Platform.pathSeparator}homebox-missing-${DateTime.now().microsecondsSinceEpoch}.txt';
+    expect(await files.uploadFile(missing), isFalse);
+
+    final records = files.transfers;
+    expect(records.map((r) => r.state), [
+      TransferState.failed,
+      TransferState.succeeded,
+    ]);
+    expect(records.first.label, endsWith('.txt'));
+    expect(records.first.error, isNotNull);
+    expect(files.unseenFailedTransfers, 1);
+
+    files.markTransfersSeen();
+    expect(files.unseenFailedTransfers, 0);
+
+    files.clearFinishedTransfers();
+    expect(files.transfers, isEmpty);
+  });
 }

@@ -65,7 +65,30 @@ String _fileSortLabel(BuildContext context, FileListSort sort) =>
         en: 'Date updated',
         ru: 'Дата изменения',
       ),
+      FileListSort.size => _localized(context, en: 'Size', ru: 'Размер'),
     };
+
+/// The small badge telling where a file's content is; null when there is
+/// nothing worth saying (no local folder in use and nothing pending).
+(IconData, String)? _fileSyncBadge(
+  BuildContext context,
+  FileSyncState state, {
+  required bool hasSyncFolder,
+}) => switch (state) {
+  FileSyncState.pendingUpload => (
+    Icons.cloud_upload_outlined,
+    _localized(context, en: 'Waiting to upload', ru: 'Ожидает отправки'),
+  ),
+  FileSyncState.onThisDevice => (
+    Icons.offline_pin_outlined,
+    _localized(context, en: 'On this device', ru: 'На этом устройстве'),
+  ),
+  FileSyncState.serverOnly when hasSyncFolder => (
+    Icons.cloud_outlined,
+    _localized(context, en: 'On the server only', ru: 'Только на сервере'),
+  ),
+  FileSyncState.serverOnly => null,
+};
 
 String _formatFileSize(BuildContext context, int bytes) {
   final units = _localized(
@@ -159,29 +182,35 @@ IconData _fileTypeIcon(String fileName) {
   };
 }
 
-Widget _fileTypeListIcon(BuildContext context, String fileName) =>
-    SizedBox.square(
-      dimension: _fileListLeadingSize,
-      child: Icon(
-        _fileTypeIcon(fileName),
-        size: _fileListLeadingSize * 0.8,
-        color: Theme.of(context).colorScheme.onSurfaceVariant,
-      ),
-    );
+Widget _fileTypeListIcon(
+  BuildContext context,
+  String fileName, {
+  double size = _fileListLeadingSize,
+}) => SizedBox.square(
+  dimension: size,
+  child: Icon(
+    _fileTypeIcon(fileName),
+    size: size * 0.8,
+    color: Theme.of(context).colorScheme.onSurfaceVariant,
+  ),
+);
 
-Widget _folderListIcon(BuildContext context, {required bool shared}) =>
-    SizedBox.square(
-      dimension: _fileListLeadingSize,
-      child: Icon(
-        shared ? Icons.folder_shared : Icons.folder,
-        size: _fileListLeadingSize,
-        color: Theme.of(context).colorScheme.primary,
-        // A folder this account shares with family members (spec §28).
-        semanticLabel: shared
-            ? _localized(context, en: 'Shared folder', ru: 'Общая папка')
-            : null,
-      ),
-    );
+Widget _folderListIcon(
+  BuildContext context, {
+  required bool shared,
+  double size = _fileListLeadingSize,
+}) => SizedBox.square(
+  dimension: size,
+  child: Icon(
+    shared ? Icons.folder_shared : Icons.folder,
+    size: size,
+    color: Theme.of(context).colorScheme.primary,
+    // A folder this account shares with family members (spec §28).
+    semanticLabel: shared
+        ? _localized(context, en: 'Shared folder', ru: 'Общая папка')
+        : null,
+  ),
+);
 
 // Shows a decrypted, downscaled image thumbnail when it is inexpensive to
 /// fetch. All other files, including unsupported image encodings, retain the
@@ -193,10 +222,15 @@ Widget _folderListIcon(BuildContext context, {required bool shared}) =>
 /// making every thumbnail flicker. The row keeps its own bytes and only asks
 /// again when the file or its content version changes.
 class _FileListLeading extends StatefulWidget {
-  const _FileListLeading({required this.entry, required this.controller});
+  const _FileListLeading({
+    required this.entry,
+    required this.controller,
+    this.size = _fileListLeadingSize,
+  });
 
   final FileEntry entry;
   final FilesController controller;
+  final double size;
 
   @override
   State<_FileListLeading> createState() => _FileListLeadingState();
@@ -257,22 +291,27 @@ class _FileListLeadingState extends State<_FileListLeading> {
   @override
   Widget build(BuildContext context) {
     final bytes = _bytes;
-    if (bytes == null) return _fileTypeListIcon(context, widget.entry.name);
+    final size = widget.size;
+    if (bytes == null) {
+      return _fileTypeListIcon(context, widget.entry.name, size: size);
+    }
+    // Decoded at device pixels for the display size, not the full image.
+    final pixels = (size * MediaQuery.devicePixelRatioOf(context)).round();
     return SizedBox.square(
-      dimension: _fileListLeadingSize,
+      dimension: size,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(6),
         child: Image(
           image: ResizeImage(
             MemoryImage(bytes),
-            width: 132,
-            height: 132,
+            width: pixels,
+            height: pixels,
             policy: ResizeImagePolicy.fit,
           ),
           fit: BoxFit.cover,
           gaplessPlayback: true,
           errorBuilder: (context, error, stackTrace) =>
-              _fileTypeListIcon(context, widget.entry.name),
+              _fileTypeListIcon(context, widget.entry.name, size: size),
         ),
       ),
     );
@@ -1555,9 +1594,37 @@ final class _FilesSectionState extends State<_FilesSection> {
       controller.toggleSelection(entry);
     } else if (entry.isDirectory) {
       controller.openFolder(entry);
+    } else if (controller.canShowImagePreview(entry)) {
+      unawaited(_openImageViewer(context, controller, entry));
     } else {
       unawaited(_openOrDownloadFile(context, entry));
     }
+  }
+
+  /// Opens the in-app viewer on [entry], paging through every viewable
+  /// image of the open folder.
+  Future<void> _openImageViewer(
+    BuildContext context,
+    FilesController controller,
+    FileEntry entry,
+  ) {
+    final images = [
+      for (final candidate in controller.entries)
+        if (controller.canShowImagePreview(candidate)) candidate,
+    ];
+    return _openPage(
+      context,
+      (_) => _ImageViewerPage(
+        controller: controller,
+        images: images,
+        initialIndex: images.indexWhere((e) => e.node.id == entry.node.id),
+        onSaveAs: (image) => _downloadFile(context, image),
+        onOpenExternally: (image) => _openOrDownloadFile(context, image),
+        onShare: widget.androidFileSharer == null
+            ? null
+            : (image) => _shareFile(context, image),
+      ),
+    );
   }
 
   /// Whether a keyboard command applies right now. A command that does not
@@ -1764,18 +1831,38 @@ final class _FilesSectionState extends State<_FilesSection> {
             ),
           );
         } else {
-          body = ListView.separated(
-            // Always scrollable (not just when content overflows) so the
-            // pull-to-refresh gesture below still has room to register on
-            // a short list.
-            physics: const AlwaysScrollableScrollPhysics(),
-            // Room for the add button so it never hides the last row.
-            padding: EdgeInsets.only(bottom: android ? 88 : 0),
-            itemCount: controller.entries.length,
-            separatorBuilder: (context, _) => const Divider(height: 1),
-            itemBuilder: (context, index) =>
-                _buildEntryTile(context, controller, controller.entries[index]),
-          );
+          body = controller.viewMode == FileViewMode.grid
+              ? GridView.builder(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: EdgeInsets.only(bottom: android ? 88 : 0),
+                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 160,
+                    mainAxisExtent: 172,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                  ),
+                  itemCount: controller.entries.length,
+                  itemBuilder: (context, index) => _buildEntryGridTile(
+                    context,
+                    controller,
+                    controller.entries[index],
+                  ),
+                )
+              : ListView.separated(
+                  // Always scrollable (not just when content overflows) so
+                  // the pull-to-refresh gesture below still has room to
+                  // register on a short list.
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  // Room for the add button so it never hides the last row.
+                  padding: EdgeInsets.only(bottom: android ? 88 : 0),
+                  itemCount: controller.entries.length,
+                  separatorBuilder: (context, _) => const Divider(height: 1),
+                  itemBuilder: (context, index) => _buildEntryTile(
+                    context,
+                    controller,
+                    controller.entries[index],
+                  ),
+                );
         }
         final page = _PageFrame(
           title: _localized(context, en: 'Files', ru: 'Файлы'),
@@ -1881,6 +1968,174 @@ final class _FilesSectionState extends State<_FilesSection> {
     );
   }
 
+  /// "size • Updated …", led by an icon telling where the file is.
+  Widget _entrySubtitle(
+    BuildContext context,
+    FilesController controller,
+    FileEntry entry,
+  ) {
+    final text = _fileEntrySubtitle(context, entry, controller.entriesAsOf);
+    final badge = _fileSyncBadge(
+      context,
+      controller.syncStateOf(entry),
+      hasSyncFolder: widget.syncFolder != null,
+    );
+    if (badge == null) return Text(text);
+    final (icon, label) = badge;
+    return Text.rich(
+      TextSpan(
+        children: [
+          WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: Tooltip(
+              message: label,
+              child: Icon(icon, size: 14, semanticLabel: label),
+            ),
+          ),
+          TextSpan(text: ' $text'),
+        ],
+      ),
+    );
+  }
+
+  /// One item of the grid view: a large thumbnail or icon with its name,
+  /// and the same tap, long-press and context-menu behavior as a list row.
+  Widget _buildEntryGridTile(
+    BuildContext context,
+    FilesController controller,
+    FileEntry entry,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final familyVault = widget.familyVault;
+    final selecting = controller.selectionMode;
+    final selected = controller.isSelected(entry);
+    final favorite = controller.isFavorite(entry);
+    final badge = entry.isDirectory
+        ? null
+        : _fileSyncBadge(
+            context,
+            controller.syncStateOf(entry),
+            hasSyncFolder: widget.syncFolder != null,
+          );
+    return GestureDetector(
+      onSecondaryTapUp: (details) =>
+          unawaited(_showContextMenu(context, entry, details.globalPosition)),
+      child: Tooltip(
+        message: entry.name,
+        waitDuration: const Duration(milliseconds: 600),
+        child: Material(
+          color: selecting && selected
+              ? scheme.secondaryContainer
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: () => _onEntryTap(context, entry),
+            onLongPress: () => controller.toggleSelection(entry),
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Column(
+                children: [
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        Center(
+                          child: entry.isDirectory
+                              ? _folderListIcon(
+                                  context,
+                                  shared:
+                                      familyVault?.isShared(entry.node.id) ??
+                                      false,
+                                  size: 88,
+                                )
+                              : _FileListLeading(
+                                  entry: entry,
+                                  controller: controller,
+                                  size: 104,
+                                ),
+                        ),
+                        if (selecting)
+                          Positioned(
+                            top: 0,
+                            left: 0,
+                            child: Checkbox(
+                              value: selected,
+                              onChanged: (_) =>
+                                  controller.toggleSelection(entry),
+                              semanticLabel: _localized(
+                                context,
+                                en: 'Select ${entry.name}',
+                                ru: 'Выбрать ${entry.name}',
+                              ),
+                            ),
+                          )
+                        else
+                          Positioned(
+                            top: 0,
+                            right: 0,
+                            child: PopupMenuButton<String>(
+                              tooltip: _localized(
+                                context,
+                                en: 'More actions',
+                                ru: 'Другие действия',
+                              ),
+                              onSelected: (value) =>
+                                  _onEntryMenuSelected(context, entry, value),
+                              itemBuilder: (context) =>
+                                  _entryMenuItems(context, entry),
+                            ),
+                          ),
+                        if (favorite)
+                          const Positioned(
+                            left: 4,
+                            bottom: 4,
+                            child: Icon(
+                              Icons.star,
+                              size: 18,
+                              color: Colors.amber,
+                            ),
+                          ),
+                        if (entry.isConflictCopy)
+                          Positioned(
+                            left: favorite ? 24 : 4,
+                            bottom: 4,
+                            child: Icon(
+                              Icons.call_split,
+                              size: 18,
+                              color: scheme.tertiary,
+                            ),
+                          ),
+                        if (badge != null)
+                          Positioned(
+                            right: 4,
+                            bottom: 4,
+                            child: Icon(
+                              badge.$1,
+                              size: 18,
+                              semanticLabel: badge.$2,
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    entry.name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildEntryTile(
     BuildContext context,
     FilesController controller,
@@ -1951,7 +2206,7 @@ final class _FilesSectionState extends State<_FilesSection> {
             : Text(entry.name),
         subtitle: entry.isDirectory
             ? null
-            : Text(_fileEntrySubtitle(context, entry, controller.entriesAsOf)),
+            : _entrySubtitle(context, controller, entry),
         onTap: () => _onEntryTap(context, entry),
         // A long press starts selecting, as in other file managers.
         onLongPress: () => controller.toggleSelection(entry),
@@ -2012,24 +2267,57 @@ final class _FilesSectionState extends State<_FilesSection> {
           icon: const Icon(Icons.checklist),
           tooltip: _localized(context, en: 'Select', ru: 'Выбрать'),
         ),
-      PopupMenuButton<FileListSort>(
+      IconButton(
+        onPressed: () => controller.setViewMode(
+          controller.viewMode == FileViewMode.list
+              ? FileViewMode.grid
+              : FileViewMode.list,
+        ),
+        icon: Icon(
+          controller.viewMode == FileViewMode.list
+              ? Icons.grid_view_outlined
+              : Icons.view_list_outlined,
+        ),
+        tooltip: controller.viewMode == FileViewMode.list
+            ? _localized(context, en: 'Show as grid', ru: 'Показать сеткой')
+            : _localized(context, en: 'Show as list', ru: 'Показать списком'),
+      ),
+      PopupMenuButton<Object>(
         tooltip: _localized(context, en: 'Sort', ru: 'Сортировка'),
         icon: const Icon(Icons.sort),
-        onSelected: controller.setSort,
-        itemBuilder: (context) => FileListSort.values
-            .map(
-              (sort) => CheckedPopupMenuItem<FileListSort>(
-                value: sort,
-                checked: sort == controller.sort,
-                child: Text(_fileSortLabel(context, sort)),
-              ),
-            )
-            .toList(growable: false),
+        onSelected: (value) => value is FileListSort
+            ? controller.setSort(value)
+            : controller.toggleSortReversed(),
+        itemBuilder: (context) => [
+          for (final sort in FileListSort.values)
+            CheckedPopupMenuItem<Object>(
+              value: sort,
+              checked: sort == controller.sort,
+              child: Text(_fileSortLabel(context, sort)),
+            ),
+          const PopupMenuDivider(),
+          CheckedPopupMenuItem<Object>(
+            value: #reverse,
+            checked: controller.sortReversed,
+            child: Text(
+              _localized(context, en: 'Reverse order', ru: 'Обратный порядок'),
+            ),
+          ),
+        ],
       ),
       IconButton(
         onPressed: () => _openTrash(context),
         icon: const Icon(Icons.delete_outline),
         tooltip: _localized(context, en: 'Trash', ru: 'Корзина'),
+      ),
+      IconButton(
+        onPressed: () => unawaited(_showTransfersPanel(context, controller)),
+        icon: Badge(
+          isLabelVisible: controller.unseenFailedTransfers > 0,
+          label: Text('${controller.unseenFailedTransfers}'),
+          child: const Icon(Icons.swap_vert),
+        ),
+        tooltip: _localized(context, en: 'Transfers', ru: 'Передачи'),
       ),
     ];
     if (android) {

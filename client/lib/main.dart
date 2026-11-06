@@ -51,6 +51,7 @@ part 'ui/bulk_actions.dart';
 part 'ui/family_section.dart';
 part 'ui/file_history.dart';
 part 'ui/files_section.dart';
+part 'ui/image_viewer.dart';
 part 'ui/settings_section.dart';
 part 'ui/setup_guide.dart';
 part 'ui/shell_widgets.dart';
@@ -708,6 +709,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
       if (localChange && !android) await uploader.scan(folder);
       await materializer.materialize(folder);
       if (!localChange && !android) await uploader.scan(folder);
+      // Which files are now on disk changed; update their Files badges.
+      _filesController?.refreshSyncStates();
     } finally {
       _syncFolderPassRunning = false;
       _syncFolderPassDone = null;
@@ -1106,6 +1109,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
         dense: dense,
         spacing: spacing,
         showTransfer: filesController?.busy ?? false,
+        showTransferFailures: (filesController?.unseenFailedTransfers ?? 0) > 0,
         showSyncFolderTransfer:
             materializer?.transferProgress != null ||
             uploader?.transferProgress != null,
@@ -1118,11 +1122,18 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     required double spacing,
     required bool showTransfer,
     required bool showSyncFolderTransfer,
+    bool showTransferFailures = false,
   }) {
+    final filesController = _filesController;
     final children = [
       if (showTransfer)
         _TransferProgressIndicator(
           filesController: _filesController,
+          dense: dense,
+        ),
+      if (showTransferFailures && !showTransfer && filesController != null)
+        _TransferFailuresIndicator(
+          filesController: filesController,
           dense: dense,
         ),
       if (showSyncFolderTransfer)

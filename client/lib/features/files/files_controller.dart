@@ -42,7 +42,49 @@ enum FilesStatus { idle, loading, ready, failed }
 /// saying "upload" even while a download is in progress.
 enum FileTransferDirection { upload, download }
 
-enum FileListSort { name, extension, updatedAt }
+/// File order. Each has a natural direction (A→Z, newest first, largest
+/// first) that [FilesController.sortReversed] flips.
+enum FileListSort { name, extension, updatedAt, size }
+
+/// Where a file's current content is, from this device's point of view.
+enum FileSyncState {
+  /// A local change to it is still waiting to reach the server.
+  pendingUpload,
+
+  /// Its current version is in the local sync folder.
+  onThisDevice,
+
+  /// Only on the server; opening it downloads it.
+  serverOnly,
+}
+
+/// How the Files page lays out the open folder.
+enum FileViewMode { list, grid }
+
+enum TransferState { queued, running, succeeded, failed }
+
+/// One upload or download as shown in the Transfers panel.
+final class TransferRecord {
+  TransferRecord._(this.id, this.label, this.direction);
+
+  /// Increases with every transfer this controller starts.
+  final int id;
+
+  /// A file name, or a count such as "3 files" for a batch.
+  final String label;
+  final FileTransferDirection direction;
+  TransferState _state = TransferState.queued;
+  String? _error;
+  DateTime? _finishedAt;
+
+  TransferState get state => _state;
+
+  /// Why it failed, when [state] is [TransferState.failed].
+  String? get error => _error;
+  DateTime? get finishedAt => _finishedAt;
+  bool get finished =>
+      _state == TransferState.succeeded || _state == TransferState.failed;
+}
 
 /// The picker and desktop file APIs only provide a path, so preserve the
 /// common image formats in encrypted metadata ourselves. The filename
@@ -466,11 +508,80 @@ final class FilesController extends ChangeNotifier {
 
   /// Updates the local display ordering without reloading or decrypting the
   /// current folder again. Directories always remain before regular files.
+  /// Choosing another order starts in its natural direction.
   void setSort(FileListSort sort) {
     if (_sort == sort) return;
     _sort = sort;
+    _sortReversed = false;
     _entries = List<FileEntry>.of(_entries)..sort(_compareEntries);
     notifyListeners();
+  }
+
+  bool _sortReversed = false;
+
+  /// Whether [sort]'s natural direction is flipped (e.g. Z→A, oldest first).
+  bool get sortReversed => _sortReversed;
+
+  void toggleSortReversed() {
+    _sortReversed = !_sortReversed;
+    _entries = List<FileEntry>.of(_entries)..sort(_compareEntries);
+    notifyListeners();
+  }
+
+  FileViewMode _viewMode = FileViewMode.list;
+  FileViewMode get viewMode => _viewMode;
+
+  void setViewMode(FileViewMode mode) {
+    if (_viewMode == mode) return;
+    _viewMode = mode;
+    notifyListeners();
+  }
+
+  Set<String> _pendingNodeIds = const {};
+  Set<String> _mirroredNodeIds = const {};
+
+  /// Where [entry]'s content currently is; see [FileSyncState]. Without a
+  /// local sync folder every synced file is [FileSyncState.serverOnly].
+  FileSyncState syncStateOf(FileEntry entry) {
+    final id = entry.node.id;
+    if (_pendingNodeIds.contains(id)) return FileSyncState.pendingUpload;
+    if (_mirroredNodeIds.contains(id)) return FileSyncState.onThisDevice;
+    return FileSyncState.serverOnly;
+  }
+
+  /// Re-reads which listed files are waiting to upload or mirrored on disk,
+  /// without decrypting the folder again. Called after every refresh and
+  /// after each local sync-folder pass, which changes the latter.
+  void refreshSyncStates() {
+    if (_disposed) return;
+    final pending = _syncEngine.pendingOperations
+        .nodeIdsWithUnfinishedOperations();
+    final mirrored = <String>{
+      for (final entry in _entries)
+        if (!entry.isDirectory &&
+            _syncEngine.materializedFiles
+                    .getById(entry.node.id)
+                    ?.contentVersionId ==
+                entry.node.currentVersionId)
+          entry.node.id,
+    };
+    if (setEquals(pending, _pendingNodeIds) &&
+        setEquals(mirrored, _mirroredNodeIds)) {
+      return;
+    }
+    _pendingNodeIds = pending;
+    _mirroredNodeIds = mirrored;
+    if (!_disposed) notifyListeners();
+  }
+
+  /// The full decrypted image for the in-app viewer: the mirrored local copy
+  /// when it is current, else a bounded download. Null when [entry] is not a
+  /// previewable image or cannot be loaded; the caller then opens it with
+  /// another app instead.
+  Future<Uint8List?> fullImage(FileEntry entry) async {
+    if (!canShowImagePreview(entry)) return null;
+    return await _readLocalImagePreview(entry) ??
+        await _fetchImagePreview(entry);
   }
 
   String? get _currentParentId => _path.isEmpty ? null : _path.last.id;
@@ -513,6 +624,7 @@ final class FilesController extends ChangeNotifier {
         decrypted.sort(_compareEntries);
         _entries = decrypted;
         _favoriteIds = _syncEngine.favorites.all();
+        refreshSyncStates();
         // Drop selected entries that disappeared, e.g. deleted elsewhere.
         _selectedIds.retainAll(decrypted.map((entry) => entry.node.id));
         _entriesAsOf = DateTime.now().toUtc();
@@ -899,10 +1011,18 @@ final class FilesController extends ChangeNotifier {
     // earlier transfers or a large drop are uploading, but that must not
     // move these files elsewhere.
     final targetParentId = _currentParentId;
-    return _runTransfer(FileTransferDirection.upload, () async {
-      _errorMessage = null;
-      return _uploadBatch(uniquePaths, targetParentId, fileNames);
-    });
+    final first = uniquePaths.first;
+    return _runTransfer(
+      FileTransferDirection.upload,
+      () async {
+        _errorMessage = null;
+        return _uploadBatch(uniquePaths, targetParentId, fileNames);
+      },
+      label: uniquePaths.length == 1
+          ? fileNames[first] ?? basenameOfLocalPath(first)
+          : _countLabel(uniquePaths.length, files: true),
+      succeeded: (result) => result.failed == 0,
+    );
   }
 
   Future<FileUploadBatchResult> _uploadBatch(
@@ -949,13 +1069,53 @@ final class FilesController extends ChangeNotifier {
     }
   }
 
+  /// How many finished transfers the Transfers panel keeps.
+  static const int _maxFinishedTransfers = 50;
+
+  final List<TransferRecord> _transfers = [];
+  int _nextTransferId = 1;
+  int _transfersSeenUpTo = 0;
+
+  /// Active and recent transfers, newest first.
+  List<TransferRecord> get transfers => List.unmodifiable(_transfers.reversed);
+
+  /// Failed transfers the user has not looked at in the Transfers panel
+  /// yet, so a failure stays noticeable after its snackbar is gone.
+  int get unseenFailedTransfers => _transfers
+      .where(
+        (record) =>
+            record.state == TransferState.failed &&
+            record.id > _transfersSeenUpTo,
+      )
+      .length;
+
+  void markTransfersSeen() {
+    if (unseenFailedTransfers == 0) {
+      _transfersSeenUpTo = _nextTransferId - 1;
+      return;
+    }
+    _transfersSeenUpTo = _nextTransferId - 1;
+    if (!_disposed) notifyListeners();
+  }
+
+  void clearFinishedTransfers() {
+    _transfers.removeWhere((record) => record.finished);
+    if (!_disposed) notifyListeners();
+  }
+
   /// Runs [body] as the next file transfer, after every transfer requested
   /// before it has finished. The busy flag and progress belong to whichever
   /// transfer is running; [queuedTransfers] counts the ones still waiting.
+  /// The transfer is recorded under [label]; [succeeded] tells from its
+  /// result whether it worked, and a failure keeps [errorMessage].
   Future<T> _runTransfer<T>(
     FileTransferDirection direction,
-    Future<T> Function() body,
-  ) async {
+    Future<T> Function() body, {
+    required String label,
+    required bool Function(T result) succeeded,
+  }) async {
+    final record = TransferRecord._(_nextTransferId++, label, direction);
+    _transfers.add(record);
     final previous = _transferTail;
     final done = Completer<void>();
     _transferTail = done.future;
@@ -966,14 +1126,43 @@ final class FilesController extends ChangeNotifier {
     } finally {
       _queuedTransfers--;
     }
+    record._state = TransferState.running;
     _setBusy(true, direction: direction);
+    var ok = false;
     try {
-      return await body();
+      final result = await body();
+      ok = succeeded(result);
+      return result;
     } finally {
+      record
+        .._state = ok ? TransferState.succeeded : TransferState.failed
+        .._error = ok ? null : _errorMessage
+        .._finishedAt = DateTime.now().toUtc();
+      _trimFinishedTransfers();
       _setBusy(false);
       done.complete();
     }
   }
+
+  void _trimFinishedTransfers() {
+    var finished = _transfers.where((record) => record.finished).length;
+    for (
+      var i = 0;
+      i < _transfers.length && finished > _maxFinishedTransfers;
+    ) {
+      if (_transfers[i].finished) {
+        _transfers.removeAt(i);
+        finished--;
+      } else {
+        i++;
+      }
+    }
+  }
+
+  static String _countLabel(int count, {required bool files}) => UserText.of(
+    en: files ? '$count files' : '$count items',
+    ru: files ? 'Файлов: $count' : 'Элементов: $count',
+  );
 
   Future<void> _uploadFileToParent({
     required String localPath,
@@ -1064,6 +1253,8 @@ final class FilesController extends ChangeNotifier {
     return _runTransfer(
       FileTransferDirection.upload,
       () => _replaceFileContent(entry, localPath),
+      label: entry.name,
+      succeeded: (ok) => ok,
     );
   }
 
@@ -1144,6 +1335,8 @@ final class FilesController extends ChangeNotifier {
       _runTransfer(
         FileTransferDirection.download,
         () => _downloadFile(entry, destinationPath),
+        label: entry.name,
+        succeeded: (ok) => ok,
       );
 
   Future<bool> _downloadFile(FileEntry entry, String destinationPath) async {
@@ -1364,60 +1557,70 @@ final class FilesController extends ChangeNotifier {
     FileEntry entry,
     FileVersionEntry version,
     String destinationPath,
-  ) => _runTransfer(FileTransferDirection.download, () async {
-    try {
-      await _downloadVersionTo(entry, version, destinationPath, _setProgress);
-      return true;
-    } catch (e) {
-      // Broad on purpose, as in refresh(): see its comment.
-      _errorMessage = describeError(e);
-      notifyListeners();
-      return false;
-    }
-  });
+  ) => _runTransfer(
+    FileTransferDirection.download,
+    () async {
+      try {
+        await _downloadVersionTo(entry, version, destinationPath, _setProgress);
+        return true;
+      } catch (e) {
+        // Broad on purpose, as in refresh(): see its comment.
+        _errorMessage = describeError(e);
+        notifyListeners();
+        return false;
+      }
+    },
+    label: entry.name,
+    succeeded: (ok) => ok,
+  );
 
   /// Makes [version] the current content of [entry] again by uploading its
   /// decrypted bytes as a new version (spec §27.1: a restore never rewrites
   /// history), so the version it replaces stays in the history too.
   Future<bool> restoreFileVersion(FileEntry entry, FileVersionEntry version) {
     if (entry.isDirectory || version.isCurrent) return Future.value(false);
-    return _runTransfer(FileTransferDirection.upload, () async {
-      Directory? workDirectory;
-      try {
-        workDirectory = await Directory.systemTemp.createTemp(
-          'homebox-restore-',
-        );
-        final restoredPath =
-            '${workDirectory.path}${Platform.pathSeparator}${entry.name}';
+    return _runTransfer(
+      FileTransferDirection.upload,
+      label: entry.name,
+      succeeded: (ok) => ok,
+      () async {
+        Directory? workDirectory;
         try {
-          await _downloadVersionTo(
-            entry,
-            version,
-            restoredPath,
-            (progress) => _setProgress(progress / 2),
+          workDirectory = await Directory.systemTemp.createTemp(
+            'homebox-restore-',
           );
-        } catch (e) {
-          // Broad on purpose, as in refresh(): see its comment.
-          _errorMessage = describeError(e);
-          notifyListeners();
-          return false;
+          final restoredPath =
+              '${workDirectory.path}${Platform.pathSeparator}${entry.name}';
+          try {
+            await _downloadVersionTo(
+              entry,
+              version,
+              restoredPath,
+              (progress) => _setProgress(progress / 2),
+            );
+          } catch (e) {
+            // Broad on purpose, as in refresh(): see its comment.
+            _errorMessage = describeError(e);
+            notifyListeners();
+            return false;
+          }
+          // The newest cached node and its own metadata, so a rename synced
+          // since the dialog opened is kept instead of reverted by the upload.
+          final latest = await _latestEntry(entry);
+          return await _replaceFileContent(
+            latest,
+            restoredPath,
+            onProgress: (progress) => _setProgress(0.5 + progress / 2),
+          );
+        } finally {
+          try {
+            await workDirectory?.delete(recursive: true);
+          } on FileSystemException {
+            // The OS clears a leftover temp copy with its temp directory.
+          }
         }
-        // The newest cached node and its own metadata, so a rename synced
-        // since the dialog opened is kept instead of reverted by the upload.
-        final latest = await _latestEntry(entry);
-        return await _replaceFileContent(
-          latest,
-          restoredPath,
-          onProgress: (progress) => _setProgress(0.5 + progress / 2),
-        );
-      } finally {
-        try {
-          await workDirectory?.delete(recursive: true);
-        } on FileSystemException {
-          // The OS clears a leftover temp copy with its temp directory.
-        }
-      }
-    });
+      },
+    );
   }
 
   Future<FileEntry> _latestEntry(FileEntry entry) async {
@@ -1950,50 +2153,57 @@ final class FilesController extends ChangeNotifier {
     String? zipPath,
   }) {
     assert((directory == null) != (zipPath == null));
-    return _runTransfer(FileTransferDirection.download, () async {
-      final ctx = await _requireContext();
-      if (ctx == null) return null;
-      try {
-        final items = await _collectDownloadItems(entries, ctx);
-        Future<void> download(
-          DownloadItem item,
-          String path,
-          void Function(double progress) onProgress,
-        ) => downloadAndDecryptFileToPath(
-          api: ctx.api,
-          accessToken: ctx.accessToken,
-          keys: ctx.keys.ring,
-          nodeId: item.nodeId!,
-          expectedVersionId: item.versionId,
-          destinationPath: path,
-          expectedPlaintextSha256: item.plaintextSha256,
-          onProgress: onProgress,
-        );
-        final written = zipPath != null
-            ? await downloadItemsAsZip(
-                items: items,
-                zipPath: zipPath,
-                download: download,
-                onProgress: _setProgress,
-              )
-            : await downloadItemsToDirectory(
-                items: items,
-                directory: directory!,
-                download: download,
-                onProgress: _setProgress,
-              );
-        _resetSelectionForNavigation();
-        notifyListeners();
-        return written;
-      } catch (e) {
-        // Broad on purpose, as in refresh(): see its comment.
-        _errorMessage = describeError(e);
-        notifyListeners();
-        return null;
-      } finally {
-        ctx.dispose();
-      }
-    });
+    return _runTransfer(
+      FileTransferDirection.download,
+      label: entries.length == 1
+          ? entries.single.name
+          : _countLabel(entries.length, files: false),
+      succeeded: (written) => written != null,
+      () async {
+        final ctx = await _requireContext();
+        if (ctx == null) return null;
+        try {
+          final items = await _collectDownloadItems(entries, ctx);
+          Future<void> download(
+            DownloadItem item,
+            String path,
+            void Function(double progress) onProgress,
+          ) => downloadAndDecryptFileToPath(
+            api: ctx.api,
+            accessToken: ctx.accessToken,
+            keys: ctx.keys.ring,
+            nodeId: item.nodeId!,
+            expectedVersionId: item.versionId,
+            destinationPath: path,
+            expectedPlaintextSha256: item.plaintextSha256,
+            onProgress: onProgress,
+          );
+          final written = zipPath != null
+              ? await downloadItemsAsZip(
+                  items: items,
+                  zipPath: zipPath,
+                  download: download,
+                  onProgress: _setProgress,
+                )
+              : await downloadItemsToDirectory(
+                  items: items,
+                  directory: directory!,
+                  download: download,
+                  onProgress: _setProgress,
+                );
+          _resetSelectionForNavigation();
+          notifyListeners();
+          return written;
+        } catch (e) {
+          // Broad on purpose, as in refresh(): see its comment.
+          _errorMessage = describeError(e);
+          notifyListeners();
+          return null;
+        } finally {
+          ctx.dispose();
+        }
+      },
+    );
   }
 
   Future<List<DownloadItem>> _collectDownloadItems(
@@ -2122,14 +2332,27 @@ final class FilesController extends ChangeNotifier {
 
   int _compareEntries(FileEntry a, FileEntry b) {
     if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
-    // Folder names always use a predictable alphabetical order. Extension
-    // and date sorts are useful for files, not for navigating folders.
-    if (a.isDirectory) return _compareNames(a, b);
-    return switch (_sort) {
+    // Folder names use a predictable alphabetical order (reversed only for
+    // a reversed name sort). Extension, date and size sorts are useful for
+    // files, not for navigating folders.
+    if (a.isDirectory) {
+      final byName = _compareNames(a, b);
+      return _sort == FileListSort.name && _sortReversed ? -byName : byName;
+    }
+    final result = switch (_sort) {
       FileListSort.name => _compareNames(a, b),
       FileListSort.extension => _compareExtensions(a, b),
       FileListSort.updatedAt => _compareUpdatedAt(a, b),
+      FileListSort.size => _compareSizes(a, b),
     };
+    return _sortReversed ? -result : result;
+  }
+
+  int _compareSizes(FileEntry a, FileEntry b) {
+    final sizeComparison = (b.metadata.plaintextSize ?? 0).compareTo(
+      a.metadata.plaintextSize ?? 0,
+    );
+    return sizeComparison == 0 ? _compareNames(a, b) : sizeComparison;
   }
 
   int _compareNames(FileEntry a, FileEntry b) =>
