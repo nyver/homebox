@@ -172,9 +172,12 @@ final class _BiometricLockScreen extends StatelessWidget {
 /// indicators competing for space. The fuller explanation of what "locked"
 /// means here still lives in Settings, next to vault setup itself.
 class _VaultStateChip extends StatelessWidget {
-  const _VaultStateChip({required this.controller});
+  const _VaultStateChip({required this.controller, this.onTap});
 
   final VaultSetupController controller;
+
+  /// Opens the vault's settings.
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -185,9 +188,14 @@ class _VaultStateChip extends StatelessWidget {
         icon: ready ? Icons.lock_open_outlined : Icons.lock_outline,
         label: ready ? 'Vault unlocked' : 'Vault locked',
         tooltip: ready
-            ? 'This vault was created on this device. A trusted device or Recovery Secret is required on any other device.'
+            ? _localized(
+                context,
+                en: 'Vault unlocked on this device. Open Settings for devices and recovery.',
+                ru: 'Хранилище разблокировано на этом устройстве. Устройства и восстановление — в настройках.',
+              )
             : 'Create or restore this account\'s vault in Settings to unlock E2EE data.',
         dense: true,
+        onTap: onTap,
       );
     },
   );
@@ -196,21 +204,41 @@ class _VaultStateChip extends StatelessWidget {
 /// A [Chip] mirroring [label] when [dense] is false (used in the roomy
 /// desktop header), or a bare tooltipped icon when true (used in the
 /// narrow/Android AppBar, where three side-by-side chips would overflow).
+/// With [onTap] it becomes a button, so a status leads to where it can be
+/// acted on — a tooltip alone is hard to reach on a touch screen.
 Widget _headerStatusIndicator({
   required IconData icon,
   required String label,
   String? tooltip,
   Color? color,
   required bool dense,
+  VoidCallback? onTap,
 }) {
+  final message = tooltip ?? label;
   if (dense) {
+    if (onTap != null) {
+      return IconButton(
+        onPressed: onTap,
+        tooltip: message,
+        visualDensity: VisualDensity.compact,
+        icon: Icon(icon, size: 20, color: color),
+      );
+    }
     return Tooltip(
-      message: tooltip ?? label,
+      message: message,
       child: Icon(icon, size: 20, color: color),
     );
   }
+  if (onTap != null) {
+    return ActionChip(
+      avatar: Icon(icon, size: 18, color: color),
+      label: Text(label),
+      tooltip: message,
+      onPressed: onTap,
+    );
+  }
   return Tooltip(
-    message: tooltip ?? label,
+    message: message,
     child: Chip(
       avatar: Icon(icon, size: 18, color: color),
       label: Text(label),
@@ -225,28 +253,35 @@ class _SyncStatusChip extends StatelessWidget {
     required this.syncEngine,
     required this.syncFolderMaterializer,
     this.dense = false,
+    this.onTap,
   });
 
   final SyncEngine? syncEngine;
   final SyncFolderMaterializer? syncFolderMaterializer;
   final bool dense;
 
+  /// Opens the Sync page, where the status is explained in full.
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
     final engine = syncEngine;
     if (engine == null) {
-      // Matches the label the Sync page itself shows for this same
-      // condition (no engine yet — vault locked/not provisioned).
+      // Not "paused": nothing has been set up to sync yet. Matches the
+      // Sync page's own label for this condition.
       return _headerStatusIndicator(
-        icon: Icons.pause_circle_outline,
-        label: 'Sync paused',
+        icon: Icons.cloud_off_outlined,
+        label: _syncNotSetUpLabel(context),
+        tooltip: _syncNotSetUpHint(context),
         dense: dense,
+        onTap: onTap,
       );
     }
     return AnimatedBuilder(
       animation: Listenable.merge([engine, ?syncFolderMaterializer]),
       builder: (context, _) {
         final (icon, label, color, tooltip) = _effectiveSyncStatusPresentation(
+          context,
           engine: engine,
           materializer: syncFolderMaterializer,
         );
@@ -256,11 +291,24 @@ class _SyncStatusChip extends StatelessWidget {
           tooltip: tooltip,
           color: color,
           dense: dense,
+          onTap: onTap,
         );
       },
     );
   }
 }
+
+String _syncNotSetUpLabel(BuildContext context) => _localized(
+  context,
+  en: 'Sync not set up',
+  ru: 'Синхронизация не настроена',
+);
+
+String _syncNotSetUpHint(BuildContext context) => _localized(
+  context,
+  en: 'Sync starts once this device is connected to a server and its vault is unlocked.',
+  ru: 'Синхронизация начнётся, когда устройство подключится к серверу и хранилище будет разблокировано.',
+);
 
 /// The header counterpart of the Files page's upload/download percentage —
 /// visible from any section, not just while Files is open. Renders nothing
@@ -285,6 +333,7 @@ class _TransferProgressIndicator extends StatelessWidget {
         final percent = _transferProgressPercent(controller);
         final queued = controller.queuedTransfers;
         final progressLabel = _transferProgressLabel(
+          context,
           controller.transferDirection,
           percent,
         );
@@ -340,19 +389,24 @@ class _SyncFolderTransferProgressIndicator extends StatelessWidget {
     final uploadProgress = uploader?.transferProgress;
     final (direction, fileName, progress, icon) = downloadProgress != null
         ? (
-            'Downloading',
-            materializer?.activeFileName ?? 'file',
+            _localized(context, en: 'Downloading', ru: 'Скачивание'),
+            materializer?.activeFileName ?? '',
             downloadProgress,
             Icons.arrow_downward,
           )
         : uploadProgress != null
         ? (
-            'Uploading',
-            uploader?.activeFileName ?? 'file',
+            _localized(context, en: 'Uploading', ru: 'Отправка'),
+            uploader?.activeFileName ?? '',
             uploadProgress,
             Icons.arrow_upward,
           )
-        : ('Syncing', 'file', 0.0, Icons.sync);
+        : (
+            _localized(context, en: 'Syncing', ru: 'Синхронизация'),
+            '',
+            0.0,
+            Icons.sync,
+          );
     final percent = (progress * 100).round().clamp(0, 100);
     final tooltip = '$direction $fileName — $percent%';
     final content = Row(
@@ -403,7 +457,10 @@ class _SectionContent extends StatelessWidget {
     required this.androidFileSharer,
     required this.androidSyncFolder,
     required this.localeController,
+    required this.themeController,
     required this.onPullToRefresh,
+    required this.onRefresh,
+    required this.onOpenSettings,
     required this.onDownloadCompleted,
   });
 
@@ -432,7 +489,10 @@ class _SectionContent extends StatelessWidget {
   final AndroidFileSharer? androidFileSharer;
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController localeController;
+  final AppThemeController themeController;
   final Future<void> Function()? onPullToRefresh;
+  final Future<void> Function() onRefresh;
+  final VoidCallback onOpenSettings;
   final void Function({required String fileName, required String location})
   onDownloadCompleted;
 
@@ -447,11 +507,14 @@ class _SectionContent extends StatelessWidget {
       syncFolder: syncFolder,
       androidSyncFolder: androidSyncFolder,
       onPullToRefresh: onPullToRefresh,
+      onRefresh: onRefresh,
+      onOpenSettings: onOpenSettings,
       onDownloadCompleted: onDownloadCompleted,
     ),
     AppSection.family => _FamilySection(
       controller: familyVaultController,
       androidFileSaver: androidFileSaver,
+      onOpenSettings: onOpenSettings,
     ),
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,
@@ -464,6 +527,7 @@ class _SectionContent extends StatelessWidget {
       onToggleSyncPause: onToggleSyncPause,
       onResyncVault: onResyncVault,
       resyncingVault: resyncingVault,
+      onSyncNow: onRefresh,
     ),
     AppSection.settings => _SettingsSection(
       deviceSetupController: deviceSetupController,
@@ -473,53 +537,77 @@ class _SectionContent extends StatelessWidget {
       recoveryController: recoveryController,
       onVaultProvisioned: onVaultProvisioned,
       localeController: localeController,
+      themeController: themeController,
     ),
   };
 }
 
 /// The server-side icon/label used as the baseline by
 /// [_effectiveSyncStatusPresentation].
-(IconData icon, String label) _syncStatusPresentation(SyncStatus status) =>
-    switch (status) {
-      SyncStatus.idle => (Icons.check_circle_outline, 'Up to date'),
-      SyncStatus.syncing => (Icons.sync, 'Syncing…'),
-      SyncStatus.paused => (Icons.pause_circle_outline, 'Sync paused'),
-      SyncStatus.offline => (Icons.cloud_off_outlined, 'Offline'),
-      SyncStatus.error => (Icons.error_outline, 'Sync error'),
-    };
+(IconData icon, String label) _syncStatusPresentation(
+  BuildContext context,
+  SyncStatus status,
+) => switch (status) {
+  SyncStatus.idle => (
+    Icons.check_circle_outline,
+    _localized(context, en: 'Up to date', ru: 'Синхронизировано'),
+  ),
+  SyncStatus.syncing => (
+    Icons.sync,
+    _localized(context, en: 'Syncing…', ru: 'Синхронизация…'),
+  ),
+  SyncStatus.paused => (
+    Icons.pause_circle_outline,
+    _localized(context, en: 'Sync paused', ru: 'Синхронизация на паузе'),
+  ),
+  SyncStatus.offline => (
+    Icons.cloud_off_outlined,
+    _localized(context, en: 'Offline', ru: 'Нет связи'),
+  ),
+  SyncStatus.error => (
+    Icons.error_outline,
+    _localized(context, en: 'Sync error', ru: 'Ошибка синхронизации'),
+  ),
+};
 
 /// Resolves the status the user sees for the whole synchronization flow. A
 /// completed server pull is not "up to date" while its changed files are
 /// still being written into the selected local sync folder.
 (IconData icon, String label, Color? color, String? tooltip)
-_effectiveSyncStatusPresentation({
+_effectiveSyncStatusPresentation(
+  BuildContext context, {
   required SyncEngine engine,
   SyncFolderMaterializer? materializer,
 }) {
-  final base = _syncStatusPresentation(engine.status);
+  final base = _syncStatusPresentation(context, engine.status);
+  final error = Theme.of(context).colorScheme.error;
   return switch ((engine.status, materializer?.status)) {
     (SyncStatus.error, _) => (
       Icons.error_outline,
-      'Sync error',
-      Colors.red,
+      base.$2,
+      error,
       engine.errorMessage,
     ),
     (_, SyncFolderStatus.error) => (
       Icons.error_outline,
-      'Folder sync error',
-      Colors.red,
+      _localized(
+        context,
+        en: 'Folder sync error',
+        ru: 'Ошибка синхронизации папки',
+      ),
+      error,
       materializer?.errorMessage,
     ),
     (_, SyncFolderStatus.materializing) => (
       Icons.download_outlined,
-      'Writing files…',
+      _localized(context, en: 'Writing files…', ru: 'Запись файлов…'),
       null,
       null,
     ),
     _ => (
       base.$1,
       base.$2,
-      engine.status == SyncStatus.idle ? Colors.green : null,
+      engine.status == SyncStatus.idle ? _successColor(context) : null,
       null,
     ),
   };
@@ -530,22 +618,31 @@ class _PageFrame extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.child,
+    this.subtitleWidget,
   });
   final String title;
   final String subtitle;
+
+  /// Replaces the plain [subtitle] line, e.g. with clickable breadcrumbs.
+  final Widget? subtitleWidget;
   final Widget child;
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.all(32),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(title, style: Theme.of(context).textTheme.headlineMedium),
-        const SizedBox(height: 4),
-        Text(subtitle, style: Theme.of(context).textTheme.bodyMedium),
-        const SizedBox(height: 24),
-        Expanded(child: child),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) {
+    // Phones cannot spare 32 logical pixels on every side.
+    final compact = MediaQuery.sizeOf(context).width < 600;
+    return Padding(
+      padding: EdgeInsets.all(compact ? 16 : 32),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: Theme.of(context).textTheme.headlineMedium),
+          const SizedBox(height: 4),
+          subtitleWidget ??
+              Text(subtitle, style: Theme.of(context).textTheme.bodyMedium),
+          SizedBox(height: compact ? 16 : 24),
+          Expanded(child: child),
+        ],
+      ),
+    );
+  }
 }

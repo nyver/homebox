@@ -144,6 +144,15 @@ final class PendingOperationsStore {
       row['node_id'] as String,
   };
 
+  /// How many local changes are still waiting to reach the server.
+  int get unfinishedOperationCount =>
+      _db
+              .select(
+                "SELECT COUNT(*) AS n FROM pending_operations WHERE status IN ('PENDING', 'RUNNING', 'BLOCKED')",
+              )
+              .first['n']
+          as int;
+
   bool get hasUnfinishedOperations {
     final rows = _db.select(
       "SELECT 1 FROM pending_operations WHERE status IN ('PENDING', 'RUNNING', 'BLOCKED') LIMIT 1",

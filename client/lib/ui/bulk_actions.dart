@@ -77,7 +77,7 @@ Future<({String? id})?> _pickFolder(
                         children: [
                           for (final folder in folders)
                             ListTile(
-                              leading: _folderListIcon,
+                              leading: _folderListIcon(context, shared: false),
                               title: Text(folder.name),
                               enabled: !excludedIds.contains(folder.id),
                               onTap: () => openFolder(folder),
@@ -420,7 +420,9 @@ final class _LocatedEntryList extends StatelessWidget {
       final item = entries[index];
       final entry = item.entry;
       return ListTile(
-        leading: entry.isDirectory ? _folderListIcon : _defaultFileListIcon,
+        leading: entry.isDirectory
+            ? _folderListIcon(context, shared: false)
+            : _fileTypeListIcon(context, entry.name),
         title: Text(entry.name),
         subtitle: Text(
           item.location.isEmpty

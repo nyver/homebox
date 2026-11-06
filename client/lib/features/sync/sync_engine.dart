@@ -110,14 +110,25 @@ final class SyncEngine extends ChangeNotifier {
   bool _paused = false;
   bool _runningNow = false;
   Future<void>? _inFlight;
+
+  /// The pass queued to start once [_inFlight] finishes; see [runOnce].
+  Future<void>? _followUp;
   bool _disposed = false;
   bool _connectionWasAuthenticated = false;
   SyncStatus _status = SyncStatus.idle;
   String? _errorMessage;
+  DateTime? _lastSyncedAt;
 
   SyncStatus get status => _status;
   String? get errorMessage => _errorMessage;
   bool get isPaused => _paused;
+
+  /// When the last pass completed successfully on this run of the app, so
+  /// the user can tell "up to date" from "up to date as of yesterday".
+  DateTime? get lastSyncedAt => _lastSyncedAt;
+
+  /// Local changes not yet pushed to the server.
+  int get pendingChangeCount => pendingOperations.unfinishedOperationCount;
 
   /// Starts periodic background syncing and runs one pass immediately.
   void start({Duration interval = const Duration(seconds: 30)}) {
@@ -155,7 +166,11 @@ final class SyncEngine extends ChangeNotifier {
       if (_paused && !_runningNow) _setStatus(SyncStatus.paused);
       return;
     }
-    _timer = Timer.periodic(_interval, (_) => unawaited(runOnce()));
+    // A tick during a long pass is simply skipped: nothing new was queued,
+    // so it must not chain a follow-up pass the way runOnce() does.
+    _timer = Timer.periodic(_interval, (_) {
+      if (_inFlight == null) unawaited(runOnce());
+    });
     unawaited(runOnce());
   }
 
@@ -175,18 +190,28 @@ final class SyncEngine extends ChangeNotifier {
   }
 
   /// Pushes pending operations, then pulls remote changes. Safe to call
-  /// concurrently — a run already in flight is not duplicated, but every
-  /// caller's returned future still only completes once that shared run
-  /// actually finishes (e.g. so pull-to-refresh genuinely waits for it,
-  /// rather than the second caller seeing an instant no-op).
+  /// concurrently — a run already in flight is not duplicated. A call that
+  /// arrives mid-run instead schedules one follow-up pass right after it
+  /// (shared by every such call), because whatever the caller just queued
+  /// may have missed the running pass's outbox snapshot; without it, an
+  /// Undo or edit made during a pass would wait for the next periodic tick,
+  /// while that pass's pull briefly showed the stale server state. The
+  /// returned future completes once that follow-up has finished too (e.g.
+  /// so pull-to-refresh genuinely waits for fresh data).
   Future<void> runOnce() {
     // Checked before _paused: pause() only cancels the timer, it does not
     // interrupt a run already underway (see its doc comment), so a caller
     // arriving after a pause mid-run must still await that real pass
     // rather than getting an instantly-resolved future while it's still
-    // pulling changes in the background.
+    // pulling changes in the background. The follow-up itself is a no-op
+    // once paused.
     final inFlight = _inFlight;
-    if (inFlight != null) return inFlight;
+    if (inFlight != null) {
+      return _followUp ??= inFlight.then((_) {
+        _followUp = null;
+        return _disposed ? null : runOnce();
+      });
+    }
     if (_paused) {
       _setStatus(SyncStatus.paused);
       return Future<void>.value();
@@ -226,6 +251,7 @@ final class SyncEngine extends ChangeNotifier {
       await _refreshFolderKeys(api, session.accessToken);
       await _refreshFavorites(api, session.accessToken);
       _errorMessage = null;
+      _lastSyncedAt = DateTime.now().toUtc();
       if (!_paused) _setStatus(SyncStatus.idle);
     } catch (e) {
       if (isTransientNetworkError(e)) {

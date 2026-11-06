@@ -6,12 +6,27 @@ part of '../main.dart';
 int _transferProgressPercent(FilesController controller) =>
     ((controller.progress ?? 0) * 100).round().clamp(0, 100);
 
-String _transferProgressLabel(FileTransferDirection? direction, int percent) =>
-    switch (direction) {
-      FileTransferDirection.upload => 'Upload progress $percent percent',
-      FileTransferDirection.download => 'Download progress $percent percent',
-      null => 'Transfer progress $percent percent',
-    };
+String _transferProgressLabel(
+  BuildContext context,
+  FileTransferDirection? direction,
+  int percent,
+) => switch (direction) {
+  FileTransferDirection.upload => _localized(
+    context,
+    en: 'Upload progress $percent percent',
+    ru: 'Отправка: $percent%',
+  ),
+  FileTransferDirection.download => _localized(
+    context,
+    en: 'Download progress $percent percent',
+    ru: 'Скачивание: $percent%',
+  ),
+  null => _localized(
+    context,
+    en: 'Transfer progress $percent percent',
+    ru: 'Передача: $percent%',
+  ),
+};
 
 /// "size • Updated relative time" for a file's [ListTile] subtitle.
 /// [FileEntry.metadata.plaintextSize] is null for files uploaded before that
@@ -24,24 +39,40 @@ String _transferProgressLabel(FileTransferDirection? direction, int percent) =>
 /// live wall clock, so this label stays fixed as of when the folder was
 /// opened/refreshed instead of ticking forward on every unrelated rebuild
 /// (e.g. upload/download progress notifications).
-String _fileEntrySubtitle(FileEntry entry, DateTime referenceNow) {
+String _fileEntrySubtitle(
+  BuildContext context,
+  FileEntry entry,
+  DateTime referenceNow,
+) {
   final parts = <String>[];
   final size = entry.metadata.plaintextSize;
-  if (size != null) parts.add(_formatFileSize(size));
-  parts.add(
-    'Updated ${_formatRelativeTime(entry.node.updatedAt, referenceNow)}',
-  );
+  if (size != null) parts.add(_formatFileSize(context, size));
+  final when = _formatRelativeTime(context, entry.node.updatedAt, referenceNow);
+  parts.add(_localized(context, en: 'Updated $when', ru: 'Изменён $when'));
   return parts.join(' • ');
 }
 
-String _fileSortLabel(FileListSort sort) => switch (sort) {
-  FileListSort.name => 'Name',
-  FileListSort.extension => 'Extension',
-  FileListSort.updatedAt => 'Date updated',
-};
+String _fileSortLabel(BuildContext context, FileListSort sort) =>
+    switch (sort) {
+      FileListSort.name => _localized(context, en: 'Name', ru: 'Имя'),
+      FileListSort.extension => _localized(
+        context,
+        en: 'Extension',
+        ru: 'Расширение',
+      ),
+      FileListSort.updatedAt => _localized(
+        context,
+        en: 'Date updated',
+        ru: 'Дата изменения',
+      ),
+    };
 
-String _formatFileSize(int bytes) {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+String _formatFileSize(BuildContext context, int bytes) {
+  final units = _localized(
+    context,
+    en: 'B KB MB GB TB',
+    ru: 'Б КБ МБ ГБ ТБ',
+  ).split(' ');
   var size = bytes.toDouble();
   var unitIndex = 0;
   while (size >= 1024 && unitIndex < units.length - 1) {
@@ -49,55 +80,110 @@ String _formatFileSize(int bytes) {
     unitIndex++;
   }
   final precision = unitIndex == 0 ? 0 : 1;
-  return '${size.toStringAsFixed(precision)} ${units[unitIndex]}';
+  final number = size.toStringAsFixed(precision);
+  // Russian uses a decimal comma.
+  return '${_localized(context, en: number, ru: number.replaceAll('.', ','))} '
+      '${units[unitIndex]}';
 }
-
-String _formatRelativeTime(DateTime utc, DateTime referenceNow) {
-  final elapsed = referenceNow.toUtc().difference(utc.toUtc());
-  final seconds = elapsed.isNegative ? 0 : elapsed.inSeconds;
-  if (seconds < 60) return _relativeTimeUnit(seconds, 'second');
-  final minutes = seconds ~/ 60;
-  if (minutes < 60) return _relativeTimeUnit(minutes, 'minute');
-  final hours = minutes ~/ 60;
-  if (hours < 24) return _relativeTimeUnit(hours, 'hour');
-  final days = hours ~/ 24;
-  if (days < 30) return _relativeTimeUnit(days, 'day');
-  final months = days ~/ 30;
-  if (months < 12) return _relativeTimeUnit(months, 'month');
-  return _relativeTimeUnit(days ~/ 365, 'year');
-}
-
-String _relativeTimeUnit(int value, String unit) =>
-    '$value $unit${value == 1 ? '' : 's'} ago';
 
 const double _fileListLeadingSize = 44;
 
-const Widget _defaultFileListIcon = SizedBox.square(
-  dimension: _fileListLeadingSize,
-  child: Icon(Icons.insert_drive_file_outlined, size: _fileListLeadingSize),
-);
+/// A file-type icon from the name's extension, so documents, media and
+/// archives can be told apart at a glance before any thumbnail loads.
+IconData _fileTypeIcon(String fileName) {
+  final dot = fileName.lastIndexOf('.');
+  final extension = dot <= 0 ? '' : fileName.substring(dot + 1).toLowerCase();
+  return switch (extension) {
+    'pdf' => Icons.picture_as_pdf_outlined,
+    'jpg' ||
+    'jpeg' ||
+    'png' ||
+    'gif' ||
+    'webp' ||
+    'bmp' ||
+    'heic' ||
+    'heif' ||
+    'svg' ||
+    'tif' ||
+    'tiff' => Icons.image_outlined,
+    'mp4' ||
+    'mov' ||
+    'mkv' ||
+    'avi' ||
+    'webm' ||
+    'm4v' ||
+    '3gp' => Icons.movie_outlined,
+    'mp3' ||
+    'wav' ||
+    'flac' ||
+    'ogg' ||
+    'm4a' ||
+    'aac' ||
+    'opus' => Icons.audiotrack_outlined,
+    'zip' ||
+    'rar' ||
+    '7z' ||
+    'tar' ||
+    'gz' ||
+    'bz2' ||
+    'xz' => Icons.folder_zip_outlined,
+    'doc' ||
+    'docx' ||
+    'odt' ||
+    'rtf' ||
+    'txt' ||
+    'md' => Icons.description_outlined,
+    'xls' || 'xlsx' || 'ods' || 'csv' => Icons.table_chart_outlined,
+    'ppt' || 'pptx' || 'odp' => Icons.slideshow_outlined,
+    'apk' => Icons.android,
+    'exe' || 'msi' => Icons.terminal,
+    'dart' ||
+    'go' ||
+    'py' ||
+    'js' ||
+    'ts' ||
+    'java' ||
+    'kt' ||
+    'c' ||
+    'cpp' ||
+    'h' ||
+    'cs' ||
+    'html' ||
+    'css' ||
+    'json' ||
+    'yaml' ||
+    'yml' ||
+    'xml' ||
+    'sh' => Icons.code,
+    _ => Icons.insert_drive_file_outlined,
+  };
+}
 
-const Widget _folderListIcon = SizedBox.square(
-  dimension: _fileListLeadingSize,
-  child: Icon(
-    Icons.folder,
-    size: _fileListLeadingSize,
-    color: Colors.lightBlue,
-  ),
-);
+Widget _fileTypeListIcon(BuildContext context, String fileName) =>
+    SizedBox.square(
+      dimension: _fileListLeadingSize,
+      child: Icon(
+        _fileTypeIcon(fileName),
+        size: _fileListLeadingSize * 0.8,
+        color: Theme.of(context).colorScheme.onSurfaceVariant,
+      ),
+    );
 
-/// A folder this account shares with family members (spec §28).
-const Widget _sharedFolderListIcon = SizedBox.square(
-  dimension: _fileListLeadingSize,
-  child: Icon(
-    Icons.folder_shared,
-    size: _fileListLeadingSize,
-    color: Colors.lightBlue,
-    semanticLabel: 'Shared folder',
-  ),
-);
+Widget _folderListIcon(BuildContext context, {required bool shared}) =>
+    SizedBox.square(
+      dimension: _fileListLeadingSize,
+      child: Icon(
+        shared ? Icons.folder_shared : Icons.folder,
+        size: _fileListLeadingSize,
+        color: Theme.of(context).colorScheme.primary,
+        // A folder this account shares with family members (spec §28).
+        semanticLabel: shared
+            ? _localized(context, en: 'Shared folder', ru: 'Общая папка')
+            : null,
+      ),
+    );
 
-/// Shows a decrypted, downscaled image thumbnail when it is inexpensive to
+// Shows a decrypted, downscaled image thumbnail when it is inexpensive to
 /// fetch. All other files, including unsupported image encodings, retain the
 /// regular file icon.
 ///
@@ -171,7 +257,7 @@ class _FileListLeadingState extends State<_FileListLeading> {
   @override
   Widget build(BuildContext context) {
     final bytes = _bytes;
-    if (bytes == null) return _defaultFileListIcon;
+    if (bytes == null) return _fileTypeListIcon(context, widget.entry.name);
     return SizedBox.square(
       dimension: _fileListLeadingSize,
       child: ClipRRect(
@@ -185,44 +271,165 @@ class _FileListLeadingState extends State<_FileListLeading> {
           ),
           fit: BoxFit.cover,
           gaplessPlayback: true,
-          errorBuilder: (context, error, stackTrace) => _defaultFileListIcon,
+          errorBuilder: (context, error, stackTrace) =>
+              _fileTypeListIcon(context, widget.entry.name),
         ),
       ),
     );
   }
 }
 
-enum _OverwriteChoice { overwrite, skip, cancel }
+/// What to do with an uploaded file whose name is already taken.
+enum _NameClashChoice { replace, keepBoth, skip, cancel }
 
-Future<_OverwriteChoice> _askOverwrite(
+/// Asks how to resolve a name clash for [fileName]. When [remaining] more
+/// clashes follow, offers to apply the same answer to all of them, so a
+/// large drop does not turn into a long series of identical dialogs.
+Future<({_NameClashChoice choice, bool applyToAll})> _askNameClash(
   BuildContext context,
-  String fileName,
-) async {
-  final choice = await showDialog<_OverwriteChoice>(
+  String fileName, {
+  required int remaining,
+}) async {
+  var applyToAll = false;
+  final choice = await showDialog<_NameClashChoice>(
     context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('File already exists'),
-      content: Text('"$fileName" already exists in this folder.'),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, _OverwriteChoice.cancel),
-          child: const Text('Cancel'),
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: Text(
+          _localized(
+            context,
+            en: 'File already exists',
+            ru: 'Файл уже существует',
+          ),
         ),
-        TextButton(
-          onPressed: () => Navigator.pop(context, _OverwriteChoice.skip),
-          child: const Text('Skip'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _localized(
+                context,
+                en: '"$fileName" already exists in this folder. Replace keeps the old content in version history.',
+                ru: '«$fileName» уже есть в этой папке. При замене прежнее содержимое останется в истории версий.',
+              ),
+            ),
+            if (remaining > 0)
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                value: applyToAll,
+                onChanged: (value) =>
+                    setState(() => applyToAll = value ?? false),
+                title: Text(
+                  _localized(
+                    context,
+                    en: 'Do the same for the other $remaining',
+                    ru: 'Сделать так же для остальных ($remaining)',
+                  ),
+                ),
+              ),
+          ],
         ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, _OverwriteChoice.overwrite),
-          child: const Text('Overwrite'),
-        ),
-      ],
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, _NameClashChoice.cancel),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, _NameClashChoice.skip),
+            child: Text(_localized(context, en: 'Skip', ru: 'Пропустить')),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, _NameClashChoice.keepBoth),
+            child: Text(
+              _localized(context, en: 'Keep both', ru: 'Сохранить оба'),
+            ),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, _NameClashChoice.replace),
+            child: Text(_localized(context, en: 'Replace', ru: 'Заменить')),
+          ),
+        ],
+      ),
     ),
   );
   // A dismissed dialog (back button/tap outside) is treated the same as an
   // explicit Cancel — the safer default for a destructive action.
-  return choice ?? _OverwriteChoice.cancel;
+  return (choice: choice ?? _NameClashChoice.cancel, applyToAll: applyToAll);
 }
+
+/// Keyboard commands of the Files page; see [_FilesSectionState._runCommand].
+enum _FilesCommand {
+  search,
+  selectAll,
+  clearSelection,
+  trash,
+  rename,
+  open,
+  refresh,
+  newFolder,
+  upload,
+  goUp,
+}
+
+final class _FilesCommandIntent extends Intent {
+  const _FilesCommandIntent(this.command);
+
+  final _FilesCommand command;
+}
+
+/// Runs a Files keyboard command only while it applies; a disabled command
+/// is not consumed, so the key keeps its usual meaning elsewhere.
+final class _FilesCommandAction extends Action<_FilesCommandIntent> {
+  _FilesCommandAction({required this.canRun, required this.run});
+
+  final bool Function(_FilesCommand command) canRun;
+  final void Function(_FilesCommand command) run;
+
+  @override
+  bool isEnabled(_FilesCommandIntent intent) => canRun(intent.command);
+
+  @override
+  void invoke(_FilesCommandIntent intent) => run(intent.command);
+}
+
+const Map<ShortcutActivator, Intent> _filesShortcuts = {
+  SingleActivator(LogicalKeyboardKey.keyF, control: true): _FilesCommandIntent(
+    _FilesCommand.search,
+  ),
+  SingleActivator(LogicalKeyboardKey.keyA, control: true): _FilesCommandIntent(
+    _FilesCommand.selectAll,
+  ),
+  SingleActivator(LogicalKeyboardKey.escape): _FilesCommandIntent(
+    _FilesCommand.clearSelection,
+  ),
+  SingleActivator(LogicalKeyboardKey.delete): _FilesCommandIntent(
+    _FilesCommand.trash,
+  ),
+  SingleActivator(LogicalKeyboardKey.f2): _FilesCommandIntent(
+    _FilesCommand.rename,
+  ),
+  SingleActivator(LogicalKeyboardKey.enter): _FilesCommandIntent(
+    _FilesCommand.open,
+  ),
+  SingleActivator(LogicalKeyboardKey.f5): _FilesCommandIntent(
+    _FilesCommand.refresh,
+  ),
+  SingleActivator(LogicalKeyboardKey.keyR, control: true): _FilesCommandIntent(
+    _FilesCommand.refresh,
+  ),
+  SingleActivator(LogicalKeyboardKey.keyN, control: true, shift: true):
+      _FilesCommandIntent(_FilesCommand.newFolder),
+  SingleActivator(LogicalKeyboardKey.keyU, control: true): _FilesCommandIntent(
+    _FilesCommand.upload,
+  ),
+  SingleActivator(LogicalKeyboardKey.backspace): _FilesCommandIntent(
+    _FilesCommand.goUp,
+  ),
+  SingleActivator(LogicalKeyboardKey.arrowLeft, alt: true): _FilesCommandIntent(
+    _FilesCommand.goUp,
+  ),
+};
 
 final class _FilesSection extends StatefulWidget {
   const _FilesSection({
@@ -234,6 +441,8 @@ final class _FilesSection extends StatefulWidget {
     required this.syncFolder,
     required this.androidSyncFolder,
     required this.onPullToRefresh,
+    required this.onRefresh,
+    required this.onOpenSettings,
     required this.onDownloadCompleted,
   });
 
@@ -247,6 +456,12 @@ final class _FilesSection extends StatefulWidget {
   final String? syncFolder;
   final AndroidSyncFolder? androidSyncFolder;
   final Future<void> Function()? onPullToRefresh;
+
+  /// Runs a sync pass and reloads the listing (toolbar button and F5).
+  final Future<void> Function() onRefresh;
+
+  /// Shows Settings, where the server connection and vault are set up.
+  final VoidCallback onOpenSettings;
   final void Function({required String fileName, required String location})
   onDownloadCompleted;
 
@@ -256,6 +471,8 @@ final class _FilesSection extends StatefulWidget {
 
 final class _FilesSectionState extends State<_FilesSection> {
   final WindowsSyncFolder _windowsSyncFolder = WindowsSyncFolder();
+  final FocusNode _focusNode = FocusNode(debugLabel: 'files');
+  bool _refreshing = false;
 
   @override
   void initState() {
@@ -266,44 +483,41 @@ final class _FilesSectionState extends State<_FilesSection> {
   @override
   void dispose() {
     WindowsFileDrop.stopListening();
+    _focusNode.dispose();
     super.dispose();
+  }
+
+  Future<void> _refresh() async {
+    if (_refreshing) return;
+    setState(() => _refreshing = true);
+    try {
+      await widget.onRefresh();
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
   }
 
   Future<void> _createFolder(BuildContext context) async {
     final controller = widget.controller;
     if (controller == null) return;
-    final nameController = TextEditingController();
-    final name = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('New folder'),
-        content: TextField(
-          controller: nameController,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: 'Folder name'),
-          onSubmitted: (value) => Navigator.pop(context, value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, nameController.text),
-            child: const Text('Create'),
-          ),
-        ],
-      ),
+    final name = await _askName(
+      context,
+      title: _localized(context, en: 'New folder', ru: 'Новая папка'),
+      label: _localized(context, en: 'Folder name', ru: 'Имя папки'),
+      confirm: _localized(context, en: 'Create', ru: 'Создать'),
+      initial: '',
     );
-    if (name == null || name.trim().isEmpty) return;
-    final ok = await controller.createFolder(name.trim());
+    if (name == null) return;
+    final ok = await controller.createFolder(name);
     if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            controller.errorMessage ?? 'Could not create the folder.',
-          ),
-        ),
+      _snack(
+        context,
+        controller.errorMessage ??
+            _localized(
+              context,
+              en: 'Could not create the folder.',
+              ru: 'Не удалось создать папку.',
+            ),
       );
     }
   }
@@ -321,9 +535,10 @@ final class _FilesSectionState extends State<_FilesSection> {
 
   /// Uploads [paths] into the currently open folder, asking before silently
   /// clobbering a same-named file already there: a name already present in
-  /// [FilesController.entries] prompts overwrite/skip/cancel, and an
-  /// overwrite goes through [FilesController.replaceFileContent] (a new
-  /// version of the existing node) rather than creating a duplicate.
+  /// [FilesController.entries] prompts replace/keep both/skip/cancel. A
+  /// replace goes through [FilesController.replaceFileContent] (a new
+  /// version of the existing node) rather than creating a duplicate; "keep
+  /// both" uploads under the next free "name (n).ext".
   Future<void> _uploadPathsWithOverwritePrompt(
     BuildContext context,
     List<String> paths,
@@ -334,41 +549,76 @@ final class _FilesSectionState extends State<_FilesSection> {
     // the readable path now too, so a completed upload is copied into the
     // equivalent sync-folder location even if the user navigates meanwhile.
     final syncFolderRelativePath = controller.breadcrumbNames.join('/');
+    final existingFiles = <String, FileEntry>{
+      for (final entry in controller.entries)
+        if (!entry.isDirectory) entry.name: entry,
+    };
+    final takenNames = {for (final entry in controller.entries) entry.name};
+    var clashesLeft = paths
+        .where((path) => existingFiles.containsKey(basenameOfLocalPath(path)))
+        .length;
     final toCreate = <String>[];
+    final uploadNames = <String, String>{};
     final toReplace = <(FileEntry, String)>[];
+    _NameClashChoice? rememberedChoice;
     for (final path in paths) {
       final name = basenameOfLocalPath(path);
-      FileEntry? existing;
-      for (final entry in controller.entries) {
-        if (!entry.isDirectory && entry.name == name) {
-          existing = entry;
-          break;
-        }
-      }
+      final existing = existingFiles[name];
       if (existing == null) {
+        // Two dropped files from different folders can share a name; the
+        // second one must not collide with the first.
+        if (takenNames.contains(name)) {
+          final unique = uniqueSiblingName(name, takenNames);
+          uploadNames[path] = unique;
+          takenNames.add(unique);
+        } else {
+          takenNames.add(name);
+        }
         toCreate.add(path);
         continue;
       }
-      if (!context.mounted) return;
-      final choice = await _askOverwrite(context, name);
-      if (choice == _OverwriteChoice.cancel) return;
-      if (choice == _OverwriteChoice.overwrite) {
-        toReplace.add((existing, path));
+      clashesLeft--;
+      var choice = rememberedChoice;
+      if (choice == null) {
+        if (!context.mounted) return;
+        final answer = await _askNameClash(
+          context,
+          name,
+          remaining: clashesLeft,
+        );
+        choice = answer.choice;
+        if (answer.applyToAll) rememberedChoice = choice;
       }
-      // _OverwriteChoice.skip: leave this path out of both lists.
+      switch (choice) {
+        case _NameClashChoice.cancel:
+          return;
+        case _NameClashChoice.skip:
+          break;
+        case _NameClashChoice.replace:
+          toReplace.add((existing, path));
+        case _NameClashChoice.keepBoth:
+          final unique = uniqueSiblingName(name, takenNames);
+          takenNames.add(unique);
+          uploadNames[path] = unique;
+          toCreate.add(path);
+      }
     }
 
     var succeeded = 0;
     var failed = 0;
     var syncFolderCopyFailures = 0;
     if (toCreate.isNotEmpty) {
-      final result = await controller.uploadFiles(toCreate);
+      final result = await controller.uploadFiles(
+        toCreate,
+        fileNames: uploadNames,
+      );
       succeeded += result.succeeded;
       failed += result.failed;
       for (final path in result.successfulPaths) {
         if (!await _copyUploadedFileToSyncFolder(
           path,
           syncFolderRelativePath,
+          uploadNames[path] ?? basenameOfLocalPath(path),
         )) {
           syncFolderCopyFailures++;
         }
@@ -380,6 +630,7 @@ final class _FilesSectionState extends State<_FilesSection> {
         if (!await _copyUploadedFileToSyncFolder(
           path,
           syncFolderRelativePath,
+          entry.name,
         )) {
           syncFolderCopyFailures++;
         }
@@ -389,26 +640,52 @@ final class _FilesSectionState extends State<_FilesSection> {
     }
 
     if (!context.mounted || (succeeded == 0 && failed == 0)) return;
+    String files(int n) => _countOf(
+      context,
+      n,
+      enOne: 'file',
+      enMany: 'files',
+      ruOne: 'файл',
+      ruFew: 'файла',
+      ruMany: 'файлов',
+    );
     var message = switch ((succeeded, failed)) {
-      (0, final f) => controller.errorMessage ?? 'Could not upload $f file(s).',
-      (final s, 0) => 'Encrypted and uploaded $s file(s).',
-      (final s, final f) =>
-        'Uploaded $s file(s); $f file(s) could not be uploaded.',
+      (0, final f) =>
+        controller.errorMessage ??
+            _localized(
+              context,
+              en: 'Could not upload ${files(f)}.',
+              ru: 'Не удалось загрузить: ${files(f)}.',
+            ),
+      (final s, 0) => _localized(
+        context,
+        en: 'Encrypted and uploaded ${files(s)}.',
+        ru: 'Зашифровано и загружено: ${files(s)}.',
+      ),
+      (final s, final f) => _localized(
+        context,
+        en: 'Uploaded ${files(s)}; ${files(f)} could not be uploaded. ${controller.errorMessage ?? ''}',
+        ru: 'Загружено: ${files(s)}; не удалось загрузить: ${files(f)}. ${controller.errorMessage ?? ''}',
+      ),
     };
     if (syncFolderCopyFailures > 0) {
-      message +=
-          ' The sync folder could not be updated for $syncFolderCopyFailures file(s); HomeBox will download them from the server instead.';
+      message += _localized(
+        context,
+        en: ' The sync folder could not be updated for ${files(syncFolderCopyFailures)}; HomeBox will download them from the server instead.',
+        ru: ' Не удалось обновить папку синхронизации для ${files(syncFolderCopyFailures)}; HomeBox скачает их с сервера.',
+      );
     }
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    _snack(context, message);
   }
 
   /// Copies a freshly uploaded Windows file into the matching sync-folder
-  /// location. The materializer later verifies its hash before recognizing
-  /// the copy, preserving the server as the authoritative source on changes.
+  /// location under [fileName]. The materializer later verifies its hash
+  /// before recognizing the copy, preserving the server as the
+  /// authoritative source on changes.
   Future<bool> _copyUploadedFileToSyncFolder(
     String sourcePath,
     String relativeParentPath,
+    String fileName,
   ) async {
     final syncFolder = widget.syncFolder;
     if (defaultTargetPlatform != TargetPlatform.windows || syncFolder == null) {
@@ -417,8 +694,8 @@ final class _FilesSectionState extends State<_FilesSection> {
     final source = File(sourcePath);
     final destination = File(
       relativeParentPath.isEmpty
-          ? '$syncFolder/${basenameOfLocalPath(sourcePath)}'
-          : '$syncFolder/$relativeParentPath/${basenameOfLocalPath(sourcePath)}',
+          ? '$syncFolder/$fileName'
+          : '$syncFolder/$relativeParentPath/$fileName',
     );
     if (source.absolute.path.toLowerCase() ==
         destination.absolute.path.toLowerCase()) {
@@ -856,36 +1133,23 @@ final class _FilesSectionState extends State<_FilesSection> {
   Future<void> _renameEntry(BuildContext context, FileEntry entry) async {
     final controller = widget.controller;
     if (controller == null) return;
-    final nameController = TextEditingController(text: entry.name);
-    final name = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Rename'),
-        content: TextField(
-          controller: nameController,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: 'Name'),
-          onSubmitted: (value) => Navigator.pop(context, value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, nameController.text),
-            child: const Text('Rename'),
-          ),
-        ],
-      ),
+    final name = await _askName(
+      context,
+      title: _localized(context, en: 'Rename', ru: 'Переименовать'),
+      confirm: _localized(context, en: 'Rename', ru: 'Переименовать'),
+      initial: entry.name,
     );
-    if (name == null || name.trim().isEmpty || name.trim() == entry.name) {
-      return;
-    }
-    final ok = await controller.renameNode(entry, name.trim());
+    if (name == null || name == entry.name) return;
+    final ok = await controller.renameNode(entry, name);
     if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(controller.errorMessage ?? 'Could not rename.')),
+      _snack(
+        context,
+        controller.errorMessage ??
+            _localized(
+              context,
+              en: 'Could not rename.',
+              ru: 'Не удалось переименовать.',
+            ),
       );
     }
   }
@@ -898,48 +1162,88 @@ final class _FilesSectionState extends State<_FilesSection> {
     if (controller == null) return;
     final ok = await controller.markConflictResolved(entry);
     if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            controller.errorMessage ??
-                _localized(
-                  context,
-                  en: 'Could not update the conflict copy.',
-                  ru: 'Не удалось обновить конфликтную копию.',
-                ),
-          ),
-        ),
+      _snack(
+        context,
+        controller.errorMessage ??
+            _localized(
+              context,
+              en: 'Could not update the conflict copy.',
+              ru: 'Не удалось обновить конфликтную копию.',
+            ),
       );
     }
   }
 
-  Future<void> _deleteEntry(BuildContext context, FileEntry entry) async {
+  /// Moves [entries] to Trash at once, without a confirmation dialog: Trash
+  /// is reversible, so an Undo action on the result is both safer (it also
+  /// covers a slip of the Delete key) and quicker than asking every time.
+  Future<void> _moveToTrash(
+    BuildContext context,
+    List<FileEntry> entries,
+  ) async {
     final controller = widget.controller;
-    if (controller == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Move to trash?'),
-        content: Text('"${entry.name}" will be moved to the trash.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    if (controller == null || entries.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final undoLabel = _localized(context, en: 'Undo', ru: 'Отменить');
+    final failedUndo = _localized(
+      context,
+      en: 'Could not restore everything. Open Trash to restore the rest.',
+      ru: 'Не удалось восстановить всё. Остальное можно вернуть из корзины.',
     );
-    if (confirmed != true) return;
-    final ok = await controller.deleteNode(entry);
-    if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(controller.errorMessage ?? 'Could not delete.')),
+    final deleted = await controller.deleteNodes(entries);
+    if (!context.mounted) return;
+    final total = entries.length;
+    final message = deleted == 0
+        ? controller.errorMessage ??
+              _localized(
+                context,
+                en: 'Could not move to Trash.',
+                ru: 'Не удалось переместить в корзину.',
+              )
+        : deleted == total
+        ? (total == 1
+              ? _localized(
+                  context,
+                  en: 'Moved "${entries.single.name}" to Trash.',
+                  ru: '«${entries.single.name}» перемещён в корзину.',
+                )
+              : _localized(
+                  context,
+                  en: 'Moved ${_itemCount(context, total)} to Trash.',
+                  ru: 'В корзину перемещено: ${_itemCount(context, total)}.',
+                ))
+        : _localized(
+            context,
+            en: 'Moved $deleted of ${_itemCount(context, total)} to Trash. ${controller.errorMessage ?? ''}',
+            ru: 'В корзину перемещено $deleted из ${_itemCount(context, total)}. ${controller.errorMessage ?? ''}',
+          );
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message.trim()),
+          duration: const Duration(seconds: 8),
+          // Auto-hide even though it has an action: the undo window is
+          // short on purpose, and Trash remains the long-term way back.
+          persist: false,
+          action: deleted == 0
+              ? null
+              : SnackBarAction(
+                  label: undoLabel,
+                  onPressed: () async {
+                    var restored = 0;
+                    for (final entry in entries) {
+                      if (await controller.restoreFromTrash(entry)) restored++;
+                    }
+                    if (restored < entries.length) {
+                      messenger.showSnackBar(
+                        SnackBar(content: Text(failedUndo)),
+                      );
+                    }
+                  },
+                ),
+        ),
       );
-    }
   }
 
   Future<void> _openPage(BuildContext context, WidgetBuilder builder) =>
@@ -961,8 +1265,16 @@ final class _FilesSectionState extends State<_FilesSection> {
     final target = await _pickFolder(
       context,
       title: entries.length == 1
-          ? 'Move "${entries.single.name}" to…'
-          : 'Move ${entries.length} items to…',
+          ? _localized(
+              context,
+              en: 'Move "${entries.single.name}" to…',
+              ru: 'Переместить «${entries.single.name}» в…',
+            )
+          : _localized(
+              context,
+              en: 'Move ${_itemCount(context, entries.length)} to…',
+              ru: 'Переместить ${_itemCount(context, entries.length)} в…',
+            ),
       rootName: _localized(context, en: 'Root', ru: 'Корень'),
       rootId: null,
       loadChildren: (folderId) async => [
@@ -974,14 +1286,23 @@ final class _FilesSectionState extends State<_FilesSection> {
           if (entry.isDirectory) entry.node.id,
       },
     );
-    if (target == null) return;
+    if (target == null || !context.mounted) return;
+    final total = entries.length;
     final moved = await controller.moveNodes(entries, target.id);
     if (!context.mounted) return;
     _snack(
       context,
-      moved == entries.length
-          ? (moved == 1 ? 'Moved 1 item.' : 'Moved $moved items.')
-          : 'Moved $moved of ${entries.length} items. ${controller.errorMessage ?? ''}',
+      moved == total
+          ? _localized(
+              context,
+              en: 'Moved ${_itemCount(context, moved)}.',
+              ru: 'Перемещено: ${_itemCount(context, moved)}.',
+            )
+          : _localized(
+              context,
+              en: 'Moved $moved of ${_itemCount(context, total)}. ${controller.errorMessage ?? ''}',
+              ru: 'Перемещено $moved из ${_itemCount(context, total)}. ${controller.errorMessage ?? ''}',
+            ),
     );
   }
 
@@ -1012,59 +1333,16 @@ final class _FilesSectionState extends State<_FilesSection> {
     if (controller == null || entries.isEmpty) return;
     final changed = await controller.setFavorite(entries, favorite);
     if (changed < entries.length && context.mounted) {
-      _snack(context, controller.errorMessage ?? 'Could not change favorites.');
+      _snack(
+        context,
+        controller.errorMessage ??
+            _localized(
+              context,
+              en: 'Could not change favorites.',
+              ru: 'Не удалось изменить избранное.',
+            ),
+      );
     }
-  }
-
-  /// Confirms, then moves every selected file and folder to the trash.
-  Future<void> _deleteSelected(BuildContext context) async {
-    final controller = widget.controller;
-    if (controller == null) return;
-    final selected = controller.selectedEntries;
-    if (selected.isEmpty) return;
-    final folders = selected.where((entry) => entry.isDirectory).length;
-    final files = selected.length - folders;
-    final summary = [
-      if (files > 0) files == 1 ? '1 file' : '$files files',
-      if (folders > 0)
-        folders == 1
-            ? '1 folder with its contents'
-            : '$folders folders with their contents',
-    ].join(' and ');
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          selected.length == 1
-              ? 'Move "${selected.single.name}" to trash?'
-              : 'Move ${selected.length} items to trash?',
-        ),
-        content: Text(
-          '$summary will be moved to the trash. You can restore them from Trash.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Move to trash'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    final deleted = await controller.deleteNodes(selected);
-    if (!context.mounted) return;
-    final message = deleted == selected.length
-        ? (deleted == 1
-              ? 'Moved 1 item to the trash.'
-              : 'Moved $deleted items to the trash.')
-        : 'Moved $deleted of ${selected.length} items to the trash. '
-              '${controller.errorMessage ?? ''}';
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message.trim())));
   }
 
   Future<void> _uploadDroppedFiles(List<String> paths) async {
@@ -1073,15 +1351,281 @@ final class _FilesSectionState extends State<_FilesSection> {
     await _uploadPathsWithOverwritePrompt(context, paths);
   }
 
+  /// The actions of one row's menu, shared by its "⋮" button and the
+  /// right-click context menu. Built only when a menu opens: whether a
+  /// folder can be shared walks its subtree, too costly for every row.
+  List<PopupMenuEntry<String>> _entryMenuItems(
+    BuildContext context,
+    FileEntry entry,
+  ) {
+    final controller = widget.controller!;
+    final familyVault = widget.familyVault;
+    final canOpenFileLocation =
+        !entry.isDirectory &&
+        defaultTargetPlatform == TargetPlatform.windows &&
+        widget.syncFolder != null &&
+        controller.materializedRelativePath(entry.node.id) != null;
+    PopupMenuItem<String> item(
+      String value,
+      IconData icon,
+      String en,
+      String ru,
+    ) => PopupMenuItem(
+      value: value,
+      child: ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: Icon(icon),
+        title: Text(_localized(context, en: en, ru: ru)),
+      ),
+    );
+    final favorite = controller.isFavorite(entry);
+    return [
+      if (entry.isDirectory)
+        item('open', Icons.folder_open_outlined, 'Open', 'Открыть'),
+      if (entry.isDirectory &&
+          familyVault != null &&
+          familyVault.canShare(entry.node))
+        item(
+          'family_share',
+          Icons.family_restroom_outlined,
+          'Share with family…',
+          'Поделиться с семьёй…',
+        ),
+      if (!entry.isDirectory && widget.androidFileSharer != null)
+        item('share', Icons.share_outlined, 'Share', 'Поделиться'),
+      if (!entry.isDirectory)
+        item('save_as', Icons.download_outlined, 'Save as…', 'Сохранить как…'),
+      if (canOpenFileLocation)
+        item(
+          'open_file_location',
+          Icons.folder_open_outlined,
+          'Open file location',
+          'Открыть расположение',
+        ),
+      if (!entry.isDirectory)
+        item(
+          'replace',
+          Icons.file_upload_outlined,
+          'Replace content…',
+          'Заменить содержимое…',
+        ),
+      if (!entry.isDirectory)
+        item('versions', Icons.history, 'Version history…', 'История версий…'),
+      if (entry.isConflictCopy)
+        item(
+          'resolve_conflict',
+          Icons.check_circle_outline,
+          'Mark conflict resolved',
+          'Отметить конфликт решённым',
+        ),
+      const PopupMenuDivider(),
+      favorite
+          ? item(
+              'favorite',
+              Icons.star,
+              'Remove from favorites',
+              'Убрать из избранного',
+            )
+          : item(
+              'favorite',
+              Icons.star_outline,
+              'Add to favorites',
+              'Добавить в избранное',
+            ),
+      item(
+        'rename',
+        Icons.drive_file_rename_outline,
+        'Rename',
+        'Переименовать',
+      ),
+      item('move', Icons.drive_file_move_outline, 'Move to…', 'Переместить…'),
+      item('delete', Icons.delete_outline, 'Move to trash', 'В корзину'),
+    ];
+  }
+
+  void _onEntryMenuSelected(
+    BuildContext context,
+    FileEntry entry,
+    String? value,
+  ) {
+    final controller = widget.controller;
+    if (controller == null || value == null) return;
+    unawaited(switch (value) {
+      'open' => Future.sync(() => controller.openFolder(entry)),
+      'save_as' => _downloadFile(context, entry),
+      'open_file_location' => _openFileLocation(context, entry),
+      'share' => _shareFile(context, entry),
+      'replace' => _replaceContent(context, entry),
+      'versions' => _showVersionHistory(context, entry),
+      'rename' => _renameEntry(context, entry),
+      'resolve_conflict' => _markConflictResolved(context, entry),
+      'delete' => _moveToTrash(context, [entry]),
+      'move' => _moveEntries(context, [entry]),
+      'favorite' => _setFavorite(context, [
+        entry,
+      ], !controller.isFavorite(entry)),
+      'family_share' => _showShareFolderDialog(
+        context,
+        widget.familyVault!,
+        folderId: entry.node.id,
+        folderName: entry.name,
+      ),
+      _ => Future<void>.value(),
+    });
+  }
+
+  Future<void> _showContextMenu(
+    BuildContext context,
+    FileEntry entry,
+    Offset globalPosition,
+  ) async {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final value = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        globalPosition & const Size(1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: _entryMenuItems(context, entry),
+    );
+    if (context.mounted) _onEntryMenuSelected(context, entry, value);
+  }
+
+  /// A row tap: Ctrl+click toggles and Shift+click extends the selection, as
+  /// in desktop file managers; otherwise it opens the item (or toggles it
+  /// while selecting).
+  void _onEntryTap(BuildContext context, FileEntry entry) {
+    final controller = widget.controller!;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isShiftPressed) {
+      controller.extendSelectionTo(entry);
+    } else if (keyboard.isControlPressed || controller.selectionMode) {
+      controller.toggleSelection(entry);
+    } else if (entry.isDirectory) {
+      controller.openFolder(entry);
+    } else {
+      unawaited(_openOrDownloadFile(context, entry));
+    }
+  }
+
+  /// Whether a keyboard command applies right now. A command that does not
+  /// apply leaves its key to other handlers, so Enter still presses a
+  /// focused button and Esc still reaches the rest of the app.
+  bool _canRunCommand(FilesController controller, _FilesCommand command) =>
+      switch (command) {
+        _FilesCommand.search ||
+        _FilesCommand.refresh ||
+        _FilesCommand.newFolder ||
+        _FilesCommand.upload => true,
+        _FilesCommand.selectAll =>
+          controller.entries.isNotEmpty &&
+              controller.selectedEntries.length != controller.entries.length,
+        _FilesCommand.clearSelection => controller.selectionMode,
+        _FilesCommand.trash => controller.selectedEntries.isNotEmpty,
+        _FilesCommand.rename ||
+        _FilesCommand.open => controller.selectedEntries.length == 1,
+        _FilesCommand.goUp => controller.canGoUp,
+      };
+
+  void _runCommand(
+    BuildContext context,
+    FilesController controller,
+    _FilesCommand command,
+  ) {
+    final selected = controller.selectedEntries;
+    switch (command) {
+      case _FilesCommand.search:
+        unawaited(
+          _openPage(context, (context) => _SearchPage(controller: controller)),
+        );
+      case _FilesCommand.selectAll:
+        controller.toggleSelectAll();
+      case _FilesCommand.clearSelection:
+        controller.clearSelection();
+      case _FilesCommand.trash:
+        unawaited(_moveToTrash(context, selected));
+      case _FilesCommand.rename:
+        unawaited(_renameEntry(context, selected.single));
+      case _FilesCommand.open:
+        final entry = selected.single;
+        if (entry.isDirectory) {
+          controller.openFolder(entry);
+        } else {
+          unawaited(_openOrDownloadFile(context, entry));
+        }
+      case _FilesCommand.refresh:
+        unawaited(_refresh());
+      case _FilesCommand.newFolder:
+        unawaited(_createFolder(context));
+      case _FilesCommand.upload:
+        unawaited(_uploadFiles(context));
+      case _FilesCommand.goUp:
+        controller.goUp();
+    }
+  }
+
+  Future<void> _showAddSheet(BuildContext context) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.upload_outlined),
+              title: Text(
+                _localized(context, en: 'Upload files', ru: 'Загрузить файлы'),
+              ),
+              onTap: () => Navigator.pop(context, 'upload'),
+            ),
+            if (widget.onCapturePhoto != null)
+              ListTile(
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: Text(
+                  _localized(context, en: 'Take a photo', ru: 'Сделать фото'),
+                ),
+                onTap: () => Navigator.pop(context, 'camera'),
+              ),
+            ListTile(
+              leading: const Icon(Icons.create_new_folder_outlined),
+              title: Text(
+                _localized(context, en: 'New folder', ru: 'Новая папка'),
+              ),
+              onTap: () => Navigator.pop(context, 'folder'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!context.mounted) return;
+    switch (action) {
+      case 'upload':
+        await _uploadFiles(context);
+      case 'camera':
+        await widget.onCapturePhoto?.call();
+      case 'folder':
+        await _createFolder(context);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = widget.controller;
     if (controller == null) {
-      return const _FilesMessageState(
+      return _FilesMessageState(
         icon: Icons.cloud_off_outlined,
         message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+        action: FilledButton.icon(
+          onPressed: widget.onOpenSettings,
+          icon: const Icon(Icons.settings_outlined),
+          label: Text(
+            _localized(context, en: 'Open Settings', ru: 'Открыть настройки'),
+          ),
+        ),
       );
     }
+    final android = defaultTargetPlatform == TargetPlatform.android;
     return AnimatedBuilder(
       // The Family Vault controller too, so a folder's shared badge and its
       // "Share with family" action follow share changes immediately.
@@ -1101,16 +1645,40 @@ final class _FilesSectionState extends State<_FilesSection> {
         final Widget body;
         if (controller.status == FilesStatus.idle) {
           body = scrollableMessage(
-            const _FilesMessageState(
+            _FilesMessageState(
               icon: Icons.cloud_off_outlined,
               message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+              action: FilledButton.icon(
+                onPressed: widget.onOpenSettings,
+                icon: const Icon(Icons.settings_outlined),
+                label: Text(
+                  _localized(
+                    context,
+                    en: 'Open Settings',
+                    ru: 'Открыть настройки',
+                  ),
+                ),
+              ),
             ),
           );
         } else if (controller.status == FilesStatus.failed) {
           body = scrollableMessage(
             _FilesMessageState(
               icon: Icons.error_outline,
-              message: controller.errorMessage ?? 'Files are unavailable.',
+              message:
+                  controller.errorMessage ??
+                  _localized(
+                    context,
+                    en: 'Files are unavailable.',
+                    ru: 'Файлы недоступны.',
+                  ),
+              action: OutlinedButton.icon(
+                onPressed: _refreshing ? null : () => unawaited(_refresh()),
+                icon: const Icon(Icons.refresh),
+                label: Text(
+                  _localized(context, en: 'Try again', ru: 'Повторить'),
+                ),
+              ),
             ),
           );
         } else if (controller.status == FilesStatus.loading &&
@@ -1120,9 +1688,19 @@ final class _FilesSectionState extends State<_FilesSection> {
           );
         } else if (controller.entries.isEmpty) {
           body = scrollableMessage(
-            const _FilesMessageState(
+            _FilesMessageState(
               icon: Icons.folder_open_outlined,
-              message: 'This folder is empty.',
+              message: defaultTargetPlatform == TargetPlatform.windows
+                  ? _localized(
+                      context,
+                      en: 'This folder is empty. Drag files into this window to encrypt and upload them here.',
+                      ru: 'Папка пуста. Перетащите файлы в это окно, чтобы зашифровать и загрузить их сюда.',
+                    )
+                  : _localized(
+                      context,
+                      en: 'This folder is empty.',
+                      ru: 'Папка пуста.',
+                    ),
             ),
           );
         } else {
@@ -1131,396 +1709,404 @@ final class _FilesSectionState extends State<_FilesSection> {
             // pull-to-refresh gesture below still has room to register on
             // a short list.
             physics: const AlwaysScrollableScrollPhysics(),
+            // Room for the add button so it never hides the last row.
+            padding: EdgeInsets.only(bottom: android ? 88 : 0),
             itemCount: controller.entries.length,
             separatorBuilder: (context, _) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              final entry = controller.entries[index];
-              final canOpenFileLocation =
-                  !entry.isDirectory &&
-                  defaultTargetPlatform == TargetPlatform.windows &&
-                  widget.syncFolder != null &&
-                  controller.materializedRelativePath(entry.node.id) != null;
-              final familyVault = widget.familyVault;
-              final sharedFolder =
-                  entry.isDirectory &&
-                  (familyVault?.isShared(entry.node.id) ?? false);
-              final selecting = controller.selectionMode;
-              final selected = controller.isSelected(entry);
-              return ListTile(
-                selected: selecting && selected,
-                leading: selecting
-                    ? SizedBox.square(
-                        dimension: _fileListLeadingSize,
-                        child: Checkbox(
-                          value: selected,
-                          onChanged: (_) => controller.toggleSelection(entry),
-                          semanticLabel: 'Select ${entry.name}',
-                        ),
-                      )
-                    : sharedFolder
-                    ? _sharedFolderListIcon
-                    : entry.isDirectory
-                    ? _folderListIcon
-                    : _FileListLeading(entry: entry, controller: controller),
-                title: entry.isConflictCopy || controller.isFavorite(entry)
-                    ? Row(
-                        children: [
-                          Flexible(child: Text(entry.name)),
-                          if (controller.isFavorite(entry)) ...[
-                            const SizedBox(width: 6),
-                            Icon(
-                              Icons.star,
-                              size: 16,
-                              color: Colors.amber,
-                              semanticLabel: _localized(
-                                context,
-                                en: 'Favorite',
-                                ru: 'В избранном',
-                              ),
-                            ),
-                          ],
-                          if (entry.isConflictCopy) ...[
-                            const SizedBox(width: 6),
-                            Tooltip(
-                              message: entry.metadata.conflictDetails!,
-                              child: Icon(
-                                Icons.call_split,
-                                size: 18,
-                                color: Theme.of(context).colorScheme.tertiary,
-                                semanticLabel: _localized(
-                                  context,
-                                  en: 'Conflict copy',
-                                  ru: 'Конфликтная копия',
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
-                      )
-                    : Text(entry.name),
-                subtitle: entry.isDirectory
-                    ? null
-                    : Text(_fileEntrySubtitle(entry, controller.entriesAsOf)),
-                onTap: selecting
-                    ? () => controller.toggleSelection(entry)
-                    : entry.isDirectory
-                    ? () => controller.openFolder(entry)
-                    : () => _openOrDownloadFile(context, entry),
-                // A long press starts selecting, as in other file managers.
-                onLongPress: () => controller.toggleSelection(entry),
-                trailing: selecting
-                    ? null
-                    : PopupMenuButton<String>(
-                        tooltip: 'More actions',
-                        onSelected: (value) => switch (value) {
-                          'save_as' => _downloadFile(context, entry),
-                          'open_file_location' => _openFileLocation(
-                            context,
-                            entry,
-                          ),
-                          'share' => _shareFile(context, entry),
-                          'replace' => _replaceContent(context, entry),
-                          'versions' => _showVersionHistory(context, entry),
-                          'rename' => _renameEntry(context, entry),
-                          'resolve_conflict' => _markConflictResolved(
-                            context,
-                            entry,
-                          ),
-                          'delete' => _deleteEntry(context, entry),
-                          'move' => _moveEntries(context, [entry]),
-                          'favorite' => _setFavorite(context, [
-                            entry,
-                          ], !controller.isFavorite(entry)),
-                          'family_share' => _showShareFolderDialog(
-                            context,
-                            widget.familyVault!,
-                            folderId: entry.node.id,
-                            folderName: entry.name,
-                          ),
-                          _ => null,
-                        },
-                        // Built only when the menu opens: whether a folder can be
-                        // shared walks its subtree, too costly for every row.
-                        itemBuilder: (context) => [
-                          if (entry.isDirectory &&
-                              familyVault != null &&
-                              familyVault.canShare(entry.node))
-                            PopupMenuItem(
-                              value: 'family_share',
-                              child: Text(
-                                _localized(
-                                  context,
-                                  en: 'Share with family…',
-                                  ru: 'Поделиться с семьёй…',
-                                ),
-                              ),
-                            ),
-                          if (!entry.isDirectory &&
-                              widget.androidFileSharer != null)
-                            PopupMenuItem(
-                              value: 'share',
-                              child: Text(
-                                _localized(
-                                  context,
-                                  en: 'Share',
-                                  ru: 'Поделиться',
-                                ),
-                              ),
-                            ),
-                          if (!entry.isDirectory)
-                            const PopupMenuItem(
-                              value: 'save_as',
-                              child: Text('Save as…'),
-                            ),
-                          if (canOpenFileLocation)
-                            PopupMenuItem(
-                              value: 'open_file_location',
-                              child: Text(
-                                _localized(
-                                  context,
-                                  en: 'Open file location',
-                                  ru: 'Открыть расположение',
-                                ),
-                              ),
-                            ),
-                          if (!entry.isDirectory)
-                            const PopupMenuItem(
-                              value: 'replace',
-                              child: Text('Replace content…'),
-                            ),
-                          if (!entry.isDirectory)
-                            PopupMenuItem(
-                              value: 'versions',
-                              child: Text(
-                                _localized(
-                                  context,
-                                  en: 'Version history…',
-                                  ru: 'История версий…',
-                                ),
-                              ),
-                            ),
-                          if (entry.isConflictCopy)
-                            PopupMenuItem(
-                              value: 'resolve_conflict',
-                              child: Text(
-                                _localized(
-                                  context,
-                                  en: 'Mark conflict resolved',
-                                  ru: 'Отметить конфликт решённым',
-                                ),
-                              ),
-                            ),
-                          PopupMenuItem(
-                            value: 'favorite',
-                            child: Text(
-                              controller.isFavorite(entry)
-                                  ? _localized(
-                                      context,
-                                      en: 'Remove from favorites',
-                                      ru: 'Убрать из избранного',
-                                    )
-                                  : _localized(
-                                      context,
-                                      en: 'Add to favorites',
-                                      ru: 'Добавить в избранное',
-                                    ),
-                            ),
-                          ),
-                          const PopupMenuItem(
-                            value: 'rename',
-                            child: Text('Rename'),
-                          ),
-                          PopupMenuItem(
-                            value: 'move',
-                            child: Text(
-                              _localized(
-                                context,
-                                en: 'Move to…',
-                                ru: 'Переместить…',
-                              ),
-                            ),
-                          ),
-                          const PopupMenuItem(
-                            value: 'delete',
-                            child: Text('Move to trash'),
-                          ),
-                        ],
-                      ),
-              );
-            },
+            itemBuilder: (context, index) =>
+                _buildEntryTile(context, controller, controller.entries[index]),
           );
         }
-        // Android's back gesture leaves selection mode instead of the app.
+        final page = _PageFrame(
+          title: _localized(context, en: 'Files', ru: 'Файлы'),
+          subtitle: controller.breadcrumbNames.isEmpty
+              ? _localized(context, en: 'Root', ru: 'Корень')
+              : controller.breadcrumbNames.join(' / '),
+          subtitleWidget: _Breadcrumbs(controller: controller),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (controller.selectionMode)
+                _SelectionBar(
+                  controller: controller,
+                  onDelete: () =>
+                      _moveToTrash(context, controller.selectedEntries),
+                  onMove: () =>
+                      _moveEntries(context, controller.selectedEntries),
+                  onDownload: () =>
+                      _downloadEntries(context, controller.selectedEntries),
+                  onFavorite: (favorite) => _setFavorite(
+                    context,
+                    controller.selectedEntries,
+                    favorite,
+                  ),
+                )
+              else
+                _buildToolbar(context, controller, android: android),
+              const SizedBox(height: 12),
+              Expanded(
+                child: widget.onPullToRefresh == null
+                    ? body
+                    : RefreshIndicator(
+                        onRefresh: widget.onPullToRefresh!,
+                        child: body,
+                      ),
+              ),
+            ],
+          ),
+        );
+        // Android's back gesture leaves selection mode first, then walks up
+        // the folder tree, and only leaves the app from the root folder.
         return PopScope(
-          canPop: !controller.selectionMode,
+          canPop: !controller.selectionMode && !controller.canGoUp,
           onPopInvokedWithResult: (didPop, _) {
-            if (!didPop) controller.clearSelection();
+            if (didPop) return;
+            if (controller.selectionMode) {
+              controller.clearSelection();
+            } else if (controller.canGoUp) {
+              controller.goUp();
+            }
           },
-          child: _PageFrame(
-            title: _localized(context, en: 'Files', ru: 'Файлы'),
-            subtitle: controller.breadcrumbNames.isEmpty
-                ? _localized(context, en: 'Root', ru: 'Корень')
-                : controller.breadcrumbNames.join(' / '),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (controller.selectionMode)
-                  _SelectionBar(
-                    controller: controller,
-                    onDelete: () => _deleteSelected(context),
-                    onMove: () =>
-                        _moveEntries(context, controller.selectedEntries),
-                    onDownload: () =>
-                        _downloadEntries(context, controller.selectedEntries),
-                    onFavorite: (favorite) => _setFavorite(
-                      context,
-                      controller.selectedEntries,
-                      favorite,
-                    ),
-                  )
-                else
-                  Wrap(
-                    alignment: WrapAlignment.end,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      IconButton(
-                        onPressed: () => _openPage(
-                          context,
-                          (context) => _SearchPage(controller: controller),
-                        ),
-                        icon: const Icon(Icons.search),
-                        tooltip: _localized(context, en: 'Search', ru: 'Поиск'),
-                      ),
-                      IconButton(
-                        onPressed: () => _openPage(
-                          context,
-                          (context) => _FavoritesPage(controller: controller),
-                        ),
-                        icon: const Icon(Icons.star_outline),
-                        tooltip: _localized(
-                          context,
-                          en: 'Favorites',
-                          ru: 'Избранное',
-                        ),
-                      ),
-                      if (controller.entries.isNotEmpty)
-                        IconButton(
-                          onPressed: controller.startSelection,
-                          icon: const Icon(Icons.checklist),
-                          tooltip: _localized(
-                            context,
-                            en: 'Select',
-                            ru: 'Выбрать',
-                          ),
-                        ),
-                      PopupMenuButton<FileListSort>(
-                        tooltip: 'Sort files',
-                        icon: const Icon(Icons.sort),
-                        onSelected: controller.setSort,
-                        itemBuilder: (context) => FileListSort.values
-                            .map(
-                              (sort) => CheckedPopupMenuItem<FileListSort>(
-                                value: sort,
-                                checked: sort == controller.sort,
-                                child: Text(_fileSortLabel(sort)),
-                              ),
-                            )
-                            .toList(growable: false),
-                      ),
-                      IconButton(
-                        onPressed: () => _openTrash(context),
-                        icon: const Icon(Icons.delete_outline),
-                        tooltip: _localized(
-                          context,
-                          en: 'Trash',
-                          ru: 'Корзина',
-                        ),
-                      ),
-                      if (controller.canGoUp)
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
+          child: Shortcuts(
+            shortcuts: _filesShortcuts,
+            child: Actions(
+              actions: {
+                _FilesCommandIntent: _FilesCommandAction(
+                  canRun: (command) => _canRunCommand(controller, command),
+                  run: (command) => _runCommand(context, controller, command),
+                ),
+              },
+              child: Focus(
+                focusNode: _focusNode,
+                autofocus: true,
+                child: Listener(
+                  // The mouse "back" side button goes up a level, and any click
+                  // returns keyboard focus here so shortcuts keep working.
+                  onPointerDown: (event) {
+                    if (event.buttons & kBackMouseButton != 0) {
+                      if (controller.canGoUp) controller.goUp();
+                    } else if (!_focusNode.hasFocus) {
+                      _focusNode.requestFocus();
+                    }
+                  },
+                  child: android
+                      ? Stack(
                           children: [
-                            IconButton(
-                              onPressed: controller.goUp,
-                              icon: const Icon(Icons.arrow_upward),
-                              tooltip: 'Up one level',
-                            ),
-                            IconButton(
-                              onPressed: controller.goToRoot,
-                              icon: const Icon(Icons.home_outlined),
-                              tooltip: 'Root',
+                            Positioned.fill(child: page),
+                            Positioned(
+                              right: 16,
+                              bottom: 16,
+                              child: FloatingActionButton(
+                                heroTag: null,
+                                onPressed: controller.selectionMode
+                                    ? null
+                                    : () => unawaited(_showAddSheet(context)),
+                                tooltip: _localized(
+                                  context,
+                                  en: 'Add',
+                                  ru: 'Добавить',
+                                ),
+                                child: const Icon(Icons.add),
+                              ),
                             ),
                           ],
-                        ),
-                      if (defaultTargetPlatform == TargetPlatform.android) ...[
-                        IconButton(
-                          onPressed: () => _createFolder(context),
-                          icon: const Icon(Icons.create_new_folder_outlined),
-                          tooltip: 'New folder',
-                        ),
-                        if (widget.onCapturePhoto != null)
-                          IconButton(
-                            onPressed: widget.onCapturePhoto,
-                            icon: const Icon(Icons.photo_camera_outlined),
-                            tooltip: 'Camera',
-                          ),
-                        IconButton(
-                          onPressed: () => _uploadFiles(context),
-                          icon: const Icon(Icons.upload_outlined),
-                          tooltip: 'Upload files',
-                        ),
-                      ] else ...[
-                        OutlinedButton.icon(
-                          onPressed: () => _createFolder(context),
-                          icon: const Icon(Icons.create_new_folder_outlined),
-                          label: const Text('New folder'),
-                        ),
-                        if (widget.onCapturePhoto != null)
-                          FilledButton.tonalIcon(
-                            onPressed: widget.onCapturePhoto,
-                            icon: const Icon(Icons.photo_camera_outlined),
-                            label: const Text('Camera'),
-                          ),
-                        FilledButton.icon(
-                          onPressed: () => _uploadFiles(context),
-                          icon: const Icon(Icons.upload_outlined),
-                          label: const Text('Upload files'),
-                        ),
-                      ],
-                    ],
-                  ),
-                if (defaultTargetPlatform == TargetPlatform.windows) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    'Drag files into this window to encrypt and upload them to this folder.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-                const SizedBox(height: 12),
-                Expanded(
-                  child: widget.onPullToRefresh == null
-                      ? body
-                      : RefreshIndicator(
-                          onRefresh: widget.onPullToRefresh!,
-                          child: body,
-                        ),
+                        )
+                      : page,
                 ),
-              ],
+              ),
             ),
           ),
         );
       },
     );
   }
+
+  Widget _buildEntryTile(
+    BuildContext context,
+    FilesController controller,
+    FileEntry entry,
+  ) {
+    final familyVault = widget.familyVault;
+    final sharedFolder =
+        entry.isDirectory && (familyVault?.isShared(entry.node.id) ?? false);
+    final selecting = controller.selectionMode;
+    final selected = controller.isSelected(entry);
+    final favorite = controller.isFavorite(entry);
+    return GestureDetector(
+      onSecondaryTapUp: (details) =>
+          unawaited(_showContextMenu(context, entry, details.globalPosition)),
+      child: ListTile(
+        selected: selecting && selected,
+        leading: selecting
+            ? SizedBox.square(
+                dimension: _fileListLeadingSize,
+                child: Checkbox(
+                  value: selected,
+                  onChanged: (_) => controller.toggleSelection(entry),
+                  semanticLabel: _localized(
+                    context,
+                    en: 'Select ${entry.name}',
+                    ru: 'Выбрать ${entry.name}',
+                  ),
+                ),
+              )
+            : entry.isDirectory
+            ? _folderListIcon(context, shared: sharedFolder)
+            : _FileListLeading(entry: entry, controller: controller),
+        title: entry.isConflictCopy || favorite
+            ? Row(
+                children: [
+                  Flexible(child: Text(entry.name)),
+                  if (favorite) ...[
+                    const SizedBox(width: 6),
+                    Icon(
+                      Icons.star,
+                      size: 16,
+                      color: Colors.amber,
+                      semanticLabel: _localized(
+                        context,
+                        en: 'Favorite',
+                        ru: 'В избранном',
+                      ),
+                    ),
+                  ],
+                  if (entry.isConflictCopy) ...[
+                    const SizedBox(width: 6),
+                    Tooltip(
+                      message: entry.metadata.conflictDetails!,
+                      child: Icon(
+                        Icons.call_split,
+                        size: 18,
+                        color: Theme.of(context).colorScheme.tertiary,
+                        semanticLabel: _localized(
+                          context,
+                          en: 'Conflict copy',
+                          ru: 'Конфликтная копия',
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              )
+            : Text(entry.name),
+        subtitle: entry.isDirectory
+            ? null
+            : Text(_fileEntrySubtitle(context, entry, controller.entriesAsOf)),
+        onTap: () => _onEntryTap(context, entry),
+        // A long press starts selecting, as in other file managers.
+        onLongPress: () => controller.toggleSelection(entry),
+        trailing: selecting
+            ? null
+            : PopupMenuButton<String>(
+                tooltip: _localized(
+                  context,
+                  en: 'More actions',
+                  ru: 'Другие действия',
+                ),
+                onSelected: (value) =>
+                    _onEntryMenuSelected(context, entry, value),
+                itemBuilder: (context) => _entryMenuItems(context, entry),
+              ),
+      ),
+    );
+  }
+
+  Widget _buildToolbar(
+    BuildContext context,
+    FilesController controller, {
+    required bool android,
+  }) {
+    final tools = <Widget>[
+      if (!android)
+        IconButton(
+          onPressed: _refreshing ? null : () => unawaited(_refresh()),
+          icon: _refreshing
+              ? const SizedBox.square(
+                  dimension: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.refresh),
+          tooltip: _localized(context, en: 'Refresh (F5)', ru: 'Обновить (F5)'),
+        ),
+      IconButton(
+        onPressed: () => _openPage(
+          context,
+          (context) => _SearchPage(controller: controller),
+        ),
+        icon: const Icon(Icons.search),
+        tooltip: android
+            ? _localized(context, en: 'Search', ru: 'Поиск')
+            : _localized(context, en: 'Search (Ctrl+F)', ru: 'Поиск (Ctrl+F)'),
+      ),
+      IconButton(
+        onPressed: () => _openPage(
+          context,
+          (context) => _FavoritesPage(controller: controller),
+        ),
+        icon: const Icon(Icons.star_outline),
+        tooltip: _localized(context, en: 'Favorites', ru: 'Избранное'),
+      ),
+      if (controller.entries.isNotEmpty)
+        IconButton(
+          onPressed: controller.startSelection,
+          icon: const Icon(Icons.checklist),
+          tooltip: _localized(context, en: 'Select', ru: 'Выбрать'),
+        ),
+      PopupMenuButton<FileListSort>(
+        tooltip: _localized(context, en: 'Sort', ru: 'Сортировка'),
+        icon: const Icon(Icons.sort),
+        onSelected: controller.setSort,
+        itemBuilder: (context) => FileListSort.values
+            .map(
+              (sort) => CheckedPopupMenuItem<FileListSort>(
+                value: sort,
+                checked: sort == controller.sort,
+                child: Text(_fileSortLabel(context, sort)),
+              ),
+            )
+            .toList(growable: false),
+      ),
+      IconButton(
+        onPressed: () => _openTrash(context),
+        icon: const Icon(Icons.delete_outline),
+        tooltip: _localized(context, en: 'Trash', ru: 'Корзина'),
+      ),
+    ];
+    if (android) {
+      // Adding files lives in the floating button, so the toolbar keeps to
+      // one row even on a narrow phone.
+      return Wrap(
+        alignment: WrapAlignment.end,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: tools,
+      );
+    }
+    return Wrap(
+      alignment: WrapAlignment.spaceBetween,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      runSpacing: 8,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            Tooltip(
+              message: _localized(
+                context,
+                en: 'Or drag files into this window (Ctrl+U)',
+                ru: 'Или перетащите файлы в это окно (Ctrl+U)',
+              ),
+              child: FilledButton.icon(
+                onPressed: () => _uploadFiles(context),
+                icon: const Icon(Icons.upload_outlined),
+                label: Text(
+                  _localized(
+                    context,
+                    en: 'Upload files',
+                    ru: 'Загрузить файлы',
+                  ),
+                ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _createFolder(context),
+              icon: const Icon(Icons.create_new_folder_outlined),
+              label: Text(
+                _localized(context, en: 'New folder', ru: 'Новая папка'),
+              ),
+            ),
+            if (widget.onCapturePhoto != null)
+              OutlinedButton.icon(
+                onPressed: widget.onCapturePhoto,
+                icon: const Icon(Icons.photo_camera_outlined),
+                label: Text(_localized(context, en: 'Camera', ru: 'Камера')),
+              ),
+          ],
+        ),
+        Wrap(children: tools),
+      ],
+    );
+  }
+}
+
+/// The open folder's path as links: each ancestor jumps straight there.
+final class _Breadcrumbs extends StatelessWidget {
+  const _Breadcrumbs({required this.controller});
+
+  final FilesController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final names = controller.breadcrumbNames;
+    final textStyle = Theme.of(context).textTheme.bodyMedium;
+    final linkStyle = TextButton.styleFrom(
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      minimumSize: const Size(0, 32),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+    final rootLabel = _localized(context, en: 'Root', ru: 'Корень');
+    Widget separator() => Icon(
+      Icons.chevron_right,
+      size: 18,
+      color: Theme.of(context).colorScheme.onSurfaceVariant,
+    );
+    return Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        if (names.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: 4,
+              children: [
+                const Icon(Icons.home_outlined, size: 18),
+                Text(rootLabel, style: textStyle),
+              ],
+            ),
+          )
+        else
+          TextButton.icon(
+            style: linkStyle,
+            onPressed: controller.goToRoot,
+            icon: const Icon(Icons.home_outlined, size: 18),
+            label: Text(rootLabel),
+          ),
+        for (final (index, name) in names.indexed) ...[
+          separator(),
+          if (index == names.length - 1)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+              child: Text(
+                name,
+                style: textStyle?.copyWith(fontWeight: FontWeight.w600),
+              ),
+            )
+          else
+            TextButton(
+              style: linkStyle,
+              onPressed: () => controller.goToBreadcrumb(index),
+              child: Text(name),
+            ),
+        ],
+      ],
+    );
+  }
 }
 
 final class _FilesMessageState extends StatelessWidget {
-  const _FilesMessageState({required this.icon, required this.message});
+  const _FilesMessageState({
+    required this.icon,
+    required this.message,
+    this.action,
+  });
 
   final IconData icon;
   final String message;
+
+  /// The one thing to do next from this state, if any.
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) => Center(
@@ -1529,16 +2115,22 @@ final class _FilesMessageState extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 72),
+          Icon(
+            icon,
+            size: 72,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
           const SizedBox(height: 16),
           Text(message, textAlign: TextAlign.center),
+          if (action != null) ...[const SizedBox(height: 16), action!],
         ],
       ),
     ),
   );
 }
 
-/// Replaces the Files toolbar while entries are being selected.
+/// Replaces the Files toolbar while entries are being selected. On a phone
+/// the actions collapse to icons so they fit one row.
 final class _SelectionBar extends StatelessWidget {
   const _SelectionBar({
     required this.controller,
@@ -1561,30 +2153,62 @@ final class _SelectionBar extends StatelessWidget {
     final selected = controller.selectedEntries;
     final allFavorite =
         selected.isNotEmpty && selected.every(controller.isFavorite);
+    final compact = MediaQuery.sizeOf(context).width < 600;
+    Widget action({
+      required IconData icon,
+      required String label,
+      required VoidCallback? onPressed,
+      bool primary = false,
+    }) {
+      if (compact) {
+        return IconButton(
+          onPressed: onPressed,
+          icon: Icon(icon),
+          tooltip: label,
+        );
+      }
+      return primary
+          ? FilledButton.icon(
+              onPressed: onPressed,
+              icon: Icon(icon),
+              label: Text(label),
+            )
+          : OutlinedButton.icon(
+              onPressed: onPressed,
+              icon: Icon(icon),
+              label: Text(label),
+            );
+    }
+
     return Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: 8,
+      spacing: compact ? 0 : 8,
       runSpacing: 8,
       children: [
         Checkbox(
           tristate: true,
           value: count == 0 ? false : (count == total ? true : null),
           onChanged: (_) => controller.toggleSelectAll(),
-          semanticLabel: 'Select all',
+          semanticLabel: _localized(
+            context,
+            en: 'Select all',
+            ru: 'Выбрать все',
+          ),
         ),
         Text(
           _localized(context, en: '$count selected', ru: 'Выбрано: $count'),
           style: Theme.of(context).textTheme.titleSmall,
         ),
-        OutlinedButton.icon(
+        if (!compact) const SizedBox(width: 8),
+        action(
+          icon: Icons.drive_file_move_outline,
+          label: _localized(context, en: 'Move to…', ru: 'Переместить…'),
           onPressed: count == 0 ? null : onMove,
-          icon: const Icon(Icons.drive_file_move_outline),
-          label: Text(_localized(context, en: 'Move to…', ru: 'Переместить…')),
         ),
-        OutlinedButton.icon(
+        action(
+          icon: Icons.download_outlined,
+          label: _localized(context, en: 'Download', ru: 'Скачать'),
           onPressed: count == 0 || controller.busy ? null : onDownload,
-          icon: const Icon(Icons.download_outlined),
-          label: Text(_localized(context, en: 'Download', ru: 'Скачать')),
         ),
         IconButton(
           onPressed: count == 0 ? null : () => onFavorite(!allFavorite),
@@ -1604,17 +2228,22 @@ final class _SelectionBar extends StatelessWidget {
                   ru: 'Добавить в избранное',
                 ),
         ),
-        FilledButton.icon(
+        action(
+          icon: Icons.delete_outline,
+          label: _localized(context, en: 'Move to trash', ru: 'В корзину'),
           onPressed: count == 0 ? null : onDelete,
-          icon: const Icon(Icons.delete_outline),
-          label: Text(
-            _localized(context, en: 'Move to trash', ru: 'В корзину'),
-          ),
+          primary: true,
         ),
-        TextButton(
-          onPressed: controller.clearSelection,
-          child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
-        ),
+        compact
+            ? IconButton(
+                onPressed: controller.clearSelection,
+                icon: const Icon(Icons.close),
+                tooltip: _localized(context, en: 'Cancel', ru: 'Отмена'),
+              )
+            : TextButton(
+                onPressed: controller.clearSelection,
+                child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+              ),
       ],
     );
   }

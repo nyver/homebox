@@ -473,7 +473,7 @@ final class _VersionHistoryDialogState extends State<_VersionHistoryDialog> {
         [
           if (version.isCurrent)
             _localized(context, en: 'Current version', ru: 'Текущая версия'),
-          if (size != null) _formatFileSize(size),
+          if (size != null) _formatFileSize(context, size),
         ].join(' • '),
       ),
       trailing: Row(

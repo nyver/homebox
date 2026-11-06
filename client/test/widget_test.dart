@@ -44,18 +44,42 @@ void main() {
 
     // The header duplicates the sync status next to "Vault locked" from any
     // section, not just the Sync page itself.
-    expect(find.text('Sync paused'), findsOneWidget);
+    expect(find.text('Sync not set up'), findsOneWidget);
 
     await tester.tap(find.text('Sync'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Sync paused'), findsNWidgets(2));
+    expect(find.text('Sync not set up'), findsNWidgets(2));
     expect(
       find.text(
-        'Provision this device with a trusted device or Recovery Secret.',
+        'Sync starts once this device is connected to a server and its vault is unlocked.',
       ),
       findsOneWidget,
     );
+  });
+
+  testWidgets('header statuses and empty states lead to where to act', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_testApp());
+    await tester.pumpAndSettle();
+
+    // The header's sync status opens the Sync page.
+    await tester.tap(find.text('Sync not set up'));
+    await tester.pumpAndSettle();
+    expect(find.text('Local sync folder'), findsOneWidget);
+
+    // The vault lock opens Settings.
+    await tester.tap(find.byTooltip(_vaultLockedTooltip));
+    await tester.pumpAndSettle();
+    expect(find.text('This device'), findsOneWidget);
+
+    // The Files empty state offers a direct way to Settings too.
+    await tester.tap(find.text('Files'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open Settings'));
+    await tester.pumpAndSettle();
+    expect(find.text('This device'), findsOneWidget);
   });
 
   testWidgets('the Sync page lets Android users choose a local sync folder', (

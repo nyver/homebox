@@ -1,5 +1,8 @@
 part of '../main.dart';
 
+/// The Sync page: one summary card with what the user usually needs (state,
+/// last sync, waiting changes, "Sync now"), the local folder, and the
+/// technical details and destructive Resync tucked away below.
 class _SyncSection extends StatelessWidget {
   const _SyncSection({
     required this.syncFolder,
@@ -12,6 +15,7 @@ class _SyncSection extends StatelessWidget {
     required this.onToggleSyncPause,
     required this.onResyncVault,
     required this.resyncingVault,
+    required this.onSyncNow,
   });
   final String? syncFolder;
   final Future<void> Function() onSelectSyncFolder;
@@ -23,72 +27,35 @@ class _SyncSection extends StatelessWidget {
   final VoidCallback onToggleSyncPause;
   final Future<void> Function() onResyncVault;
   final bool resyncingVault;
+  final Future<void> Function() onSyncNow;
 
   @override
   Widget build(BuildContext context) {
     final engine = syncEngine;
+    final android = defaultTargetPlatform == TargetPlatform.android;
     return _PageFrame(
       title: _localized(context, en: 'Sync', ru: 'Синхронизация'),
-      subtitle: engine == null
-          ? _localized(
-              context,
-              en: 'Sync is paused while the E2EE vault is locked.',
-              ru: 'Синхронизация приостановлена, пока E2EE-хранилище заблокировано.',
-            )
-          : _localized(
-              context,
-              en: 'The local cache and outbox sync with the server automatically.',
-              ru: 'Локальный кэш и очередь автоматически синхронизируются с сервером.',
-            ),
+      subtitle: _localized(
+        context,
+        en: 'Changes made on this device and on your other devices are exchanged automatically.',
+        ru: 'Изменения на этом и других ваших устройствах передаются автоматически.',
+      ),
       child: ListView(
         children: [
           if (engine == null)
-            const Card(
+            Card(
               child: ListTile(
-                leading: Icon(Icons.pause_circle_outline),
-                title: Text('Sync paused'),
-                subtitle: Text(
-                  'Provision this device with a trusted device or Recovery Secret.',
-                ),
-                trailing: Chip(label: Text('Locked')),
+                leading: const Icon(Icons.cloud_off_outlined),
+                title: Text(_syncNotSetUpLabel(context)),
+                subtitle: Text(_syncNotSetUpHint(context)),
               ),
             )
           else
-            AnimatedBuilder(
-              animation: Listenable.merge([engine, ?syncFolderMaterializer]),
-              builder: (context, _) {
-                final (
-                  icon,
-                  label,
-                  color,
-                  tooltip,
-                ) = _effectiveSyncStatusPresentation(
-                  engine: engine,
-                  materializer: syncFolderMaterializer,
-                );
-                return Card(
-                  child: ListTile(
-                    leading: Icon(icon, color: color),
-                    title: Text(label),
-                    subtitle: tooltip != null
-                        ? Text(tooltip)
-                        : engine.isPaused
-                        ? const Text(
-                            'No new sync pass starts until you resume.',
-                          )
-                        : null,
-                    trailing: OutlinedButton.icon(
-                      onPressed: onToggleSyncPause,
-                      icon: Icon(
-                        engine.isPaused
-                            ? Icons.play_arrow_outlined
-                            : Icons.pause_outlined,
-                      ),
-                      label: Text(engine.isPaused ? 'Resume' : 'Pause'),
-                    ),
-                  ),
-                );
-              },
+            _SyncSummaryCard(
+              engine: engine,
+              materializer: syncFolderMaterializer,
+              onToggleSyncPause: onToggleSyncPause,
+              onSyncNow: onSyncNow,
             ),
           if (engine != null)
             AnimatedBuilder(
@@ -102,211 +69,541 @@ class _SyncSection extends StatelessWidget {
                 );
               },
             ),
-          if (defaultTargetPlatform == TargetPlatform.android)
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.folder_outlined),
-                title: const Text('Local sync folder'),
-                subtitle: Text(
-                  syncFolder == null
-                      ? 'Choose a folder to mirror server files on this device.'
-                      : 'Server changes download here automatically. Tap a mirrored file in Files to open it.',
-                ),
-                isThreeLine: syncFolder != null,
-                trailing: TextButton(
-                  onPressed: onSelectSyncFolder,
-                  child: Text(syncFolder == null ? 'Choose' : 'Change'),
-                ),
-              ),
-            )
-          else
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.folder_outlined),
-                title: const Text('Local sync folder'),
-                subtitle: Text(
-                  syncFolder == null
-                      ? 'Not selected — files stay reachable only through the Files page.'
-                      : '$syncFolder\nFilesystem changes are picked up automatically. New local folders and their files are uploaded; directory deletes remain conservative.',
-                ),
-                isThreeLine: syncFolder != null,
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (syncFolder != null && onOpenSyncFolder != null)
-                      OutlinedButton.icon(
-                        onPressed: onOpenSyncFolder,
-                        icon: const Icon(Icons.folder_open_outlined),
-                        label: const Text('Open'),
-                      ),
-                    if (syncFolder != null && onOpenSyncFolder != null)
-                      const SizedBox(width: 8),
-                    TextButton(
-                      onPressed: onSelectSyncFolder,
-                      child: Text(syncFolder == null ? 'Choose' : 'Change'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          if (syncFolder != null && syncFolderMaterializer != null)
-            AnimatedBuilder(
-              animation: syncFolderMaterializer!,
-              builder: (context, _) {
-                final materializer = syncFolderMaterializer!;
-                final (icon, label) = switch (materializer.status) {
-                  SyncFolderStatus.idle => (
-                    Icons.check_circle_outline,
-                    'Folder mirrors the vault',
-                  ),
-                  SyncFolderStatus.materializing => (
-                    Icons.download_outlined,
-                    'Writing files to the folder…',
-                  ),
-                  SyncFolderStatus.error => (
-                    Icons.error_outline,
-                    'Could not update the folder',
-                  ),
-                };
-                final progress = materializer.transferProgress;
-                final activeFileName = materializer.activeFileName;
-                return Card(
-                  child: ListTile(
-                    leading: Icon(icon),
-                    title: Text(label),
-                    subtitle:
-                        materializer.status == SyncFolderStatus.error &&
-                            materializer.errorMessage != null
-                        ? Text(materializer.errorMessage!)
-                        : materializer.status ==
-                                  SyncFolderStatus.materializing &&
-                              progress != null &&
-                              activeFileName != null
-                        ? _syncFolderTransferProgress(
-                            verb: 'Downloading',
-                            fileName: activeFileName,
-                            progress: progress,
-                          )
-                        : materializer.status == SyncFolderStatus.materializing
-                        ? const Text('Preparing the local folder…')
-                        : null,
-                  ),
-                );
-              },
-            ),
-          // Android uploads edits to its mirrored files too (see
-          // LocalFolderUploader.scanAndroidEdits), so the status is shown there.
-          if (syncFolder != null && localFolderUploader != null)
-            AnimatedBuilder(
-              animation: localFolderUploader!,
-              builder: (context, _) {
-                final uploader = localFolderUploader!;
-                final (icon, label) = switch (uploader.status) {
-                  LocalUploadStatus.idle => (
-                    Icons.check_circle_outline,
-                    'No local changes pending',
-                  ),
-                  LocalUploadStatus.scanning => (
-                    Icons.upload_outlined,
-                    'Uploading local changes…',
-                  ),
-                  LocalUploadStatus.resyncing => (
-                    Icons.cloud_upload_outlined,
-                    'Rebuilding Vault from local folder…',
-                  ),
-                  LocalUploadStatus.error => (
-                    Icons.error_outline,
-                    'Could not upload local changes',
-                  ),
-                };
-                final progress = uploader.transferProgress;
-                final activeFileName = uploader.activeFileName;
-                return Card(
-                  child: ListTile(
-                    leading: Icon(icon),
-                    title: Text(label),
-                    subtitle:
-                        uploader.status == LocalUploadStatus.error &&
-                            uploader.errorMessage != null
-                        ? Text(uploader.errorMessage!)
-                        : uploader.status == LocalUploadStatus.scanning &&
-                              progress != null &&
-                              activeFileName != null
-                        ? _syncFolderTransferProgress(
-                            verb: 'Uploading',
-                            fileName: activeFileName,
-                            progress: progress,
-                          )
-                        : uploader.status == LocalUploadStatus.scanning
-                        ? const Text('Scanning local changes…')
-                        : uploader.status == LocalUploadStatus.resyncing
-                        ? const Text(
-                            'Moving the old Vault to Trash and uploading a fresh encrypted tree…',
-                          )
-                        : null,
-                  ),
-                );
-              },
+          _SyncFolderCard(
+            syncFolder: syncFolder,
+            onSelectSyncFolder: onSelectSyncFolder,
+            onOpenSyncFolder: onOpenSyncFolder,
+          ),
+          if (syncFolder != null &&
+              syncFolderMaterializer != null &&
+              localFolderUploader != null)
+            _SyncFolderActivityCard(
+              materializer: syncFolderMaterializer!,
+              uploader: localFolderUploader!,
+              watcher: android ? null : syncFolderWatcher,
             ),
           if (syncFolder != null &&
               engine != null &&
               localFolderUploader != null &&
-              defaultTargetPlatform != TargetPlatform.android)
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.restart_alt_outlined),
-                title: const Text('Resync from local folder'),
-                subtitle: const Text(
-                  'Move the current server Vault to Trash, then upload this folder again from scratch.',
+              !android)
+            _ResyncCard(resyncing: resyncingVault, onResync: onResyncVault),
+        ],
+      ),
+    );
+  }
+}
+
+/// Overall state, when the last pass finished, how many local changes are
+/// still waiting, plus Sync now and Pause/Resume.
+final class _SyncSummaryCard extends StatefulWidget {
+  const _SyncSummaryCard({
+    required this.engine,
+    required this.materializer,
+    required this.onToggleSyncPause,
+    required this.onSyncNow,
+  });
+
+  final SyncEngine engine;
+  final SyncFolderMaterializer? materializer;
+  final VoidCallback onToggleSyncPause;
+  final Future<void> Function() onSyncNow;
+
+  @override
+  State<_SyncSummaryCard> createState() => _SyncSummaryCardState();
+}
+
+final class _SyncSummaryCardState extends State<_SyncSummaryCard> {
+  // Re-renders "Last synced 2 minutes ago" while the page stays open.
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => mounted ? setState(() {}) : null,
+    );
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final engine = widget.engine;
+    return AnimatedBuilder(
+      animation: Listenable.merge([engine, ?widget.materializer]),
+      builder: (context, _) {
+        final (icon, label, color, detail) = _effectiveSyncStatusPresentation(
+          context,
+          engine: engine,
+          materializer: widget.materializer,
+        );
+        final lastSyncedAt = engine.lastSyncedAt;
+        final pending = engine.pendingChangeCount;
+        final facts = [
+          ?detail,
+          if (engine.isPaused)
+            _localized(
+              context,
+              en: 'No new sync pass starts until you resume.',
+              ru: 'Новая синхронизация не начнётся, пока вы не продолжите.',
+            ),
+          lastSyncedAt == null
+              ? _localized(
+                  context,
+                  en: 'Not synced since HomeBox started.',
+                  ru: 'С момента запуска HomeBox ещё не синхронизировано.',
+                )
+              : _localized(
+                  context,
+                  en: 'Last synced ${_formatRelativeTime(context, lastSyncedAt, DateTime.now())}.',
+                  ru: 'Последняя синхронизация: ${_formatRelativeTime(context, lastSyncedAt, DateTime.now())}.',
                 ),
-                trailing: FilledButton.icon(
-                  key: const ValueKey('resync-vault'),
-                  onPressed: resyncingVault ? null : onResyncVault,
-                  icon: resyncingVault
-                      ? const SizedBox.square(
-                          dimension: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.restart_alt_outlined),
-                  label: Text(resyncingVault ? 'Resyncing…' : 'Resync'),
+          if (pending > 0)
+            _localized(
+              context,
+              en: '${_countOf(context, pending, enOne: 'change', enMany: 'changes', ruOne: 'изменение', ruFew: 'изменения', ruMany: 'изменений')} waiting to upload.',
+              ru: 'Ожидают отправки: ${_countOf(context, pending, enOne: 'change', enMany: 'changes', ruOne: 'изменение', ruFew: 'изменения', ruMany: 'изменений')}.',
+            ),
+        ];
+        final syncing = engine.status == SyncStatus.syncing;
+        return Card(
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ListTile(
+                  leading: Icon(icon, color: color),
+                  title: Text(label),
+                  subtitle: Text(facts.join('\n')),
+                  isThreeLine: facts.length > 1,
                 ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: widget.onToggleSyncPause,
+                        icon: Icon(
+                          engine.isPaused
+                              ? Icons.play_arrow_outlined
+                              : Icons.pause_outlined,
+                        ),
+                        label: Text(
+                          engine.isPaused
+                              ? _localized(
+                                  context,
+                                  en: 'Resume',
+                                  ru: 'Продолжить',
+                                )
+                              : _localized(context, en: 'Pause', ru: 'Пауза'),
+                        ),
+                      ),
+                      FilledButton.tonalIcon(
+                        key: const ValueKey('sync-now'),
+                        onPressed: syncing || engine.isPaused
+                            ? null
+                            : () => unawaited(widget.onSyncNow()),
+                        icon: syncing
+                            ? const SizedBox.square(
+                                dimension: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.sync),
+                        label: Text(
+                          _localized(
+                            context,
+                            en: 'Sync now',
+                            ru: 'Синхронизировать',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+final class _SyncFolderCard extends StatelessWidget {
+  const _SyncFolderCard({
+    required this.syncFolder,
+    required this.onSelectSyncFolder,
+    required this.onOpenSyncFolder,
+  });
+
+  final String? syncFolder;
+  final Future<void> Function() onSelectSyncFolder;
+  final Future<void> Function()? onOpenSyncFolder;
+
+  @override
+  Widget build(BuildContext context) {
+    final folder = syncFolder;
+    final android = defaultTargetPlatform == TargetPlatform.android;
+    final subtitle = switch ((folder, android)) {
+      (null, true) => _localized(
+        context,
+        en: 'Choose a folder to mirror server files on this device.',
+        ru: 'Выберите папку, в которую будут скачиваться файлы с сервера.',
+      ),
+      (null, false) => _localized(
+        context,
+        en: 'Not selected — files stay reachable only through the Files page.',
+        ru: 'Не выбрана — файлы доступны только на странице «Файлы».',
+      ),
+      (_, true) => _localized(
+        context,
+        en: 'Server changes download here automatically. Tap a mirrored file in Files to open it.',
+        ru: 'Изменения с сервера скачиваются сюда автоматически. Нажмите на файл в «Файлах», чтобы открыть его.',
+      ),
+      (final path?, false) => _localized(
+        context,
+        en: '$path\nFiles you add or edit here are uploaded automatically.',
+        ru: '$path\nДобавленные и изменённые здесь файлы загружаются автоматически.',
+      ),
+    };
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.folder_outlined),
+        title: Text(
+          _localized(
+            context,
+            en: 'Local sync folder',
+            ru: 'Локальная папка синхронизации',
+          ),
+        ),
+        subtitle: Text(subtitle),
+        isThreeLine: folder != null,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          spacing: 8,
+          children: [
+            if (folder != null && onOpenSyncFolder != null)
+              OutlinedButton.icon(
+                onPressed: onOpenSyncFolder,
+                icon: const Icon(Icons.folder_open_outlined),
+                label: Text(_localized(context, en: 'Open', ru: 'Открыть')),
+              ),
+            TextButton(
+              onPressed: onSelectSyncFolder,
+              child: Text(
+                folder == null
+                    ? _localized(context, en: 'Choose', ru: 'Выбрать')
+                    : _localized(context, en: 'Change', ru: 'Изменить'),
               ),
             ),
-          if (syncFolder != null &&
-              defaultTargetPlatform != TargetPlatform.android)
-            AnimatedBuilder(
-              animation: syncFolderWatcher,
-              builder: (context, _) {
-                final (icon, label) = switch (syncFolderWatcher.status) {
-                  SyncFolderWatcherStatus.stopped => (
-                    Icons.pause_circle_outline,
-                    'Folder watcher stopped',
-                  ),
-                  SyncFolderWatcherStatus.watching => (
-                    Icons.visibility_outlined,
-                    'Watching local changes',
-                  ),
-                  SyncFolderWatcherStatus.error => (
-                    Icons.error_outline,
-                    'Folder watcher needs attention',
-                  ),
-                };
-                return Card(
-                  child: ListTile(
-                    leading: Icon(icon),
-                    title: Text(label),
-                    subtitle:
-                        syncFolderWatcher.status ==
-                                SyncFolderWatcherStatus.error &&
-                            syncFolderWatcher.errorMessage != null
-                        ? Text(syncFolderWatcher.errorMessage!)
-                        : const Text(
-                            'Changes are debounced before a safe sync pass.',
-                          ),
-                  ),
-                );
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// What the local folder is doing right now in one line, with the
+/// downloader's, uploader's and watcher's individual states under Details.
+final class _SyncFolderActivityCard extends StatelessWidget {
+  const _SyncFolderActivityCard({
+    required this.materializer,
+    required this.uploader,
+    required this.watcher,
+  });
+
+  final SyncFolderMaterializer materializer;
+  final LocalFolderUploader uploader;
+
+  /// Null on Android, which polls instead of watching the folder.
+  final SyncFolderWatcher? watcher;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([materializer, uploader, ?watcher]),
+    builder: (context, _) {
+      final error = Theme.of(context).colorScheme.error;
+      final downloadProgress = materializer.transferProgress;
+      final uploadProgress = uploader.transferProgress;
+      final watcherFailed = watcher?.status == SyncFolderWatcherStatus.error;
+      final (
+        IconData icon,
+        Color? color,
+        String title,
+        Widget? subtitle,
+      ) = switch (true) {
+        _ when materializer.status == SyncFolderStatus.error => (
+          Icons.error_outline,
+          error,
+          _localized(
+            context,
+            en: 'Could not update the folder',
+            ru: 'Не удалось обновить папку',
+          ),
+          _optionalText(materializer.errorMessage),
+        ),
+        _ when uploader.status == LocalUploadStatus.error => (
+          Icons.error_outline,
+          error,
+          _localized(
+            context,
+            en: 'Could not upload local changes',
+            ru: 'Не удалось загрузить локальные изменения',
+          ),
+          _optionalText(uploader.errorMessage),
+        ),
+        _ when watcherFailed => (
+          Icons.error_outline,
+          error,
+          _localized(
+            context,
+            en: 'Folder changes are not being noticed',
+            ru: 'Изменения в папке не отслеживаются',
+          ),
+          _optionalText(watcher?.errorMessage),
+        ),
+        _ when uploader.status == LocalUploadStatus.resyncing => (
+          Icons.cloud_upload_outlined,
+          null,
+          _localized(
+            context,
+            en: 'Rebuilding Vault from local folder…',
+            ru: 'Пересоздание хранилища из локальной папки…',
+          ),
+          Text(
+            _localized(
+              context,
+              en: 'Moving the old Vault to Trash and uploading a fresh encrypted tree…',
+              ru: 'Старое хранилище перемещается в корзину, папка загружается заново…',
+            ),
+          ),
+        ),
+        _ when downloadProgress != null => (
+          Icons.download_outlined,
+          null,
+          _localized(
+            context,
+            en: 'Writing files to the folder…',
+            ru: 'Запись файлов в папку…',
+          ),
+          _syncFolderTransferProgress(
+            context,
+            upload: false,
+            fileName: materializer.activeFileName ?? '',
+            progress: downloadProgress,
+          ),
+        ),
+        _ when uploadProgress != null => (
+          Icons.upload_outlined,
+          null,
+          _localized(
+            context,
+            en: 'Uploading local changes…',
+            ru: 'Загрузка локальных изменений…',
+          ),
+          _syncFolderTransferProgress(
+            context,
+            upload: true,
+            fileName: uploader.activeFileName ?? '',
+            progress: uploadProgress,
+          ),
+        ),
+        _
+            when materializer.status == SyncFolderStatus.materializing ||
+                uploader.status == LocalUploadStatus.scanning =>
+          (
+            Icons.sync,
+            null,
+            _localized(
+              context,
+              en: 'Checking the folder…',
+              ru: 'Проверка папки…',
+            ),
+            const LinearProgressIndicator(),
+          ),
+        _ => (
+          Icons.check_circle_outline,
+          _successColor(context),
+          _localized(
+            context,
+            en: 'Folder mirrors the vault',
+            ru: 'Папка совпадает с хранилищем',
+          ),
+          null,
+        ),
+      };
+      return Card(
+        clipBehavior: Clip.antiAlias,
+        child: ExpansionTile(
+          leading: Icon(icon, color: color),
+          title: Text(title),
+          subtitle: subtitle,
+          shape: const Border(),
+          collapsedShape: const Border(),
+          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          expandedCrossAxisAlignment: CrossAxisAlignment.start,
+          trailing: Text(_localized(context, en: 'Details', ru: 'Подробнее')),
+          children: [
+            _detailLine(
+              context,
+              _localized(
+                context,
+                en: 'Download to folder',
+                ru: 'Скачивание в папку',
+              ),
+              switch (materializer.status) {
+                SyncFolderStatus.idle => _localized(
+                  context,
+                  en: 'idle',
+                  ru: 'ожидание',
+                ),
+                SyncFolderStatus.materializing => _localized(
+                  context,
+                  en: 'working',
+                  ru: 'выполняется',
+                ),
+                SyncFolderStatus.error => _localized(
+                  context,
+                  en: 'error',
+                  ru: 'ошибка',
+                ),
               },
             ),
+            _detailLine(
+              context,
+              _localized(
+                context,
+                en: 'Upload from folder',
+                ru: 'Отправка из папки',
+              ),
+              switch (uploader.status) {
+                LocalUploadStatus.idle => _localized(
+                  context,
+                  en: 'no changes pending',
+                  ru: 'нет изменений',
+                ),
+                LocalUploadStatus.scanning => _localized(
+                  context,
+                  en: 'scanning',
+                  ru: 'проверка',
+                ),
+                LocalUploadStatus.resyncing => _localized(
+                  context,
+                  en: 'rebuilding vault',
+                  ru: 'пересоздание хранилища',
+                ),
+                LocalUploadStatus.error => _localized(
+                  context,
+                  en: 'error',
+                  ru: 'ошибка',
+                ),
+              },
+            ),
+            if (watcher != null)
+              _detailLine(
+                context,
+                _localized(
+                  context,
+                  en: 'Change watcher',
+                  ru: 'Отслеживание изменений',
+                ),
+                switch (watcher!.status) {
+                  SyncFolderWatcherStatus.stopped => _localized(
+                    context,
+                    en: 'stopped',
+                    ru: 'остановлено',
+                  ),
+                  SyncFolderWatcherStatus.watching => _localized(
+                    context,
+                    en: 'watching (changes are batched for a few seconds)',
+                    ru: 'активно (изменения собираются несколько секунд)',
+                  ),
+                  SyncFolderWatcherStatus.error => _localized(
+                    context,
+                    en: 'needs attention',
+                    ru: 'требует внимания',
+                  ),
+                },
+              ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+Widget? _optionalText(String? text) => text == null ? null : Text(text);
+
+Widget _detailLine(BuildContext context, String label, String value) => Padding(
+  padding: const EdgeInsets.only(top: 4),
+  child: Text.rich(
+    TextSpan(
+      children: [
+        TextSpan(
+          text: '$label: ',
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        TextSpan(text: value),
+      ],
+    ),
+    style: Theme.of(context).textTheme.bodySmall,
+  ),
+);
+
+/// Resync is destructive (the server Vault goes to Trash), so it lives in a
+/// collapsed, error-colored "Danger zone" rather than next to everyday
+/// controls.
+final class _ResyncCard extends StatelessWidget {
+  const _ResyncCard({required this.resyncing, required this.onResync});
+
+  final bool resyncing;
+  final Future<void> Function() onResync;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: ExpansionTile(
+        leading: Icon(Icons.warning_amber_outlined, color: scheme.error),
+        title: Text(_localized(context, en: 'Danger zone', ru: 'Опасная зона')),
+        shape: const Border(),
+        collapsedShape: const Border(),
+        initiallyExpanded: resyncing,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.restart_alt_outlined),
+            title: const Text('Resync from local folder'),
+            subtitle: const Text(
+              'Move the current server Vault to Trash, then upload this folder again from scratch.',
+            ),
+            trailing: FilledButton.icon(
+              key: const ValueKey('resync-vault'),
+              style: FilledButton.styleFrom(
+                backgroundColor: scheme.error,
+                foregroundColor: scheme.onError,
+              ),
+              onPressed: resyncing ? null : onResync,
+              icon: resyncing
+                  ? const SizedBox.square(
+                      dimension: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.restart_alt_outlined),
+              label: Text(resyncing ? 'Resyncing…' : 'Resync'),
+            ),
+          ),
         ],
       ),
     );
@@ -379,7 +676,7 @@ class _SyncConflictsCard extends StatelessWidget {
                   _syncConflictDescription(context, conflict.kind),
                   if (conflict.conflictCopyPath != null)
                     '${_localized(context, en: 'Copy', ru: 'Копия')}: ${conflict.conflictCopyPath}',
-                  _formatRelativeTime(conflict.detectedAt, now),
+                  _formatRelativeTime(context, conflict.detectedAt, now),
                 ].join('\n'),
               ),
               isThreeLine: true,
@@ -443,12 +740,16 @@ String _syncConflictDescription(BuildContext context, SyncConflictKind kind) =>
 /// Shared inline progress display for both directions of local-folder sync.
 /// File transfers report byte/chunk progress; scanning and folder creation
 /// remain intentionally indeterminate until a concrete file starts moving.
-Widget _syncFolderTransferProgress({
-  required String verb,
+Widget _syncFolderTransferProgress(
+  BuildContext context, {
+  required bool upload,
   required String fileName,
   required double progress,
 }) {
   final percent = (progress * 100).round().clamp(0, 100);
+  final verb = upload
+      ? _localized(context, en: 'Uploading', ru: 'Отправка')
+      : _localized(context, en: 'Downloading', ru: 'Скачивание');
   return Column(
     mainAxisSize: MainAxisSize.min,
     crossAxisAlignment: CrossAxisAlignment.start,

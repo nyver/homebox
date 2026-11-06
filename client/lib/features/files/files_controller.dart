@@ -258,6 +258,9 @@ final class FilesController extends ChangeNotifier {
   final Set<String> _selectedIds = {};
   bool _selectionMode = false;
 
+  /// The entry a Shift+click range starts from: the last one toggled.
+  String? _selectionAnchorId;
+
   /// True while the Files page shows checkboxes for bulk actions. It can be
   /// on with nothing selected yet, after the user chose "Select".
   bool get selectionMode => _selectionMode;
@@ -282,7 +285,31 @@ final class FilesController extends ChangeNotifier {
   /// Selects or deselects [entry], turning selection mode on as needed.
   void toggleSelection(FileEntry entry) {
     _selectionMode = true;
+    _selectionAnchorId = entry.node.id;
     if (!_selectedIds.remove(entry.node.id)) _selectedIds.add(entry.node.id);
+    notifyListeners();
+  }
+
+  /// Adds every entry between the last toggled one and [entry] (inclusive)
+  /// to the selection, as Shift+click does in desktop file managers. With no
+  /// usable anchor this simply selects [entry].
+  void extendSelectionTo(FileEntry entry) {
+    final target = _entries.indexWhere((e) => e.node.id == entry.node.id);
+    if (target < 0) return;
+    final anchorId = _selectionAnchorId;
+    final anchor = anchorId == null
+        ? -1
+        : _entries.indexWhere((e) => e.node.id == anchorId);
+    _selectionMode = true;
+    if (anchor < 0) {
+      _selectedIds.add(entry.node.id);
+      _selectionAnchorId = entry.node.id;
+    } else {
+      final (from, to) = anchor <= target ? (anchor, target) : (target, anchor);
+      for (var i = from; i <= to; i++) {
+        _selectedIds.add(_entries[i].node.id);
+      }
+    }
     notifyListeners();
   }
 
@@ -305,6 +332,7 @@ final class FilesController extends ChangeNotifier {
     if (!_selectionMode && _selectedIds.isEmpty) return;
     _selectionMode = false;
     _selectedIds.clear();
+    _selectionAnchorId = null;
     notifyListeners();
   }
 
@@ -312,6 +340,7 @@ final class FilesController extends ChangeNotifier {
   void _resetSelectionForNavigation() {
     _selectionMode = false;
     _selectedIds.clear();
+    _selectionAnchorId = null;
   }
 
   List<String> get breadcrumbNames =>
@@ -849,7 +878,14 @@ final class FilesController extends ChangeNotifier {
   /// open when this call started. Sequential uploads keep memory and network
   /// use bounded, and a failure for one dropped file does not discard the
   /// others.
-  Future<FileUploadBatchResult> uploadFiles(List<String> localPaths) async {
+  ///
+  /// [fileNames] optionally stores a path under a different name than its
+  /// local basename, e.g. "photo (1).jpg" when the user chose to keep both
+  /// files on a name clash.
+  Future<FileUploadBatchResult> uploadFiles(
+    List<String> localPaths, {
+    Map<String, String> fileNames = const {},
+  }) async {
     final uniquePaths = <String>[];
     final seen = <String>{};
     for (final path in localPaths) {
@@ -864,13 +900,14 @@ final class FilesController extends ChangeNotifier {
     final targetParentId = _currentParentId;
     return _runTransfer(FileTransferDirection.upload, () async {
       _errorMessage = null;
-      return _uploadBatch(uniquePaths, targetParentId);
+      return _uploadBatch(uniquePaths, targetParentId, fileNames);
     });
   }
 
   Future<FileUploadBatchResult> _uploadBatch(
     List<String> uniquePaths,
     String? targetParentId,
+    Map<String, String> fileNames,
   ) async {
     var succeeded = 0;
     var failed = 0;
@@ -884,6 +921,7 @@ final class FilesController extends ChangeNotifier {
         try {
           await _uploadFileToParent(
             localPath: uniquePaths[index],
+            fileName: fileNames[uniquePaths[index]],
             ctx: ctx,
             parentId: targetParentId,
             onProgress: (progress) =>
@@ -938,6 +976,7 @@ final class FilesController extends ChangeNotifier {
 
   Future<void> _uploadFileToParent({
     required String localPath,
+    String? fileName,
     required _UploadContext ctx,
     required String? parentId,
     required void Function(double progress) onProgress,
@@ -952,7 +991,7 @@ final class FilesController extends ChangeNotifier {
     if (plaintextLength > homeBoxMaxPlaintextFileSize) {
       throw const FormatException('HomeBox files are limited to 500 MiB.');
     }
-    final fileName = basenameOfLocalPath(localPath);
+    fileName ??= basenameOfLocalPath(localPath);
     final plaintextHash = await plaintextFileSha256(file);
 
     final nodeId = generateUuidV4();

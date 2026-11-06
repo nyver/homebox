@@ -9,6 +9,7 @@ class _SettingsSection extends StatelessWidget {
     required this.recoveryController,
     required this.onVaultProvisioned,
     required this.localeController,
+    required this.themeController,
   });
 
   final DeviceSetupController deviceSetupController;
@@ -18,19 +19,29 @@ class _SettingsSection extends StatelessWidget {
   final RecoveryController recoveryController;
   final Future<void> Function() onVaultProvisioned;
   final AppLocaleController localeController;
+  final AppThemeController themeController;
 
   @override
   Widget build(BuildContext context) => _PageFrame(
     title: _localized(context, en: 'Settings', ru: 'Настройки'),
     subtitle: _localized(
       context,
-      en: 'Connection and device security.',
-      ru: 'Подключение и безопасность устройства.',
+      en: 'Account, device security and app preferences.',
+      ru: 'Аккаунт, безопасность устройства и параметры приложения.',
     ),
     child: ListView(
       children: [
-        _LanguageCard(controller: localeController),
+        _SettingsGroupHeading(
+          _localized(context, en: 'Account', ru: 'Аккаунт'),
+        ),
         _ServerConnectionCard(controller: serverConnectionController),
+        _SettingsGroupHeading(
+          _localized(
+            context,
+            en: 'Devices and encryption',
+            ru: 'Устройства и шифрование',
+          ),
+        ),
         _DeviceIdentityCard(controller: deviceSetupController),
         _DeviceProvisioningCard(
           controller: deviceProvisioningController,
@@ -56,8 +67,78 @@ class _SettingsSection extends StatelessWidget {
           serverConnectionController: serverConnectionController,
           vaultSetupController: vaultSetupController,
         ),
-        const _AutostartCard(),
+        _SettingsGroupHeading(
+          _localized(context, en: 'Application', ru: 'Приложение'),
+        ),
+        _LanguageCard(controller: localeController),
+        _ThemeCard(controller: themeController),
+        // Autostart is a Windows sign-in feature; elsewhere it would only
+        // be a disabled switch explaining that it does not apply.
+        if (defaultTargetPlatform == TargetPlatform.windows)
+          const _AutostartCard(),
       ],
+    ),
+  );
+}
+
+final class _SettingsGroupHeading extends StatelessWidget {
+  const _SettingsGroupHeading(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(4, 16, 4, 4),
+    child: Text(
+      text,
+      style: Theme.of(context).textTheme.titleSmall
+          ?.copyWith(color: Theme.of(context).colorScheme.primary),
+    ),
+  );
+}
+
+final class _ThemeCard extends StatelessWidget {
+  const _ThemeCard({required this.controller});
+
+  final AppThemeController controller;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: controller,
+    builder: (context, _) => Card(
+      child: ListTile(
+        leading: const Icon(Icons.dark_mode_outlined),
+        title: Text(_localized(context, en: 'Theme', ru: 'Тема')),
+        subtitle: Text(
+          _localized(
+            context,
+            en: 'Light, dark, or follow the system setting.',
+            ru: 'Светлая, тёмная или как в системе.',
+          ),
+        ),
+        trailing: DropdownButtonHideUnderline(
+          child: DropdownButton<ThemeMode>(
+            value: controller.mode,
+            onChanged: (mode) {
+              if (mode != null) unawaited(controller.setMode(mode));
+            },
+            items: [
+              DropdownMenuItem(
+                value: ThemeMode.system,
+                child: Text(_localized(context, en: 'System', ru: 'Системная')),
+              ),
+              DropdownMenuItem(
+                value: ThemeMode.light,
+                child: Text(_localized(context, en: 'Light', ru: 'Светлая')),
+              ),
+              DropdownMenuItem(
+                value: ThemeMode.dark,
+                child: Text(_localized(context, en: 'Dark', ru: 'Тёмная')),
+              ),
+            ],
+          ),
+        ),
+      ),
     ),
   );
 }
@@ -512,7 +593,7 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
                         ? Icons.phone_android_outlined
                         : Icons.desktop_windows_outlined,
                     color: device.hasVaultKey
-                        ? Colors.green
+                        ? _successColor(context)
                         : Theme.of(context).colorScheme.outline,
                   ),
                   title: Text(
@@ -527,8 +608,8 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
                             : Icons.hourglass_empty_outlined,
                         size: 14,
                         color: device.hasVaultKey
-                            ? Colors.green
-                            : Colors.orange,
+                            ? _successColor(context)
+                            : _warningColor(context),
                       ),
                       const SizedBox(width: 4),
                       Expanded(
@@ -630,9 +711,16 @@ final class _DeviceIdentityCard extends StatelessWidget {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Prepare this device?'),
-        content: const Text(
-          'HomeBox will create an X25519 private key protected by secure storage on this device. '
-          'This does not unlock the vault until a trusted device or Recovery Secret approves it.',
+        content: Text(
+          _localized(
+            context,
+            en:
+                'HomeBox will create this device\'s own encryption key and keep it in the system\'s secure storage. '
+                'It does not unlock your files until a trusted device or your Recovery Secret approves it.',
+            ru:
+                'HomeBox создаст собственный ключ шифрования этого устройства и сохранит его в защищённом хранилище системы. '
+                'Файлы станут доступны только после подтверждения с доверенного устройства или по Recovery Secret.',
+          ),
         ),
         actions: [
           TextButton(
@@ -666,8 +754,11 @@ final class _DeviceIdentityCard extends StatelessWidget {
         DeviceSetupStatus.checking => 'Checking secure storage…',
         DeviceSetupStatus.missing =>
           'No device identity. Create one before requesting provisioning.',
-        DeviceSetupStatus.creating =>
-          'Creating a device-bound X25519 identity…',
+        DeviceSetupStatus.creating => _localized(
+          context,
+          en: 'Creating this device\'s key…',
+          ru: 'Создание ключа устройства…',
+        ),
         DeviceSetupStatus.ready =>
           'Identity ready · Not provisioned\nFingerprint: $fingerprint',
         DeviceSetupStatus.failed =>
@@ -743,6 +834,54 @@ final class _ServerConnectionCard extends StatelessWidget {
     );
     if (entered == null || entered.trim().isEmpty) return;
     await controller.discover(entered);
+    // Shown from here, once per discovery, rather than from build(): a
+    // rebuild while awaiting trust must not stack a second dialog.
+    final fingerprint = controller.discoveredFingerprint;
+    if (!context.mounted ||
+        controller.status != ServerConnectionStatus.awaitingTrust ||
+        fingerprint == null) {
+      return;
+    }
+    await _confirmFingerprint(context, fingerprint);
+  }
+
+  Future<void> _confirmForget(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          _localized(
+            context,
+            en: 'Forget this server?',
+            ru: 'Забыть этот сервер?',
+          ),
+        ),
+        content: Text(
+          _localized(
+            context,
+            en:
+                'This device signs out and forgets the server\'s verified identity. '
+                'To reconnect you will have to verify its fingerprint and sign in again. '
+                'Files on the server are not affected.',
+            ru:
+                'Устройство выйдет из аккаунта и забудет проверенный отпечаток сервера. '
+                'Для повторного подключения придётся снова сверить отпечаток и войти. '
+                'Файлы на сервере не пострадают.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_localized(context, en: 'Forget', ru: 'Забыть')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await controller.forgetServer();
   }
 
   Future<void> _confirmFingerprint(
@@ -851,8 +990,8 @@ final class _ServerConnectionCard extends StatelessWidget {
                 child: const Text('Connect'),
               ),
               _ => TextButton(
-                onPressed: () => controller.forgetServer(),
-                child: const Text('Forget'),
+                onPressed: () => _confirmForget(context),
+                child: Text(_localized(context, en: 'Forget', ru: 'Забыть')),
               ),
             },
           ),
@@ -870,15 +1009,6 @@ final class _ServerConnectionCard extends StatelessWidget {
             ),
           ),
         );
-      }
-
-      if (controller.status == ServerConnectionStatus.awaitingTrust &&
-          controller.discoveredFingerprint != null) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (context.mounted) {
-            _confirmFingerprint(context, controller.discoveredFingerprint!);
-          }
-        });
       }
 
       if (controller.status == ServerConnectionStatus.connectedLoggedOut ||

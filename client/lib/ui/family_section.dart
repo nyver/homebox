@@ -6,10 +6,14 @@ final class _FamilySection extends StatefulWidget {
   const _FamilySection({
     required this.controller,
     required this.androidFileSaver,
+    required this.onOpenSettings,
   });
 
   final FamilyVaultController? controller;
   final AndroidFileSaver? androidFileSaver;
+
+  /// Shows Settings, where the server connection and vault are set up.
+  final VoidCallback onOpenSettings;
 
   @override
   State<_FamilySection> createState() => _FamilySectionState();
@@ -65,9 +69,20 @@ final class _FamilySectionState extends State<_FamilySection> {
       return _PageFrame(
         title: title,
         subtitle: _localized(context, en: 'Shared folders', ru: 'Общие папки'),
-        child: const _FilesMessageState(
+        child: _FilesMessageState(
           icon: Icons.cloud_off_outlined,
-          message: 'Connect to a server, sign in, and set up the vault in Settings to share folders with your family.',
+          message: _localized(
+            context,
+            en: 'Connect to a server, sign in, and set up the vault in Settings to share folders with your family.',
+            ru: 'Подключитесь к серверу, войдите и настройте хранилище в настройках, чтобы делиться папками с семьёй.',
+          ),
+          action: FilledButton.icon(
+            onPressed: widget.onOpenSettings,
+            icon: const Icon(Icons.settings_outlined),
+            label: Text(
+              _localized(context, en: 'Open Settings', ru: 'Открыть настройки'),
+            ),
+          ),
         ),
       );
     }
@@ -845,13 +860,14 @@ final class _SharedFolderView extends StatelessWidget {
                                     ),
                                   )
                                 : entry.isDirectory
-                                ? _folderListIcon
-                                : _defaultFileListIcon,
+                                ? _folderListIcon(context, shared: false)
+                                : _fileTypeListIcon(context, entry.name),
                             title: Text(entry.name),
                             subtitle: entry.isDirectory
                                 ? null
                                 : Text(
                                     _formatFileSize(
+                                      context,
                                       entry.metadata.plaintextSize ?? 0,
                                     ),
                                   ),
@@ -1064,39 +1080,90 @@ final class _SharedFolderView extends StatelessWidget {
   }
 }
 
+/// Asks for a file or folder name. Returns the trimmed name, or null when
+/// cancelled or left empty. When renaming, the part before the extension is
+/// preselected, so typing replaces the name but keeps ".jpg".
 Future<String?> _askName(
   BuildContext context, {
   required String title,
   required String initial,
+  String? label,
+  String? confirm,
 }) async {
-  final controller = TextEditingController(text: initial);
   final result = await showDialog<String>(
     context: context,
-    builder: (context) => AlertDialog(
-      title: Text(title),
-      content: TextField(
-        controller: controller,
-        autofocus: true,
-        decoration: const InputDecoration(labelText: 'Name'),
-        onSubmitted: (value) => Navigator.pop(context, value.trim()),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, controller.text.trim()),
-          child: const Text('OK'),
-        ),
-      ],
+    builder: (context) => _NameDialog(
+      title: title,
+      initial: initial,
+      label: label ?? _localized(context, en: 'Name', ru: 'Имя'),
+      confirm: confirm ?? _localized(context, en: 'OK', ru: 'OK'),
     ),
   );
-  controller.dispose();
-  return result == null || result.isEmpty ? null : result;
+  final name = result?.trim();
+  return name == null || name.isEmpty ? null : name;
 }
 
-/// The selection toolbar of an opened shared folder. Moving and trashing
+final class _NameDialog extends StatefulWidget {
+  const _NameDialog({
+    required this.title,
+    required this.initial,
+    required this.label,
+    required this.confirm,
+  });
+
+  final String title;
+  final String initial;
+  final String label;
+  final String confirm;
+
+  @override
+  State<_NameDialog> createState() => _NameDialogState();
+}
+
+final class _NameDialogState extends State<_NameDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    final initial = widget.initial;
+    final dot = initial.lastIndexOf('.');
+    _controller = TextEditingController(text: initial)
+      ..selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: dot > 0 ? dot : initial.length,
+      );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.title),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      decoration: InputDecoration(labelText: widget.label),
+      onSubmitted: (value) => Navigator.pop(context, value),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _controller.text),
+        child: Text(widget.confirm),
+      ),
+    ],
+  );
+}
+
+// The selection toolbar of an opened shared folder. Moving and trashing
 /// need "Can edit"; downloading works for every member.
 final class _SharedSelectionBar extends StatelessWidget {
   const _SharedSelectionBar({

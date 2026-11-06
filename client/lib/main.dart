@@ -3,14 +3,17 @@ import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show kBackMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'core/e2ee/account_identity.dart';
 import 'core/e2ee/device_identity.dart';
 import 'core/e2ee/vault_key_store.dart';
 import 'core/localization/app_locale_controller.dart';
+import 'core/localization/app_theme_controller.dart';
 import 'core/platform/android_file_saver.dart';
 import 'core/platform/android_file_sharer.dart';
 import 'core/platform/android_sync_folder.dart';
@@ -27,6 +30,7 @@ import 'features/device/device_provisioning_controller.dart';
 import 'features/files/download_notification_controller.dart';
 import 'features/files/files_controller.dart';
 import 'features/files/image_thumbnail.dart';
+import 'features/files/unique_name.dart';
 import 'features/server/server_connection_controller.dart';
 import 'features/sharing/family_vault_controller.dart';
 import 'features/sharing/shared_folder_browser.dart';
@@ -64,6 +68,7 @@ class HomeBoxApp extends StatefulWidget {
     this.androidFileSharer,
     this.androidSyncFolder,
     this.localeController,
+    this.themeController,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
@@ -76,14 +81,19 @@ class HomeBoxApp extends StatefulWidget {
   final AndroidFileSharer? androidFileSharer;
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController? localeController;
+  final AppThemeController? themeController;
 
   @override
   State<HomeBoxApp> createState() => _HomeBoxAppState();
 }
 
+const Color _brandSeedColor = Color(0xff176b87);
+
 class _HomeBoxAppState extends State<HomeBoxApp> {
   late final AppLocaleController _localeController;
   late final bool _ownsLocaleController;
+  late final AppThemeController _themeController;
+  late final bool _ownsThemeController;
 
   @override
   void initState() {
@@ -91,23 +101,38 @@ class _HomeBoxAppState extends State<HomeBoxApp> {
     _ownsLocaleController = widget.localeController == null;
     _localeController = widget.localeController ?? AppLocaleController();
     if (_ownsLocaleController) unawaited(_localeController.initialize());
+    _ownsThemeController = widget.themeController == null;
+    _themeController = widget.themeController ?? AppThemeController();
+    if (_ownsThemeController) unawaited(_themeController.initialize());
   }
 
   @override
   void dispose() {
     if (_ownsLocaleController) _localeController.dispose();
+    if (_ownsThemeController) _themeController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: _localeController,
+    animation: Listenable.merge([_localeController, _themeController]),
     builder: (context, _) => MaterialApp(
       title: 'HomeBox',
       locale: Locale(_localeController.language.languageCode),
       supportedLocales: const [Locale('en'), Locale('ru')],
+      // Built-in widget strings (tooltips such as "Back", text-selection
+      // menus, dialogs' barrier labels) follow the chosen language too.
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
+      themeMode: _themeController.mode,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff176b87)),
+        colorScheme: ColorScheme.fromSeed(seedColor: _brandSeedColor),
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: _brandSeedColor,
+          brightness: Brightness.dark,
+        ),
         useMaterial3: true,
       ),
       home: HomeBoxDesktopPage(
@@ -121,6 +146,7 @@ class _HomeBoxAppState extends State<HomeBoxApp> {
         androidFileSharer: widget.androidFileSharer,
         androidSyncFolder: widget.androidSyncFolder,
         localeController: _localeController,
+        themeController: _themeController,
       ),
     ),
   );
@@ -133,6 +159,89 @@ String _localized(
   required String en,
   required String ru,
 }) => Localizations.localeOf(context).languageCode == 'ru' ? ru : en;
+
+/// Picks the Russian plural form for [n]: 1 файл, 2 файла, 5 файлов.
+String _pluralRu(int n, String one, String few, String many) {
+  final mod10 = n % 10;
+  final mod100 = n % 100;
+  if (mod10 == 1 && mod100 != 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+/// "[n] items" in the current language with the right plural form.
+String _countOf(
+  BuildContext context,
+  int n, {
+  required String enOne,
+  required String enMany,
+  required String ruOne,
+  required String ruFew,
+  required String ruMany,
+}) => _localized(
+  context,
+  en: '$n ${n == 1 ? enOne : enMany}',
+  ru: '$n ${_pluralRu(n, ruOne, ruFew, ruMany)}',
+);
+
+String _itemCount(BuildContext context, int n) => _countOf(
+  context,
+  n,
+  enOne: 'item',
+  enMany: 'items',
+  ruOne: 'элемент',
+  ruFew: 'элемента',
+  ruMany: 'элементов',
+);
+
+/// "5 minutes ago" / "5 минут назад", measured against [referenceNow].
+String _formatRelativeTime(
+  BuildContext context,
+  DateTime utc,
+  DateTime referenceNow,
+) {
+  final elapsed = referenceNow.toUtc().difference(utc.toUtc());
+  final seconds = elapsed.isNegative ? 0 : elapsed.inSeconds;
+  String ago(
+    int n,
+    String enUnit,
+    (String one, String few, String many) ruUnit,
+  ) => _localized(
+    context,
+    en: '$n $enUnit${n == 1 ? '' : 's'} ago',
+    ru: '$n ${_pluralRu(n, ruUnit.$1, ruUnit.$2, ruUnit.$3)} назад',
+  );
+  if (seconds < 10) {
+    return _localized(context, en: 'just now', ru: 'только что');
+  }
+  if (seconds < 60) {
+    return ago(seconds, 'second', ('секунду', 'секунды', 'секунд'));
+  }
+  final minutes = seconds ~/ 60;
+  if (minutes < 60) {
+    return ago(minutes, 'minute', ('минуту', 'минуты', 'минут'));
+  }
+  final hours = minutes ~/ 60;
+  if (hours < 24) return ago(hours, 'hour', ('час', 'часа', 'часов'));
+  final days = hours ~/ 24;
+  if (days < 30) return ago(days, 'day', ('день', 'дня', 'дней'));
+  final months = days ~/ 30;
+  if (months < 12) return ago(months, 'month', ('месяц', 'месяца', 'месяцев'));
+  return ago(days ~/ 365, 'year', ('год', 'года', 'лет'));
+}
+
+/// A success/"all good" accent that keeps enough contrast in both themes;
+/// Material 3 has no success role of its own.
+Color _successColor(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? Colors.green.shade300
+    : Colors.green.shade700;
+
+/// A warning/"needs attention" accent readable in both themes.
+Color _warningColor(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? Colors.orange.shade300
+    : Colors.orange.shade800;
 
 class HomeBoxDesktopPage extends StatefulWidget {
   const HomeBoxDesktopPage({
@@ -147,6 +256,7 @@ class HomeBoxDesktopPage extends StatefulWidget {
     this.androidFileSharer,
     this.androidSyncFolder,
     this.localeController,
+    this.themeController,
   });
 
   final DeviceIdentityStore? deviceIdentityStore;
@@ -163,6 +273,7 @@ class HomeBoxDesktopPage extends StatefulWidget {
   final AndroidFileSharer? androidFileSharer;
   final AndroidSyncFolder? androidSyncFolder;
   final AppLocaleController? localeController;
+  final AppThemeController? themeController;
 
   @override
   State<HomeBoxDesktopPage> createState() => _HomeBoxDesktopPageState();
@@ -187,6 +298,8 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
   late final DownloadNotificationController _downloadNotifications;
   late final AppLocaleController _localeController;
   late final bool _ownsLocaleController;
+  late final AppThemeController _themeController;
+  late final bool _ownsThemeController;
   BiometricAuthenticator? _biometricAuthenticator;
   SyncEngine? _syncEngine;
   FilesController? _filesController;
@@ -249,6 +362,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     _ownsLocaleController = widget.localeController == null;
     _localeController = widget.localeController ?? AppLocaleController();
     if (_ownsLocaleController) unawaited(_localeController.initialize());
+    _ownsThemeController = widget.themeController == null;
+    _themeController = widget.themeController ?? AppThemeController();
+    if (_ownsThemeController) unawaited(_themeController.initialize());
     if (supportsBiometricAppLock(defaultTargetPlatform)) {
       _biometricAuthenticator =
           widget.biometricAuthenticator ?? LocalAuthBiometricAuthenticator();
@@ -742,7 +858,12 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     _deviceSetupController.dispose();
     _serverConnectionController.dispose();
     if (_ownsLocaleController) _localeController.dispose();
+    if (_ownsThemeController) _themeController.dispose();
     super.dispose();
+  }
+
+  void _showSection(AppSection section) {
+    if (_section != section) setState(() => _section = section);
   }
 
   Future<void> _selectSyncFolder() async {
@@ -841,8 +962,12 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
         syncEngine: _syncEngine,
         syncFolderMaterializer: _syncFolderMaterializer,
         dense: dense,
+        onTap: () => _showSection(AppSection.sync),
       ),
-      _VaultStateChip(controller: _vaultSetupController),
+      _VaultStateChip(
+        controller: _vaultSetupController,
+        onTap: () => _showSection(AppSection.settings),
+      ),
     ];
     return dense
         ? Row(
@@ -907,9 +1032,12 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
           ? _androidSyncFolder
           : null,
       localeController: _localeController,
+      themeController: _themeController,
       onPullToRefresh: defaultTargetPlatform == TargetPlatform.android
           ? _refreshFromServer
           : null,
+      onRefresh: _refreshFromServer,
+      onOpenSettings: () => _showSection(AppSection.settings),
       onDownloadCompleted: _showDownloadCompletionNotification,
     );
     if (!wideLayout) {
@@ -935,7 +1063,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
           bottomNavigationBar: NavigationBar(
             selectedIndex: _section.index,
             onDestinationSelected: (index) =>
-                setState(() => _section = AppSection.values[index]),
+                _showSection(AppSection.values[index]),
             destinations: [
               NavigationDestination(
                 icon: Icon(Icons.folder_outlined),
@@ -977,7 +1105,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
                 selectedIndex: _section.index,
                 labelType: NavigationRailLabelType.all,
                 onDestinationSelected: (index) =>
-                    setState(() => _section = AppSection.values[index]),
+                    _showSection(AppSection.values[index]),
                 leading: const Padding(
                   padding: EdgeInsets.symmetric(vertical: 20),
                   child: Icon(Icons.inventory_2_outlined, size: 32),
