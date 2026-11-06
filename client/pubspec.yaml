@@ -43,6 +43,7 @@ dependencies:
   path_provider: ^2.1.6
   image_picker: ^1.2.3
   local_auth: ^2.3.0
+  archive: ^4.6.0
 
 dev_dependencies:
   flutter_test:

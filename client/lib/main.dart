@@ -41,6 +41,7 @@ import 'features/vault/recovery_controller.dart';
 import 'features/vault/vault_setup_controller.dart';
 import 'core/transport/homebox_api_client.dart' as transport;
 
+part 'ui/bulk_actions.dart';
 part 'ui/family_section.dart';
 part 'ui/file_history.dart';
 part 'ui/files_section.dart';

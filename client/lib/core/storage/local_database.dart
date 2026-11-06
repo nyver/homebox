@@ -187,4 +187,11 @@ final List<_Migration> _migrations = [
       verified_at TEXT NOT NULL
     );
   '''),
+  // The account's favorite node IDs (spec §29), mirrored from the server on
+  // every sync pass so the Files page can mark them offline.
+  _Migration(8, '''
+    CREATE TABLE IF NOT EXISTS favorites (
+      node_id TEXT PRIMARY KEY
+    );
+  '''),
 ];

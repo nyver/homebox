@@ -942,6 +942,80 @@ final class _FilesSectionState extends State<_FilesSection> {
     }
   }
 
+  Future<void> _openPage(BuildContext context, WidgetBuilder builder) =>
+      Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
+
+  void _snack(BuildContext context, String message) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message.trim())));
+  }
+
+  /// Picks a destination folder and moves [entries] there.
+  Future<void> _moveEntries(
+    BuildContext context,
+    List<FileEntry> entries,
+  ) async {
+    final controller = widget.controller;
+    if (controller == null || entries.isEmpty) return;
+    final target = await _pickFolder(
+      context,
+      title: entries.length == 1
+          ? 'Move "${entries.single.name}" to…'
+          : 'Move ${entries.length} items to…',
+      rootName: _localized(context, en: 'Root', ru: 'Корень'),
+      rootId: null,
+      loadChildren: (folderId) async => [
+        for (final folder in await controller.folderChoices(folderId))
+          (id: folder.id, name: folder.name),
+      ],
+      excludedIds: {
+        for (final entry in entries)
+          if (entry.isDirectory) entry.node.id,
+      },
+    );
+    if (target == null) return;
+    final moved = await controller.moveNodes(entries, target.id);
+    if (!context.mounted) return;
+    _snack(
+      context,
+      moved == entries.length
+          ? (moved == 1 ? 'Moved 1 item.' : 'Moved $moved items.')
+          : 'Moved $moved of ${entries.length} items. ${controller.errorMessage ?? ''}',
+    );
+  }
+
+  Future<void> _downloadEntries(
+    BuildContext context,
+    List<FileEntry> entries,
+  ) async {
+    final controller = widget.controller;
+    if (controller == null || entries.isEmpty) return;
+    await _bulkDownload(
+      context,
+      run: ({String? directory, String? zipPath}) => controller.downloadEntries(
+        entries,
+        directory: directory,
+        zipPath: zipPath,
+      ),
+      errorMessage: () => controller.errorMessage,
+      androidFileSaver: widget.androidFileSaver,
+    );
+  }
+
+  Future<void> _setFavorite(
+    BuildContext context,
+    List<FileEntry> entries,
+    bool favorite,
+  ) async {
+    final controller = widget.controller;
+    if (controller == null || entries.isEmpty) return;
+    final changed = await controller.setFavorite(entries, favorite);
+    if (changed < entries.length && context.mounted) {
+      _snack(context, controller.errorMessage ?? 'Could not change favorites.');
+    }
+  }
+
   /// Confirms, then moves every selected file and folder to the trash.
   Future<void> _deleteSelected(BuildContext context) async {
     final controller = widget.controller;
@@ -1088,24 +1162,39 @@ final class _FilesSectionState extends State<_FilesSection> {
                     : entry.isDirectory
                     ? _folderListIcon
                     : _FileListLeading(entry: entry, controller: controller),
-                title: entry.isConflictCopy
+                title: entry.isConflictCopy || controller.isFavorite(entry)
                     ? Row(
                         children: [
                           Flexible(child: Text(entry.name)),
-                          const SizedBox(width: 6),
-                          Tooltip(
-                            message: entry.metadata.conflictDetails!,
-                            child: Icon(
-                              Icons.call_split,
-                              size: 18,
-                              color: Theme.of(context).colorScheme.tertiary,
+                          if (controller.isFavorite(entry)) ...[
+                            const SizedBox(width: 6),
+                            Icon(
+                              Icons.star,
+                              size: 16,
+                              color: Colors.amber,
                               semanticLabel: _localized(
                                 context,
-                                en: 'Conflict copy',
-                                ru: 'Конфликтная копия',
+                                en: 'Favorite',
+                                ru: 'В избранном',
                               ),
                             ),
-                          ),
+                          ],
+                          if (entry.isConflictCopy) ...[
+                            const SizedBox(width: 6),
+                            Tooltip(
+                              message: entry.metadata.conflictDetails!,
+                              child: Icon(
+                                Icons.call_split,
+                                size: 18,
+                                color: Theme.of(context).colorScheme.tertiary,
+                                semanticLabel: _localized(
+                                  context,
+                                  en: 'Conflict copy',
+                                  ru: 'Конфликтная копия',
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       )
                     : Text(entry.name),
@@ -1138,6 +1227,10 @@ final class _FilesSectionState extends State<_FilesSection> {
                             entry,
                           ),
                           'delete' => _deleteEntry(context, entry),
+                          'move' => _moveEntries(context, [entry]),
+                          'favorite' => _setFavorite(context, [
+                            entry,
+                          ], !controller.isFavorite(entry)),
                           'family_share' => _showShareFolderDialog(
                             context,
                             widget.familyVault!,
@@ -1217,9 +1310,35 @@ final class _FilesSectionState extends State<_FilesSection> {
                                 ),
                               ),
                             ),
+                          PopupMenuItem(
+                            value: 'favorite',
+                            child: Text(
+                              controller.isFavorite(entry)
+                                  ? _localized(
+                                      context,
+                                      en: 'Remove from favorites',
+                                      ru: 'Убрать из избранного',
+                                    )
+                                  : _localized(
+                                      context,
+                                      en: 'Add to favorites',
+                                      ru: 'Добавить в избранное',
+                                    ),
+                            ),
+                          ),
                           const PopupMenuItem(
                             value: 'rename',
                             child: Text('Rename'),
+                          ),
+                          PopupMenuItem(
+                            value: 'move',
+                            child: Text(
+                              _localized(
+                                context,
+                                en: 'Move to…',
+                                ru: 'Переместить…',
+                              ),
+                            ),
                           ),
                           const PopupMenuItem(
                             value: 'delete',
@@ -1249,6 +1368,15 @@ final class _FilesSectionState extends State<_FilesSection> {
                   _SelectionBar(
                     controller: controller,
                     onDelete: () => _deleteSelected(context),
+                    onMove: () =>
+                        _moveEntries(context, controller.selectedEntries),
+                    onDownload: () =>
+                        _downloadEntries(context, controller.selectedEntries),
+                    onFavorite: (favorite) => _setFavorite(
+                      context,
+                      controller.selectedEntries,
+                      favorite,
+                    ),
                   )
                 else
                   Wrap(
@@ -1257,6 +1385,26 @@ final class _FilesSectionState extends State<_FilesSection> {
                     spacing: 8,
                     runSpacing: 8,
                     children: [
+                      IconButton(
+                        onPressed: () => _openPage(
+                          context,
+                          (context) => _SearchPage(controller: controller),
+                        ),
+                        icon: const Icon(Icons.search),
+                        tooltip: _localized(context, en: 'Search', ru: 'Поиск'),
+                      ),
+                      IconButton(
+                        onPressed: () => _openPage(
+                          context,
+                          (context) => _FavoritesPage(controller: controller),
+                        ),
+                        icon: const Icon(Icons.star_outline),
+                        tooltip: _localized(
+                          context,
+                          en: 'Favorites',
+                          ru: 'Избранное',
+                        ),
+                      ),
                       if (controller.entries.isNotEmpty)
                         IconButton(
                           onPressed: controller.startSelection,
@@ -1392,15 +1540,27 @@ final class _FilesMessageState extends StatelessWidget {
 
 /// Replaces the Files toolbar while entries are being selected.
 final class _SelectionBar extends StatelessWidget {
-  const _SelectionBar({required this.controller, required this.onDelete});
+  const _SelectionBar({
+    required this.controller,
+    required this.onDelete,
+    required this.onMove,
+    required this.onDownload,
+    required this.onFavorite,
+  });
 
   final FilesController controller;
   final VoidCallback onDelete;
+  final VoidCallback onMove;
+  final VoidCallback onDownload;
+  final void Function(bool favorite) onFavorite;
 
   @override
   Widget build(BuildContext context) {
     final count = controller.selectedCount;
     final total = controller.entries.length;
+    final selected = controller.selectedEntries;
+    final allFavorite =
+        selected.isNotEmpty && selected.every(controller.isFavorite);
     return Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
       spacing: 8,
@@ -1415,6 +1575,34 @@ final class _SelectionBar extends StatelessWidget {
         Text(
           _localized(context, en: '$count selected', ru: 'Выбрано: $count'),
           style: Theme.of(context).textTheme.titleSmall,
+        ),
+        OutlinedButton.icon(
+          onPressed: count == 0 ? null : onMove,
+          icon: const Icon(Icons.drive_file_move_outline),
+          label: Text(_localized(context, en: 'Move to…', ru: 'Переместить…')),
+        ),
+        OutlinedButton.icon(
+          onPressed: count == 0 || controller.busy ? null : onDownload,
+          icon: const Icon(Icons.download_outlined),
+          label: Text(_localized(context, en: 'Download', ru: 'Скачать')),
+        ),
+        IconButton(
+          onPressed: count == 0 ? null : () => onFavorite(!allFavorite),
+          icon: Icon(
+            allFavorite ? Icons.star : Icons.star_outline,
+            color: allFavorite ? Colors.amber : null,
+          ),
+          tooltip: allFavorite
+              ? _localized(
+                  context,
+                  en: 'Remove from favorites',
+                  ru: 'Убрать из избранного',
+                )
+              : _localized(
+                  context,
+                  en: 'Add to favorites',
+                  ru: 'Добавить в избранное',
+                ),
         ),
         FilledButton.icon(
           onPressed: count == 0 ? null : onDelete,

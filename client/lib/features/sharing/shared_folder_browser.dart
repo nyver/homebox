@@ -13,6 +13,7 @@ import '../../core/e2ee/scoped_metadata.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/util/local_path.dart';
 import '../../core/util/user_facing_error.dart';
+import '../files/bulk_download.dart';
 import '../files/file_transfer.dart';
 import '../server/server_connection_controller.dart';
 
@@ -91,6 +92,7 @@ final class SharedFolderBrowser extends ChangeNotifier {
         return a.name.toLowerCase().compareTo(b.name.toLowerCase());
       });
       _entries = entries;
+      _selectedIds.retainAll(entries.map((entry) => entry.node.id));
       _errorMessage = null;
     } catch (e) {
       _errorMessage = describeError(e);
@@ -102,12 +104,14 @@ final class SharedFolderBrowser extends ChangeNotifier {
 
   void open(SharedEntry entry) {
     if (!entry.isDirectory) return;
+    _clearSelectionQuietly();
     _path.add((id: entry.node.id, name: entry.name));
     unawaited(refresh());
   }
 
   void goUp() {
     if (_path.isEmpty) return;
+    _clearSelectionQuietly();
     _path.removeLast();
     unawaited(refresh());
   }
@@ -115,8 +119,281 @@ final class SharedFolderBrowser extends ChangeNotifier {
   /// [index] 0 is the shared folder itself.
   void goToBreadcrumb(int index) {
     if (index < 0 || index > _path.length) return;
+    _clearSelectionQuietly();
     _path.removeRange(index, _path.length);
     unawaited(refresh());
+  }
+
+  // --- multi-selection, as in the Files page ---
+
+  final Set<String> _selectedIds = {};
+  bool _selectionMode = false;
+
+  bool get selectionMode => _selectionMode;
+  int get selectedCount => _selectedIds.length;
+  bool isSelected(SharedEntry entry) => _selectedIds.contains(entry.node.id);
+
+  List<SharedEntry> get selectedEntries => [
+    for (final entry in _entries)
+      if (_selectedIds.contains(entry.node.id)) entry,
+  ];
+
+  void startSelection() {
+    _selectionMode = true;
+    _notify();
+  }
+
+  void toggleSelection(SharedEntry entry) {
+    _selectionMode = true;
+    if (!_selectedIds.remove(entry.node.id)) _selectedIds.add(entry.node.id);
+    _notify();
+  }
+
+  void toggleSelectAll() {
+    _selectionMode = true;
+    if (_entries.isNotEmpty && _selectedIds.length == _entries.length) {
+      _selectedIds.clear();
+    } else {
+      _selectedIds
+        ..clear()
+        ..addAll(_entries.map((entry) => entry.node.id));
+    }
+    _notify();
+  }
+
+  void clearSelection() {
+    _clearSelectionQuietly();
+    _notify();
+  }
+
+  void _clearSelectionQuietly() {
+    _selectionMode = false;
+    _selectedIds.clear();
+  }
+
+  /// The ID of the open folder (the shared folder itself at the top).
+  String get currentFolderId => _currentFolderId;
+
+  /// The folders directly inside [parentId], for picking a move
+  /// destination within the shared folder.
+  Future<List<({String id, String name})>> folderChoices(
+    String parentId,
+  ) async {
+    final ctx = await _session();
+    if (ctx == null) return const [];
+    final result = <({String id, String name})>[];
+    for (final node in await ctx.api.listChildren(
+      ctx.accessToken,
+      parentId: parentId,
+    )) {
+      if (node.nodeType != 'DIRECTORY') continue;
+      try {
+        result.add((id: node.id, name: (await _decrypt(node)).fileName));
+      } catch (_) {
+        // Not readable on this device: not offered as a destination.
+      }
+    }
+    result.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return result;
+  }
+
+  /// Moves every entry in [entries] to the owner's Trash. Returns how many
+  /// moved; [errorMessage] explains the first failure.
+  Future<int> deleteEntries(List<SharedEntry> entries) => _bulk(
+    entries,
+    (ctx, entry) => ctx.api.deleteNode(
+      ctx.accessToken,
+      entry.node.id,
+      operationId: generateUuidV4(),
+      expectedRevision: entry.node.revision,
+    ),
+  );
+
+  /// Moves [entries] into [targetFolderId], which must be inside the shared
+  /// folder (the server refuses anything else). An entry whose name is taken
+  /// there, or that would land inside itself, stays where it is.
+  Future<int> moveEntries(
+    List<SharedEntry> entries,
+    String targetFolderId,
+  ) async {
+    final ctx = await _session();
+    if (ctx == null) return 0;
+    final taken = <String>{};
+    try {
+      for (final node in await ctx.api.listChildren(
+        ctx.accessToken,
+        parentId: targetFolderId,
+      )) {
+        try {
+          taken.add(
+            PortableName.comparisonKey((await _decrypt(node)).fileName),
+          );
+        } catch (_) {
+          // See folderChoices.
+        }
+      }
+    } catch (e) {
+      _errorMessage = describeError(e);
+      _notify();
+      return 0;
+    }
+    return _bulk(entries, (ctx, entry) async {
+      if (entry.node.parentId == targetFolderId) return;
+      if (entry.node.id == targetFolderId) {
+        throw StateError('"${entry.name}" cannot be moved into itself.');
+      }
+      final key = PortableName.comparisonKey(entry.name);
+      if (!taken.add(key)) {
+        throw StateError('"${entry.name}" already exists in the destination.');
+      }
+      await ctx.api.updateNode(
+        ctx.accessToken,
+        entry.node.id,
+        operationId: generateUuidV4(),
+        expectedRevision: entry.node.revision,
+        moveParent: true,
+        parentId: targetFolderId,
+      );
+    });
+  }
+
+  /// Runs [action] for each entry (write permission required), then clears
+  /// the selection and reloads the folder.
+  Future<int> _bulk(
+    List<SharedEntry> entries,
+    Future<void> Function(_Session ctx, SharedEntry entry) action,
+  ) async {
+    try {
+      _requireWrite();
+    } catch (e) {
+      _errorMessage = describeError(e);
+      _notify();
+      return 0;
+    }
+    final ctx = await _session();
+    if (ctx == null) return 0;
+    var done = 0;
+    Object? firstError;
+    for (final entry in entries) {
+      try {
+        await action(ctx, entry);
+        done++;
+      } catch (e) {
+        firstError ??= e;
+      }
+    }
+    _clearSelectionQuietly();
+    _errorMessage = firstError == null ? null : describeError(firstError);
+    await refresh();
+    if (firstError != null) {
+      _errorMessage = describeError(firstError);
+      _notify();
+    }
+    return done;
+  }
+
+  /// Saves [entries], folders with their content, into [directory] or as
+  /// one ZIP archive at [zipPath]. Returns how many files were saved, or
+  /// null with [errorMessage] set.
+  Future<int?> downloadEntries(
+    List<SharedEntry> entries, {
+    String? directory,
+    String? zipPath,
+  }) async {
+    assert((directory == null) != (zipPath == null));
+    if (_busy) return null;
+    _busy = true;
+    _progress = 0;
+    _notify();
+    try {
+      final ctx = await _session();
+      if (ctx == null) return null;
+      final items = await _collectDownloadItems(ctx, entries);
+      Future<void> download(
+        DownloadItem item,
+        String path,
+        void Function(double progress) onProgress,
+      ) => downloadAndDecryptFileToPath(
+        api: ctx.api,
+        accessToken: ctx.accessToken,
+        keys: _keys,
+        nodeId: item.nodeId!,
+        expectedVersionId: item.versionId,
+        destinationPath: path,
+        expectedPlaintextSha256: item.plaintextSha256,
+        onProgress: onProgress,
+      );
+      final written = zipPath != null
+          ? await downloadItemsAsZip(
+              items: items,
+              zipPath: zipPath,
+              download: download,
+              onProgress: _setProgress,
+            )
+          : await downloadItemsToDirectory(
+              items: items,
+              directory: directory!,
+              download: download,
+              onProgress: _setProgress,
+            );
+      _clearSelectionQuietly();
+      return written;
+    } catch (e) {
+      _errorMessage = describeError(e);
+      return null;
+    } finally {
+      _busy = false;
+      _progress = null;
+      _notify();
+    }
+  }
+
+  Future<List<DownloadItem>> _collectDownloadItems(
+    _Session ctx,
+    List<SharedEntry> entries,
+  ) async {
+    final items = <DownloadItem>[];
+    final visited = <String>{};
+    DownloadItem? fileItem(SharedEntry entry, String path) =>
+        entry.node.currentVersionId == null
+        ? null
+        : DownloadItem.file(
+            relativePath: path,
+            nodeId: entry.node.id,
+            versionId: entry.node.currentVersionId,
+            plaintextSha256: entry.metadata.plaintextSha256,
+            size: entry.metadata.plaintextSize,
+          );
+    Future<void> addFolder(String folderId, String path) async {
+      if (!visited.add(folderId)) return;
+      items.add(DownloadItem.directory(path));
+      for (final node in await ctx.api.listChildren(
+        ctx.accessToken,
+        parentId: folderId,
+      )) {
+        final SharedEntry child;
+        try {
+          child = SharedEntry(node: node, metadata: await _decrypt(node));
+        } catch (_) {
+          continue;
+        }
+        final childPath = '$path/${child.name}';
+        if (child.isDirectory) {
+          await addFolder(node.id, childPath);
+        } else if (fileItem(child, childPath) case final item?) {
+          items.add(item);
+        }
+      }
+    }
+
+    for (final entry in entries) {
+      if (entry.isDirectory) {
+        await addFolder(entry.node.id, entry.name);
+      } else if (fileItem(entry, entry.name) case final item?) {
+        items.add(item);
+      }
+    }
+    return items;
   }
 
   Future<bool> download(SharedEntry entry, String destinationPath) =>

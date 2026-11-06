@@ -20,8 +20,10 @@ import (
 	"github.com/homebox/homebox/internal/auth"
 	"github.com/homebox/homebox/internal/database"
 	"github.com/homebox/homebox/internal/deviceauth"
+	"github.com/homebox/homebox/internal/favorites"
 	"github.com/homebox/homebox/internal/httpapi"
 	"github.com/homebox/homebox/internal/httpserver"
+	"github.com/homebox/homebox/internal/maintenance"
 	"github.com/homebox/homebox/internal/nodes"
 	"github.com/homebox/homebox/internal/provisioning"
 	"github.com/homebox/homebox/internal/recovery"
@@ -62,7 +64,11 @@ func startTestServer(t *testing.T) testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := httpapi.New(authService, provisioning.New(db), nodes.New(db), homeboxsync.New(db, 500, 2000), uploadsService, sharing.New(db), recovery.New(db))
+	maintenanceService, err := maintenance.New(db, dir, maintenance.Policy{OrphanBlobGrace: time.Hour, TrashRetention: 72 * time.Hour, MaxFileVersions: 10, VersionRetention: 30 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := httpapi.New(authService, provisioning.New(db), nodes.New(db), homeboxsync.New(db, 500, 2000), uploadsService, sharing.New(db), recovery.New(db), favorites.New(db), maintenanceService)
 
 	rawListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

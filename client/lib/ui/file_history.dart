@@ -1,8 +1,10 @@
 part of '../main.dart';
 
-/// Lists this account's Trash and restores items from it. Items are read
-/// from the local cache, so the list also works offline; a restore is
-/// queued in the durable outbox like any other change.
+/// Lists this account's Trash, restores items from it, and deletes them
+/// permanently, one at a time or as a selection. Items are read from the
+/// local cache, so the list also works offline; a restore is queued in the
+/// durable outbox like any other change, while a permanent delete needs the
+/// server.
 final class _TrashPage extends StatefulWidget {
   const _TrashPage({required this.controller});
 
@@ -14,7 +16,9 @@ final class _TrashPage extends StatefulWidget {
 
 final class _TrashPageState extends State<_TrashPage> {
   List<TrashEntry>? _entries;
-  final Set<String> _restoring = {};
+  final Set<String> _selected = {};
+  bool _selecting = false;
+  bool _working = false;
 
   @override
   void initState() {
@@ -24,36 +28,147 @@ final class _TrashPageState extends State<_TrashPage> {
 
   Future<void> _load() async {
     final entries = await widget.controller.trashEntries();
-    if (mounted) setState(() => _entries = entries);
+    if (!mounted) return;
+    setState(() {
+      _entries = entries;
+      _selected.retainAll(entries.map((item) => item.entry.node.id));
+    });
   }
 
-  Future<void> _restore(TrashEntry item) async {
-    setState(() => _restoring.add(item.entry.node.id));
-    final ok = await widget.controller.restoreFromTrash(item.entry);
+  List<TrashEntry> get _selectedItems => [
+    for (final item in _entries ?? const <TrashEntry>[])
+      if (_selected.contains(item.entry.node.id)) item,
+  ];
+
+  void _toggle(TrashEntry item) => setState(() {
+    _selecting = true;
+    if (!_selected.remove(item.entry.node.id)) {
+      _selected.add(item.entry.node.id);
+    }
+  });
+
+  void _toggleAll() => setState(() {
+    final all = _entries ?? const <TrashEntry>[];
+    if (_selected.length == all.length) {
+      _selected.clear();
+    } else {
+      _selected
+        ..clear()
+        ..addAll(all.map((item) => item.entry.node.id));
+    }
+  });
+
+  void _endSelection() => setState(() {
+    _selecting = false;
+    _selected.clear();
+  });
+
+  void _report(String message) {
     if (!mounted) return;
-    setState(() => _restoring.remove(item.entry.node.id));
-    final location = item.location.isEmpty
-        ? _localized(context, en: 'Root', ru: 'Корень')
-        : item.location;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          ok
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message.trim())));
+  }
+
+  Future<void> _restore(List<TrashEntry> items) async {
+    if (items.isEmpty) return;
+    setState(() => _working = true);
+    final restored = await widget.controller.restoreEntries(items);
+    if (!mounted) return;
+    setState(() {
+      _working = false;
+      _selecting = false;
+      _selected.clear();
+    });
+    _report(
+      restored == items.length
+          ? _localized(
+              context,
+              en: restored == 1
+                  ? '"${items.single.entry.name}" was restored.'
+                  : 'Restored $restored items.',
+              ru: restored == 1
+                  ? '«${items.single.entry.name}» восстановлен.'
+                  : 'Восстановлено: $restored.',
+            )
+          : '${_localized(context, en: 'Restored $restored of ${items.length} items.', ru: 'Восстановлено $restored из ${items.length}.')} '
+                '${widget.controller.errorMessage ?? ''}',
+    );
+    await _load();
+  }
+
+  Future<void> _purge(List<TrashEntry> items) async {
+    if (items.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          items.length == 1
               ? _localized(
                   context,
-                  en: '"${item.entry.name}" was restored to $location.',
-                  ru: '«${item.entry.name}» восстановлен в $location.',
+                  en: 'Delete "${items.single.entry.name}" permanently?',
+                  ru: 'Удалить «${items.single.entry.name}» навсегда?',
                 )
-              : widget.controller.errorMessage ??
-                    _localized(
-                      context,
-                      en: 'Could not restore this item.',
-                      ru: 'Не удалось восстановить элемент.',
-                    ),
+              : _localized(
+                  context,
+                  en: 'Delete ${items.length} items permanently?',
+                  ru: 'Удалить навсегда элементов: ${items.length}?',
+                ),
         ),
+        content: Text(
+          _localized(
+            context,
+            en: 'Folders are deleted with everything inside them, including all file versions. This cannot be undone.',
+            ru: 'Папки удаляются вместе со всем содержимым и всеми версиями файлов. Это нельзя отменить.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(
+              _localized(
+                context,
+                en: 'Delete permanently',
+                ru: 'Удалить навсегда',
+              ),
+            ),
+          ),
+        ],
       ),
     );
-    if (ok) await _load();
+    if (confirmed != true || !mounted) return;
+    setState(() => _working = true);
+    final purged = await widget.controller.purgeEntries([
+      for (final item in items) item.entry,
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _working = false;
+      _selecting = false;
+      _selected.clear();
+    });
+    _report(
+      purged == items.length
+          ? _localized(
+              context,
+              en: purged == 1
+                  ? 'Deleted permanently.'
+                  : 'Deleted $purged items permanently.',
+              ru: purged == 1
+                  ? 'Удалено навсегда.'
+                  : 'Удалено навсегда: $purged.',
+            )
+          : '${_localized(context, en: 'Deleted $purged of ${items.length} items.', ru: 'Удалено $purged из ${items.length}.')} '
+                '${widget.controller.errorMessage ?? ''}',
+    );
+    await _load();
   }
 
   @override
@@ -82,8 +197,15 @@ final class _TrashPageState extends State<_TrashPage> {
           final location = item.location.isEmpty
               ? _localized(context, en: 'Root', ru: 'Корень')
               : item.location;
+          final selected = _selected.contains(entry.node.id);
           return ListTile(
-            leading: entry.isDirectory
+            selected: _selecting && selected,
+            leading: _selecting
+                ? Checkbox(
+                    value: selected,
+                    onChanged: _working ? null : (_) => _toggle(item),
+                  )
+                : entry.isDirectory
                 ? const Icon(Icons.folder_outlined)
                 : const Icon(Icons.insert_drive_file_outlined),
             title: Text(entry.name),
@@ -98,49 +220,133 @@ final class _TrashPageState extends State<_TrashPage> {
                   ),
               ].join(' • '),
             ),
-            trailing: _restoring.contains(entry.node.id)
-                ? const SizedBox.square(
-                    dimension: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : TextButton.icon(
-                    onPressed: () => _restore(item),
-                    icon: const Icon(Icons.restore),
-                    label: Text(
-                      _localized(context, en: 'Restore', ru: 'Восстановить'),
-                    ),
+            onTap: _selecting && !_working ? () => _toggle(item) : null,
+            onLongPress: _working ? null : () => _toggle(item),
+            trailing: _selecting
+                ? null
+                : PopupMenuButton<String>(
+                    tooltip: 'More actions',
+                    enabled: !_working,
+                    onSelected: (value) => switch (value) {
+                      'restore' => _restore([item]),
+                      'purge' => _purge([item]),
+                      _ => null,
+                    },
+                    itemBuilder: (context) => [
+                      PopupMenuItem(
+                        value: 'restore',
+                        child: Text(
+                          _localized(
+                            context,
+                            en: 'Restore',
+                            ru: 'Восстановить',
+                          ),
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'purge',
+                        child: Text(
+                          _localized(
+                            context,
+                            en: 'Delete permanently…',
+                            ru: 'Удалить навсегда…',
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
           );
         },
       );
     }
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_localized(context, en: 'Trash', ru: 'Корзина')),
-        actions: [
-          IconButton(
-            onPressed: _load,
-            icon: const Icon(Icons.refresh),
-            tooltip: _localized(context, en: 'Refresh', ru: 'Обновить'),
+    final count = _selected.length;
+    final total = entries?.length ?? 0;
+    return PopScope(
+      canPop: !_selecting,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _endSelection();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(
+            _selecting
+                ? _localized(
+                    context,
+                    en: '$count selected',
+                    ru: 'Выбрано: $count',
+                  )
+                : _localized(context, en: 'Trash', ru: 'Корзина'),
           ),
-        ],
-      ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: Text(
-              _localized(
-                context,
-                en: 'The server permanently deletes items after they have been in Trash for its retention period.',
-                ru: 'Сервер окончательно удаляет элементы, пролежавшие в корзине дольше срока хранения.',
+          leading: _selecting
+              ? IconButton(
+                  onPressed: _endSelection,
+                  icon: const Icon(Icons.close),
+                  tooltip: _localized(context, en: 'Cancel', ru: 'Отмена'),
+                )
+              : null,
+          actions: _selecting
+              ? [
+                  Checkbox(
+                    tristate: true,
+                    value: count == 0 ? false : (count == total ? true : null),
+                    onChanged: _working ? null : (_) => _toggleAll(),
+                    semanticLabel: 'Select all',
+                  ),
+                  IconButton(
+                    onPressed: count == 0 || _working
+                        ? null
+                        : () => _restore(_selectedItems),
+                    icon: const Icon(Icons.restore),
+                    tooltip: _localized(
+                      context,
+                      en: 'Restore',
+                      ru: 'Восстановить',
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: count == 0 || _working
+                        ? null
+                        : () => _purge(_selectedItems),
+                    icon: const Icon(Icons.delete_forever_outlined),
+                    tooltip: _localized(
+                      context,
+                      en: 'Delete permanently',
+                      ru: 'Удалить навсегда',
+                    ),
+                  ),
+                ]
+              : [
+                  if (total > 0)
+                    IconButton(
+                      onPressed: () => setState(() => _selecting = true),
+                      icon: const Icon(Icons.checklist),
+                      tooltip: _localized(context, en: 'Select', ru: 'Выбрать'),
+                    ),
+                  IconButton(
+                    onPressed: _load,
+                    icon: const Icon(Icons.refresh),
+                    tooltip: _localized(context, en: 'Refresh', ru: 'Обновить'),
+                  ),
+                ],
+        ),
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_working) const LinearProgressIndicator(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Text(
+                _localized(
+                  context,
+                  en: 'The server permanently deletes items after they have been in Trash for its retention period.',
+                  ru: 'Сервер окончательно удаляет элементы, пролежавшие в корзине дольше срока хранения.',
+                ),
+                style: Theme.of(context).textTheme.bodySmall,
               ),
-              style: Theme.of(context).textTheme.bodySmall,
             ),
-          ),
-          Expanded(child: body),
-        ],
+            Expanded(child: body),
+          ],
+        ),
       ),
     );
   }

@@ -131,94 +131,129 @@ func (s *Service) cleanupExpiredTrash(ctx context.Context, now time.Time) (int, 
 
 	deleted := 0
 	for _, id := range ids {
-		tx, err := s.db.BeginTx(ctx, nil)
+		purged, err := s.purgeSubtree(ctx, id, cutoff, now)
 		if err != nil {
 			return 0, err
 		}
-		uploadRows, err := tx.QueryContext(ctx, trashSubtreeCTE+`SELECT u.id FROM upload_sessions u
-			WHERE u.target_node_id IN (SELECT id FROM subtree)`, id, cutoff)
-		if err != nil {
-			tx.Rollback()
-			return 0, fmt.Errorf("list expired Trash uploads: %w", err)
-		}
-		var uploadIDs []string
-		for uploadRows.Next() {
-			var uploadID string
-			if err := uploadRows.Scan(&uploadID); err != nil {
-				uploadRows.Close()
-				tx.Rollback()
-				return 0, err
-			}
-			if _, err := uuid.Parse(uploadID); err != nil {
-				uploadRows.Close()
-				tx.Rollback()
-				return 0, fmt.Errorf("invalid upload ID in expired Trash subtree: %w", err)
-			}
-			uploadIDs = append(uploadIDs, uploadID)
-		}
-		if err := uploadRows.Err(); err != nil {
-			uploadRows.Close()
-			tx.Rollback()
-			return 0, err
-		}
-		if err := uploadRows.Close(); err != nil {
-			tx.Rollback()
-			return 0, err
-		}
-		if _, err := tx.ExecContext(ctx, trashSubtreeCTE+`INSERT INTO sync_changes
-			(user_scope_id,node_id,operation,created_at)
-			SELECT owner_id,id,'PURGE',? FROM subtree`, id, cutoff, now.Format(time.RFC3339Nano)); err != nil {
-			tx.Rollback()
-			return 0, fmt.Errorf("record expired Trash sync changes: %w", err)
-		}
-		queries := []struct {
-			name string
-			sql  string
-		}{
-			// A folder key is removed only once nothing outside the purged
-			// subtree is still encrypted under it: a node moved out of a
-			// shared folder keeps that folder's key scope.
-			{"folder keys", trashSubtreeCTE + `DELETE FROM folder_keys WHERE folder_id IN (SELECT id FROM subtree)
-				AND NOT EXISTS(SELECT 1 FROM nodes n WHERE n.metadata_key_scope_id=folder_keys.folder_id AND n.id NOT IN (SELECT id FROM subtree))
-				AND NOT EXISTS(SELECT 1 FROM file_versions f WHERE f.key_scope_id=folder_keys.folder_id AND f.node_id NOT IN (SELECT id FROM subtree))`},
-			{"share device envelopes", trashSubtreeCTE + `DELETE FROM share_device_envelopes
-				WHERE share_id IN (SELECT id FROM shares WHERE node_id IN (SELECT id FROM subtree))`},
-			{"shares", trashSubtreeCTE + "DELETE FROM shares WHERE node_id IN (SELECT id FROM subtree)"},
-			{"favorites", trashSubtreeCTE + "DELETE FROM favorites WHERE node_id IN (SELECT id FROM subtree)"},
-			{"upload chunks", trashSubtreeCTE + `DELETE FROM upload_chunks WHERE upload_id IN
-				(SELECT id FROM upload_sessions WHERE target_node_id IN (SELECT id FROM subtree))`},
-			{"upload sessions", trashSubtreeCTE + "DELETE FROM upload_sessions WHERE target_node_id IN (SELECT id FROM subtree)"},
-			{"file versions", trashSubtreeCTE + "DELETE FROM file_versions WHERE node_id IN (SELECT id FROM subtree)"},
-		}
-		for _, query := range queries {
-			if _, err := tx.ExecContext(ctx, query.sql, id, cutoff); err != nil {
-				tx.Rollback()
-				return 0, fmt.Errorf("delete expired Trash %s: %w", query.name, err)
-			}
-		}
-		for _, uploadID := range uploadIDs {
-			if err := os.RemoveAll(s.uploadDir(uploadID)); err != nil {
-				tx.Rollback()
-				return 0, fmt.Errorf("remove expired Trash upload ciphertext: %w", err)
-			}
-		}
-		result, err := tx.ExecContext(ctx, trashSubtreeCTE+"DELETE FROM nodes WHERE id IN (SELECT id FROM subtree)", id, cutoff)
-		if err != nil {
-			tx.Rollback()
-			return 0, fmt.Errorf("delete expired Trash nodes: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return 0, err
-		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return 0, err
-		}
-		if count > 0 {
+		if purged {
 			deleted++
 		}
 	}
 	return deleted, nil
+}
+
+// ErrNotInTrash is returned when a permanent delete targets a node that is
+// not (or no longer) in its owner's Trash.
+var ErrNotInTrash = errors.New("node is not in this account's trash")
+
+// PurgeTrashEntry permanently deletes one of ownerID's Trash entries and
+// its whole subtree right away instead of after the retention period, with
+// exactly the same cleanup as the scheduled purge. Its ciphertext goes
+// through the normal two-pass blob GC.
+func (s *Service) PurgeTrashEntry(ctx context.Context, ownerID, nodeID string) error {
+	var owner string
+	var deletedAt sql.NullString
+	err := s.db.QueryRowContext(ctx, "SELECT owner_id,deleted_at FROM nodes WHERE id=?", nodeID).Scan(&owner, &deletedAt)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (owner != ownerID || !deletedAt.Valid)) {
+		return ErrNotInTrash
+	}
+	if err != nil {
+		return err
+	}
+	now := s.now().UTC()
+	// The node's own deletion time as the cutoff keeps the CTE's
+	// "in Trash" condition true for exactly this entry.
+	purged, err := s.purgeSubtree(ctx, nodeID, deletedAt.String, now)
+	if err != nil {
+		return err
+	}
+	if !purged {
+		return ErrNotInTrash
+	}
+	return nil
+}
+
+// purgeSubtree permanently removes Trash entry id (deleted at or before
+// cutoff) and its complete subtree in one transaction. Blob rows
+// deliberately remain: once their file versions are gone, the existing
+// two-pass GC safely reclaims them. It reports whether anything was removed.
+func (s *Service) purgeSubtree(ctx context.Context, id, cutoff string, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	uploadRows, err := tx.QueryContext(ctx, trashSubtreeCTE+`SELECT u.id FROM upload_sessions u
+		WHERE u.target_node_id IN (SELECT id FROM subtree)`, id, cutoff)
+	if err != nil {
+		return false, fmt.Errorf("list Trash uploads: %w", err)
+	}
+	var uploadIDs []string
+	for uploadRows.Next() {
+		var uploadID string
+		if err := uploadRows.Scan(&uploadID); err != nil {
+			uploadRows.Close()
+			return false, err
+		}
+		if _, err := uuid.Parse(uploadID); err != nil {
+			uploadRows.Close()
+			return false, fmt.Errorf("invalid upload ID in Trash subtree: %w", err)
+		}
+		uploadIDs = append(uploadIDs, uploadID)
+	}
+	if err := uploadRows.Err(); err != nil {
+		uploadRows.Close()
+		return false, err
+	}
+	if err := uploadRows.Close(); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, trashSubtreeCTE+`INSERT INTO sync_changes
+		(user_scope_id,node_id,operation,created_at)
+		SELECT owner_id,id,'PURGE',? FROM subtree`, id, cutoff, now.Format(time.RFC3339Nano)); err != nil {
+		return false, fmt.Errorf("record Trash purge sync changes: %w", err)
+	}
+	queries := []struct {
+		name string
+		sql  string
+	}{
+		// A folder key is removed only once nothing outside the purged
+		// subtree is still encrypted under it: a node moved out of a
+		// shared folder keeps that folder's key scope.
+		{"folder keys", trashSubtreeCTE + `DELETE FROM folder_keys WHERE folder_id IN (SELECT id FROM subtree)
+			AND NOT EXISTS(SELECT 1 FROM nodes n WHERE n.metadata_key_scope_id=folder_keys.folder_id AND n.id NOT IN (SELECT id FROM subtree))
+			AND NOT EXISTS(SELECT 1 FROM file_versions f WHERE f.key_scope_id=folder_keys.folder_id AND f.node_id NOT IN (SELECT id FROM subtree))`},
+		{"share device envelopes", trashSubtreeCTE + `DELETE FROM share_device_envelopes
+			WHERE share_id IN (SELECT id FROM shares WHERE node_id IN (SELECT id FROM subtree))`},
+		{"shares", trashSubtreeCTE + "DELETE FROM shares WHERE node_id IN (SELECT id FROM subtree)"},
+		{"favorites", trashSubtreeCTE + "DELETE FROM favorites WHERE node_id IN (SELECT id FROM subtree)"},
+		{"upload chunks", trashSubtreeCTE + `DELETE FROM upload_chunks WHERE upload_id IN
+			(SELECT id FROM upload_sessions WHERE target_node_id IN (SELECT id FROM subtree))`},
+		{"upload sessions", trashSubtreeCTE + "DELETE FROM upload_sessions WHERE target_node_id IN (SELECT id FROM subtree)"},
+		{"file versions", trashSubtreeCTE + "DELETE FROM file_versions WHERE node_id IN (SELECT id FROM subtree)"},
+	}
+	for _, query := range queries {
+		if _, err := tx.ExecContext(ctx, query.sql, id, cutoff); err != nil {
+			return false, fmt.Errorf("delete Trash %s: %w", query.name, err)
+		}
+	}
+	for _, uploadID := range uploadIDs {
+		if err := os.RemoveAll(s.uploadDir(uploadID)); err != nil {
+			return false, fmt.Errorf("remove Trash upload ciphertext: %w", err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, trashSubtreeCTE+"DELETE FROM nodes WHERE id IN (SELECT id FROM subtree)", id, cutoff)
+	if err != nil {
+		return false, fmt.Errorf("delete Trash nodes: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // pruneFileVersions applies the version retention policy (spec §27.1). A

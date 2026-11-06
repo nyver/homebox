@@ -126,6 +126,7 @@ final class FakeNodeServer {
       return;
     }
     if (await _handleFamilyVault(request, method, path)) return;
+    if (await _handleTrashAndFavorites(request, method, path)) return;
     if (method == 'POST' && path == '/api/v1/nodes') {
       final body = jsonDecode(
         await utf8.decoder.bind(request).join(),
@@ -502,6 +503,74 @@ final class FakeNodeServer {
       'createdAt': '2026-01-01T00:00:00Z',
     });
     return _revision;
+  }
+
+  /// Favorite node IDs, as the real server keeps them (spec §29).
+  final Set<String> favoriteIds = {};
+
+  /// Permanent Trash deletes and favorites. Returns false otherwise.
+  Future<bool> _handleTrashAndFavorites(
+    HttpRequest request,
+    String method,
+    String path,
+  ) async {
+    final segments = request.uri.pathSegments;
+    void notFound() => _writeJson(request, 404, {
+      'error': {
+        'code': 'NOT_FOUND',
+        'message': 'not found',
+        'requestId': 'req',
+      },
+    });
+    if (method == 'DELETE' && path.startsWith('/api/v1/trash/')) {
+      final id = segments.last;
+      final node = _nodes[id];
+      if (node == null || node['deletedAt'] == null) {
+        notFound();
+        return true;
+      }
+      final pending = [id];
+      while (pending.isNotEmpty) {
+        final current = pending.removeLast();
+        pending.addAll(
+          _nodes.values
+              .where((n) => n['parentId'] == current)
+              .map((n) => n['id'] as String),
+        );
+        _nodes.remove(current);
+        _fileVersions.remove(current);
+        favoriteIds.remove(current);
+        _recordChange(current, 'PURGE');
+      }
+      request.response.statusCode = 204;
+      await request.response.close();
+      return true;
+    }
+    if (method == 'GET' && path == '/api/v1/favorites') {
+      _writeJson(request, 200, [
+        for (final id in favoriteIds)
+          if (_nodes[id] != null && _nodes[id]!['deletedAt'] == null)
+            {'nodeId': id, 'createdAt': '2026-01-01T00:00:00Z'},
+      ]);
+      return true;
+    }
+    if ((method == 'PUT' || method == 'DELETE') &&
+        path.startsWith('/api/v1/favorites/')) {
+      final id = segments.last;
+      if (method == 'PUT') {
+        if (_nodes[id] == null) {
+          notFound();
+          return true;
+        }
+        favoriteIds.add(id);
+      } else {
+        favoriteIds.remove(id);
+      }
+      request.response.statusCode = 204;
+      await request.response.close();
+      return true;
+    }
+    return false;
   }
 
   /// Folder keys, rekey, and share endpoints (ADR-023). Returns false for

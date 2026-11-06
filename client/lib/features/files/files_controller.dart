@@ -18,6 +18,7 @@ import '../../core/e2ee/portable_name.dart';
 import '../../core/e2ee/vault_key_store.dart';
 import '../../core/storage/node_cache.dart';
 import '../../core/storage/pending_operations_store.dart';
+import '../../core/storage/search_index.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/util/local_path.dart';
 import '../server/server_connection_controller.dart';
@@ -29,6 +30,7 @@ import '../sync/outbox_conflict_resolver.dart'
         baseParentIdPayloadKey,
         metadataScopePayloadKey;
 import '../sync/sync_engine.dart';
+import 'bulk_download.dart';
 import 'file_transfer.dart';
 import '../../core/util/user_facing_error.dart';
 
@@ -95,6 +97,24 @@ final class FileVersionEntry {
 
   /// Derived from the ciphertext size: every chunk adds one AEAD tag.
   final int? plaintextSize;
+}
+
+/// A folder offered as a move destination.
+final class FolderChoice {
+  const FolderChoice({required this.id, required this.name});
+
+  final String id;
+  final String name;
+}
+
+/// A search hit or favorite, with the readable path of its folder.
+final class LocatedEntry {
+  const LocatedEntry({required this.entry, required this.location});
+
+  final FileEntry entry;
+
+  /// The readable path of the containing folder; empty for the root.
+  final String location;
 }
 
 /// The outcome of one user-initiated batch of file uploads.
@@ -462,6 +482,7 @@ final class FilesController extends ChangeNotifier {
         }
         decrypted.sort(_compareEntries);
         _entries = decrypted;
+        _favoriteIds = _syncEngine.favorites.all();
         // Drop selected entries that disappeared, e.g. deleted elsewhere.
         _selectedIds.retainAll(decrypted.map((entry) => entry.node.id));
         _entriesAsOf = DateTime.now().toUtc();
@@ -1168,6 +1189,11 @@ final class FilesController extends ChangeNotifier {
               type: PendingOperationType.restoreNode,
               nodeId: deleted.id,
               payload: const {},
+              // What a change queued after this restore (such as deleting
+              // the item again before the next sync) is based on, so the
+              // outbox rebases it onto the restored revision instead of
+              // failing it as a conflict.
+              baseRevision: deleted.revision,
               // Strictly increasing, so the outbox pushes the outermost
               // folder's restore first.
               createdAt: now.add(Duration(microseconds: index)),
@@ -1517,6 +1543,507 @@ final class FilesController extends ChangeNotifier {
     );
   }
 
+  // --- favorites (spec §29) ---
+
+  Set<String> _favoriteIds = {};
+
+  bool isFavorite(FileEntry entry) => _favoriteIds.contains(entry.node.id);
+
+  /// Marks or unmarks every entry in [entries] as a favorite. Favorites are
+  /// kept on the server so every device shows them; this needs a
+  /// connection. Returns how many entries changed.
+  Future<int> setFavorite(List<FileEntry> entries, bool favorite) async {
+    final api = _serverConnection.api;
+    final session = await _serverConnection.ensureFreshSession();
+    if (api == null || session == null) {
+      _errorMessage = 'Connect to the server to change favorites.';
+      notifyListeners();
+      return 0;
+    }
+    var changed = 0;
+    Object? firstError;
+    for (final entry in entries) {
+      try {
+        if (favorite) {
+          await api.addFavorite(session.accessToken, entry.node.id);
+          _syncEngine.favorites.add(entry.node.id);
+        } else {
+          await api.removeFavorite(session.accessToken, entry.node.id);
+          _syncEngine.favorites.remove(entry.node.id);
+        }
+        changed++;
+      } catch (e) {
+        firstError ??= e;
+      }
+    }
+    _favoriteIds = _syncEngine.favorites.all();
+    if (firstError != null) _errorMessage = describeError(firstError);
+    _resetSelectionForNavigation();
+    notifyListeners();
+    return changed;
+  }
+
+  /// This account's favorites that are still in its tree, sorted by name.
+  Future<List<LocatedEntry>> favoriteEntries() async {
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      notifyListeners();
+      return const [];
+    }
+    try {
+      final names = <String, String?>{};
+      final result = <LocatedEntry>[];
+      for (final id in _syncEngine.favorites.all()) {
+        final located = await _locate(id, ctx, names);
+        if (located != null) result.add(located);
+      }
+      result.sort(
+        (a, b) =>
+            a.entry.name.toLowerCase().compareTo(b.entry.name.toLowerCase()),
+      );
+      return result;
+    } finally {
+      ctx.dispose();
+    }
+  }
+
+  // --- search (spec §29: client-side, over decrypted names) ---
+
+  final SearchIndex _searchIndex = SearchIndex();
+  Future<void> _searchTail = Future<void>.value();
+
+  /// Finds files and folders whose name contains every word of [query].
+  /// The index of decrypted names lives in memory only; it is built on the
+  /// first search and afterwards only re-reads nodes whose revision changed.
+  Future<List<LocatedEntry>> search(String query) {
+    final previous = _searchTail;
+    final done = Completer<void>();
+    _searchTail = done.future;
+    return () async {
+      try {
+        await previous;
+        return await _searchNow(query);
+      } finally {
+        done.complete();
+      }
+    }();
+  }
+
+  Future<List<LocatedEntry>> _searchNow(String query) async {
+    if (query.trim().isEmpty || _disposed) return const [];
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      notifyListeners();
+      return const [];
+    }
+    try {
+      await _updateSearchIndex(ctx);
+      final names = <String, String?>{};
+      final result = <LocatedEntry>[];
+      for (final id in _searchIndex.search(query)) {
+        final located = await _locate(id, ctx, names);
+        if (located != null) result.add(located);
+      }
+      return result;
+    } finally {
+      ctx.dispose();
+    }
+  }
+
+  Future<void> _updateSearchIndex(_UploadContext ctx) async {
+    final indexed = _searchIndex.stamps();
+    final live = <String>{};
+    final changed = <(String, String, String)>[];
+    for (final node in _syncEngine.nodeCache.listLive()) {
+      live.add(node.id);
+      final stamp = _metadataStamp(node);
+      if (indexed[node.id] == stamp) continue;
+      try {
+        final metadata = await ctx.keys.decrypt(node);
+        changed.add((node.id, stamp, metadata.fileName));
+      } catch (_) {
+        // Not decryptable on this device (yet): leave it out of results.
+      }
+    }
+    if (_disposed) return;
+    _searchIndex.batch(() {
+      for (final (id, stamp, name) in changed) {
+        _searchIndex.put(id, stamp, name);
+      }
+      for (final id in indexed.keys) {
+        if (!live.contains(id)) _searchIndex.remove(id);
+      }
+    });
+  }
+
+  /// Identifies one encryption of [node]'s metadata: the AEAD tag at the
+  /// end of the envelope changes whenever the metadata is re-encrypted,
+  /// including a local rename the server has not confirmed yet (which keeps
+  /// the node's revision).
+  static String _metadataStamp(LocalNode node) {
+    final bytes = node.metadataCiphertext;
+    final tag = bytes.length <= 16 ? bytes : bytes.sublist(bytes.length - 16);
+    return base64Encode(tag);
+  }
+
+  /// [nodeId] as an entry with its folder's path, or null when it is gone,
+  /// in Trash, below a folder in Trash, or cannot be decrypted.
+  Future<LocatedEntry?> _locate(
+    String nodeId,
+    _UploadContext ctx,
+    Map<String, String?> names,
+  ) async {
+    final node = _syncEngine.nodeCache.getById(nodeId);
+    if (node == null || node.isDeleted || _isHidden(node)) return null;
+    try {
+      return LocatedEntry(
+        entry: FileEntry(node: node, metadata: await ctx.keys.decrypt(node)),
+        location: await _readablePath(node.parentId, ctx, names),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Whether a folder above [node] is in Trash or no longer known.
+  bool _isHidden(LocalNode node) {
+    final visited = <String>{};
+    for (var id = node.parentId; id != null && visited.add(id);) {
+      final parent = _syncEngine.nodeCache.getById(id);
+      if (parent == null || parent.isDeleted) return true;
+      id = parent.parentId;
+    }
+    return false;
+  }
+
+  /// Opens [folderId] (the root when null) with its full breadcrumb path,
+  /// e.g. to show a search hit or favorite where it lives.
+  Future<void> revealFolder(String? folderId) async {
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      notifyListeners();
+      return;
+    }
+    final chain = <_Breadcrumb>[];
+    try {
+      final visited = <String>{};
+      for (var id = folderId; id != null && visited.add(id);) {
+        final node = _syncEngine.nodeCache.getById(id);
+        if (node == null) break;
+        chain.add(_Breadcrumb(id, (await ctx.keys.decrypt(node)).fileName));
+        id = node.parentId;
+      }
+    } catch (e) {
+      _errorMessage = describeError(e);
+      notifyListeners();
+      return;
+    } finally {
+      ctx.dispose();
+    }
+    _resetSelectionForNavigation();
+    _path
+      ..clear()
+      ..addAll(chain.reversed);
+    await refresh();
+  }
+
+  /// The folders directly inside [parentId] (the root when null), for
+  /// picking a move destination.
+  Future<List<FolderChoice>> folderChoices(String? parentId) async {
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      notifyListeners();
+      return const [];
+    }
+    try {
+      final result = <FolderChoice>[];
+      for (final node in _syncEngine.nodeCache.listChildren(parentId)) {
+        if (!node.isDirectory) continue;
+        try {
+          result.add(
+            FolderChoice(
+              id: node.id,
+              name: (await ctx.keys.decrypt(node)).fileName,
+            ),
+          );
+        } catch (_) {
+          // Skipped like in the folder listing itself.
+        }
+      }
+      result.sort(
+        (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+      );
+      return result;
+    } finally {
+      ctx.dispose();
+    }
+  }
+
+  // --- bulk move ---
+
+  /// Moves [entries] into [targetParentId] (the root when null) the same
+  /// local-first way as a single move: applied at once and queued in the
+  /// durable outbox. An entry that would land inside itself, collide with a
+  /// name already in the destination, or put a shared folder inside another
+  /// is left where it is, and [errorMessage] says why. Returns how many
+  /// entries moved.
+  Future<int> moveNodes(List<FileEntry> entries, String? targetParentId) async {
+    final ctx = await _requireContext();
+    if (ctx == null) {
+      notifyListeners();
+      return 0;
+    }
+    var moved = 0;
+    String? problem;
+    try {
+      final taken = <String>{};
+      for (final child in _syncEngine.nodeCache.listChildren(targetParentId)) {
+        try {
+          taken.add(
+            PortableName.comparisonKey(
+              (await ctx.keys.decrypt(child)).fileName,
+            ),
+          );
+        } catch (_) {
+          // An undecryptable sibling cannot be compared; the server and the
+          // sync folder still keep both apart by ID.
+        }
+      }
+      for (final entry in entries) {
+        final node = _syncEngine.nodeCache.getById(entry.node.id) ?? entry.node;
+        if (node.isDeleted || node.parentId == targetParentId) continue;
+        if (targetParentId != null &&
+            _isSelfOrDescendant(targetParentId, node.id)) {
+          problem ??= '"${entry.name}" cannot be moved into itself.';
+          continue;
+        }
+        final key = PortableName.comparisonKey(entry.name);
+        if (taken.contains(key)) {
+          problem ??= '"${entry.name}" already exists in the destination.';
+          continue;
+        }
+        try {
+          _checkMoveKeepsSharedFoldersApart(node, targetParentId, ctx);
+        } catch (e) {
+          problem ??= describeError(e);
+          continue;
+        }
+        _syncEngine.nodeCache.upsert(
+          node.copyWith(
+            parentId: targetParentId,
+            clearParent: targetParentId == null,
+            updatedAt: DateTime.now().toUtc(),
+          ),
+        );
+        _enqueueUpdate(
+          node,
+          baseRevision: node.revision,
+          moveParent: true,
+          parentId: targetParentId,
+        );
+        taken.add(key);
+        moved++;
+      }
+    } finally {
+      ctx.dispose();
+    }
+    _resetSelectionForNavigation();
+    if (problem != null) _errorMessage = problem;
+    if (moved > 0) unawaited(_syncEngine.runOnce());
+    await refresh();
+    return moved;
+  }
+
+  /// Whether [nodeId] is [ancestorId] or lies below it.
+  bool _isSelfOrDescendant(String nodeId, String ancestorId) {
+    final visited = <String>{};
+    for (String? id = nodeId; id != null && visited.add(id);) {
+      if (id == ancestorId) return true;
+      id = _syncEngine.nodeCache.getById(id)?.parentId;
+    }
+    return false;
+  }
+
+  // --- bulk download ---
+
+  /// Decrypts [entries], folders with everything inside them, into
+  /// [directory] (keeping the folder structure) or, when [zipPath] is
+  /// given instead, into one ZIP archive there. Each file is verified
+  /// against its encrypted hash like a single download. Returns how many
+  /// files were saved, or null with [errorMessage] set on failure.
+  Future<int?> downloadEntries(
+    List<FileEntry> entries, {
+    String? directory,
+    String? zipPath,
+  }) {
+    assert((directory == null) != (zipPath == null));
+    return _runTransfer(FileTransferDirection.download, () async {
+      final ctx = await _requireContext();
+      if (ctx == null) return null;
+      try {
+        final items = await _collectDownloadItems(entries, ctx);
+        Future<void> download(
+          DownloadItem item,
+          String path,
+          void Function(double progress) onProgress,
+        ) => downloadAndDecryptFileToPath(
+          api: ctx.api,
+          accessToken: ctx.accessToken,
+          keys: ctx.keys.ring,
+          nodeId: item.nodeId!,
+          expectedVersionId: item.versionId,
+          destinationPath: path,
+          expectedPlaintextSha256: item.plaintextSha256,
+          onProgress: onProgress,
+        );
+        final written = zipPath != null
+            ? await downloadItemsAsZip(
+                items: items,
+                zipPath: zipPath,
+                download: download,
+                onProgress: _setProgress,
+              )
+            : await downloadItemsToDirectory(
+                items: items,
+                directory: directory!,
+                download: download,
+                onProgress: _setProgress,
+              );
+        _resetSelectionForNavigation();
+        notifyListeners();
+        return written;
+      } catch (e) {
+        // Broad on purpose, as in refresh(): see its comment.
+        _errorMessage = describeError(e);
+        notifyListeners();
+        return null;
+      } finally {
+        ctx.dispose();
+      }
+    });
+  }
+
+  Future<List<DownloadItem>> _collectDownloadItems(
+    List<FileEntry> entries,
+    _UploadContext ctx,
+  ) async {
+    final items = <DownloadItem>[];
+    final visited = <String>{};
+    DownloadItem? fileItem(
+      LocalNode node,
+      SensitiveNodeMetadata metadata,
+      String path,
+    ) => node.currentVersionId == null
+        ? null // no content uploaded yet
+        : DownloadItem.file(
+            relativePath: path,
+            nodeId: node.id,
+            versionId: node.currentVersionId,
+            plaintextSha256: metadata.plaintextSha256,
+            size: metadata.plaintextSize,
+          );
+    Future<void> addFolder(LocalNode folder, String path) async {
+      if (!visited.add(folder.id)) return;
+      items.add(DownloadItem.directory(path));
+      for (final child in _syncEngine.nodeCache.listChildren(folder.id)) {
+        final SensitiveNodeMetadata metadata;
+        try {
+          metadata = await ctx.keys.decrypt(child);
+        } catch (_) {
+          continue;
+        }
+        final childPath = '$path/${metadata.fileName}';
+        if (child.isDirectory) {
+          await addFolder(child, childPath);
+        } else if (fileItem(child, metadata, childPath) case final item?) {
+          items.add(item);
+        }
+      }
+    }
+
+    for (final entry in entries) {
+      if (entry.isDirectory) {
+        await addFolder(entry.node, entry.name);
+      } else if (fileItem(entry.node, entry.metadata, entry.name)
+          case final item?) {
+        items.add(item);
+      }
+    }
+    return items;
+  }
+
+  // --- bulk Trash actions ---
+
+  /// Restores every entry in [items] (with any deleted folders above it).
+  /// Returns how many were restored; [errorMessage] explains a failure.
+  Future<int> restoreEntries(List<TrashEntry> items) async {
+    var restored = 0;
+    for (final item in items) {
+      if (await restoreFromTrash(item.entry)) restored++;
+    }
+    return restored;
+  }
+
+  /// Permanently deletes every entry in [entries] from Trash now, with
+  /// everything inside it. This cannot be undone and needs a connection.
+  /// Returns how many entries are gone; an entry inside another selected
+  /// folder counts as gone with it.
+  Future<int> purgeEntries(List<FileEntry> entries) async {
+    final api = _serverConnection.api;
+    final session = await _serverConnection.ensureFreshSession();
+    if (api == null || session == null) {
+      _errorMessage = 'Connect to the server to delete items permanently.';
+      notifyListeners();
+      return 0;
+    }
+    final selectedIds = {for (final entry in entries) entry.node.id};
+    var purged = 0;
+    Object? firstError;
+    for (final entry in entries) {
+      if (_hasSelectedAncestor(entry.node, selectedIds)) {
+        purged++;
+        continue;
+      }
+      try {
+        await api.purgeTrashEntry(session.accessToken, entry.node.id);
+      } on transport.HomeBoxApiException catch (e) {
+        // Already purged elsewhere: the intent holds.
+        if (e.code != 'NOT_FOUND') {
+          firstError ??= e;
+          continue;
+        }
+      } catch (e) {
+        firstError ??= e;
+        continue;
+      }
+      _forgetSubtree(entry.node.id);
+      purged++;
+    }
+    if (firstError != null) _errorMessage = describeError(firstError);
+    unawaited(_syncEngine.runOnce());
+    notifyListeners();
+    return purged;
+  }
+
+  /// Drops a purged node and everything below it from the local cache.
+  void _forgetSubtree(String nodeId) {
+    final pending = [nodeId];
+    final visited = <String>{};
+    while (pending.isNotEmpty) {
+      final id = pending.removeLast();
+      if (!visited.add(id)) continue;
+      for (final child in _syncEngine.nodeCache.listChildrenIncludingDeleted(
+        id,
+      )) {
+        pending.add(child.id);
+      }
+      _syncEngine.nodeCache.remove(id);
+      _syncEngine.materializedFiles.remove(id);
+      _syncEngine.materializedDirectories.remove(id);
+      _syncEngine.favorites.remove(id);
+    }
+  }
+
   int _compareEntries(FileEntry a, FileEntry b) {
     if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
     // Folder names always use a predictable alphabetical order. Extension
@@ -1570,6 +2097,7 @@ final class FilesController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _syncEngine.removeListener(_onSyncEngineChanged);
+    _searchIndex.dispose();
     _imagePreviewCache.clear();
     _imagePreviewCacheBytes = 0;
     // In-flight loads complete on their own; queued ones would never start.

@@ -822,6 +822,36 @@ final class HomeBoxApiClient {
         .toList(growable: false);
   }
 
+  /// Permanently deletes one of this account's Trash entries and its whole
+  /// subtree now, instead of after the server's Trash retention period.
+  Future<void> purgeTrashEntry(String accessToken, String nodeId) =>
+      _send('DELETE', '/api/v1/trash/$nodeId', accessToken: accessToken);
+
+  // --- favorites (spec §29) ---
+
+  /// IDs of this account's favorite nodes it can currently see, newest
+  /// first.
+  Future<List<String>> listFavorites(String accessToken) async {
+    final body = await _send(
+      'GET',
+      '/api/v1/favorites',
+      accessToken: accessToken,
+    );
+    final decoded = jsonDecode(body) as List<dynamic>;
+    return [
+      for (final entry in decoded)
+        (entry as Map<String, dynamic>)['nodeId'] as String,
+    ];
+  }
+
+  /// Marks [nodeId] as a favorite; adding it again is harmless.
+  Future<void> addFavorite(String accessToken, String nodeId) =>
+      _send('PUT', '/api/v1/favorites/$nodeId', accessToken: accessToken);
+
+  /// Unmarks [nodeId]; removing a missing favorite is harmless.
+  Future<void> removeFavorite(String accessToken, String nodeId) =>
+      _send('DELETE', '/api/v1/favorites/$nodeId', accessToken: accessToken);
+
   /// Renames/moves a node and/or replaces its encrypted metadata (spec
   /// §17.3). Pass [metadataCiphertext] to change the encrypted name/MIME/
   /// hash; pass [moveParent] true (with [parentId] null for root, or a

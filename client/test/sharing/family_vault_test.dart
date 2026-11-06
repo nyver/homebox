@@ -1,4 +1,7 @@
 import 'dart:convert';
+
+import 'package:archive/archive_io.dart';
+
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -15,6 +18,7 @@ import 'package:homebox_client/features/files/files_controller.dart';
 import 'package:homebox_client/features/server/server_connection_controller.dart';
 import 'package:homebox_client/features/server/session_store.dart';
 import 'package:homebox_client/features/sharing/family_vault_controller.dart';
+import 'package:homebox_client/features/sharing/shared_folder_browser.dart';
 import 'package:homebox_client/features/sync/sync_engine.dart';
 
 import '../support/memory_device_private_key_storage.dart';
@@ -474,4 +478,74 @@ void main() {
     ]);
     expect(store.all()['folder']!.keys.toSet(), {1, 2});
   });
+
+  test(
+    'a member with edit rights moves, downloads, and trashes several items',
+    () async {
+      final fake = FakeNodeServer();
+      final server = await fake.start();
+      addTearDown(() => server.close(force: true));
+      final owner = await _signIn(server, 'admin', FakeNodeServer.userId);
+      final member = await _signIn(server, 'member', FakeNodeServer.memberId);
+      await _publishMemberDevice(fake, member);
+      expect(await owner.files.createFolder('Family'), isTrue);
+      await owner.engine.runOnce();
+      await owner.files.refresh();
+      final folder = owner.files.entries.single;
+      final candidate = (await owner.family.lookupRecipient(member.userId))!;
+      expect(
+        await owner.family.shareFolder(
+          folderId: folder.node.id,
+          candidate: candidate,
+          permission: SharePermission.readWrite,
+        ),
+        isTrue,
+      );
+      await member.family.refresh();
+      await member.family.trustOwner(member.family.incoming.single);
+      final browser = (await member.family.open(
+        member.family.incoming.single,
+      ))!;
+      addTearDown(browser.dispose);
+      await browser.refresh();
+      expect(await browser.createFolder('Sub'), isTrue);
+      expect(
+        await browser.uploadFiles([
+          (await _tempFile('a.txt', 'A')).path,
+          (await _tempFile('b.txt', 'B')).path,
+        ]),
+        isTrue,
+      );
+      SharedEntry named(String name) =>
+          browser.entries.firstWhere((entry) => entry.name == name);
+
+      browser
+        ..toggleSelection(named('a.txt'))
+        ..toggleSelection(named('b.txt'));
+      expect(browser.selectedCount, 2);
+      final zip = await _tempPath('picked.zip');
+      expect(
+        await browser.downloadEntries(browser.selectedEntries, zipPath: zip),
+        2,
+      );
+      final archive = ZipDecoder().decodeBytes(File(zip).readAsBytesSync());
+      expect(archive.files.map((f) => f.name).toSet(), {'a.txt', 'b.txt'});
+
+      final choices = await browser.folderChoices(browser.currentFolderId);
+      expect(choices.single.name, 'Sub');
+      expect(
+        await browser.moveEntries([
+          named('a.txt'),
+          named('b.txt'),
+        ], choices.single.id),
+        2,
+      );
+      expect(browser.entries.map((e) => e.name), ['Sub']);
+      browser.open(named('Sub'));
+      await browser.refresh();
+      expect(browser.entries.map((e) => e.name), ['a.txt', 'b.txt']);
+      expect(await browser.deleteEntries(browser.entries), 2);
+      expect(browser.entries, isEmpty);
+    },
+  );
 }

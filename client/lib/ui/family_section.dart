@@ -722,151 +722,275 @@ final class _SharedFolderView extends StatelessWidget {
     animation: browser,
     builder: (context, _) {
       final crumbs = browser.breadcrumbNames;
-      return _PageFrame(
-        title: browser.rootName,
-        subtitle:
-            'Shared by ${browser.share.ownerUsername} • ${_permissionLabel(context, browser.share.permission)}',
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                OutlinedButton.icon(
-                  onPressed: onClose,
-                  icon: const Icon(Icons.close),
-                  label: const Text('Close'),
+      final selecting = browser.selectionMode;
+      return PopScope(
+        canPop: !selecting,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) browser.clearSelection();
+        },
+        child: _PageFrame(
+          title: browser.rootName,
+          subtitle:
+              'Shared by ${browser.share.ownerUsername} • ${_permissionLabel(context, browser.share.permission)}',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (selecting)
+                _SharedSelectionBar(
+                  browser: browser,
+                  onMove: () => _moveSelected(context),
+                  onDownload: () => _downloadSelected(context),
+                  onDelete: () => _deleteSelected(context),
+                )
+              else
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: onClose,
+                      icon: const Icon(Icons.close),
+                      label: const Text('Close'),
+                    ),
+                    if (browser.canGoUp)
+                      OutlinedButton.icon(
+                        onPressed: browser.goUp,
+                        icon: const Icon(Icons.arrow_upward),
+                        label: const Text('Up'),
+                      ),
+                    if (browser.canWrite) ...[
+                      FilledButton.icon(
+                        onPressed: browser.busy ? null : () => _upload(context),
+                        icon: const Icon(Icons.upload_file),
+                        label: const Text('Upload files'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: browser.busy
+                            ? null
+                            : () => _createFolder(context),
+                        icon: const Icon(Icons.create_new_folder_outlined),
+                        label: const Text('New folder'),
+                      ),
+                    ],
+                    if (browser.entries.isNotEmpty)
+                      IconButton(
+                        tooltip: 'Select',
+                        onPressed: browser.startSelection,
+                        icon: const Icon(Icons.checklist),
+                      ),
+                    IconButton(
+                      tooltip: 'Refresh',
+                      onPressed: browser.refresh,
+                      icon: const Icon(Icons.refresh),
+                    ),
+                  ],
                 ),
-                if (browser.canGoUp)
-                  OutlinedButton.icon(
-                    onPressed: browser.goUp,
-                    icon: const Icon(Icons.arrow_upward),
-                    label: const Text('Up'),
-                  ),
-                if (browser.canWrite) ...[
-                  FilledButton.icon(
-                    onPressed: browser.busy ? null : () => _upload(context),
-                    icon: const Icon(Icons.upload_file),
-                    label: const Text('Upload files'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: browser.busy
-                        ? null
-                        : () => _createFolder(context),
-                    icon: const Icon(Icons.create_new_folder_outlined),
-                    label: const Text('New folder'),
-                  ),
+              const SizedBox(height: 8),
+              Wrap(
+                children: [
+                  for (final (index, name) in crumbs.indexed) ...[
+                    if (index > 0) const Text(' / '),
+                    InkWell(
+                      onTap: () => browser.goToBreadcrumb(index),
+                      child: Text(
+                        name,
+                        style: index == crumbs.length - 1
+                            ? const TextStyle(fontWeight: FontWeight.bold)
+                            : null,
+                      ),
+                    ),
+                  ],
                 ],
-                IconButton(
-                  tooltip: 'Refresh',
-                  onPressed: browser.refresh,
-                  icon: const Icon(Icons.refresh),
+              ),
+              if (browser.busy || browser.loading)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: LinearProgressIndicator(
+                    value: browser.busy ? browser.progress : null,
+                  ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              children: [
-                for (final (index, name) in crumbs.indexed) ...[
-                  if (index > 0) const Text(' / '),
-                  InkWell(
-                    onTap: () => browser.goToBreadcrumb(index),
-                    child: Text(
-                      name,
-                      style: index == crumbs.length - 1
-                          ? const TextStyle(fontWeight: FontWeight.bold)
-                          : null,
+              if (browser.errorMessage != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(
+                    browser.errorMessage!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
                     ),
                   ),
-                ],
-              ],
-            ),
-            if (browser.busy || browser.loading)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: LinearProgressIndicator(
-                  value: browser.busy ? browser.progress : null,
                 ),
-              ),
-            if (browser.errorMessage != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Text(
-                  browser.errorMessage!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ),
-            Expanded(
-              child: browser.entries.isEmpty && !browser.loading
-                  ? const _FilesMessageState(
-                      icon: Icons.folder_open_outlined,
-                      message: 'This folder is empty.',
-                    )
-                  : ListView.separated(
-                      itemCount: browser.entries.length,
-                      separatorBuilder: (context, _) =>
-                          const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final entry = browser.entries[index];
-                        return ListTile(
-                          leading: entry.isDirectory
-                              ? _folderListIcon
-                              : _defaultFileListIcon,
-                          title: Text(entry.name),
-                          subtitle: entry.isDirectory
-                              ? null
-                              : Text(
-                                  _formatFileSize(
-                                    entry.metadata.plaintextSize ?? 0,
+              Expanded(
+                child: browser.entries.isEmpty && !browser.loading
+                    ? const _FilesMessageState(
+                        icon: Icons.folder_open_outlined,
+                        message: 'This folder is empty.',
+                      )
+                    : ListView.separated(
+                        itemCount: browser.entries.length,
+                        separatorBuilder: (context, _) =>
+                            const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final entry = browser.entries[index];
+                          final selected = browser.isSelected(entry);
+                          return ListTile(
+                            selected: selecting && selected,
+                            leading: selecting
+                                ? SizedBox.square(
+                                    dimension: _fileListLeadingSize,
+                                    child: Checkbox(
+                                      value: selected,
+                                      onChanged: (_) =>
+                                          browser.toggleSelection(entry),
+                                    ),
+                                  )
+                                : entry.isDirectory
+                                ? _folderListIcon
+                                : _defaultFileListIcon,
+                            title: Text(entry.name),
+                            subtitle: entry.isDirectory
+                                ? null
+                                : Text(
+                                    _formatFileSize(
+                                      entry.metadata.plaintextSize ?? 0,
+                                    ),
                                   ),
-                                ),
-                          onTap: entry.isDirectory
-                              ? () => browser.open(entry)
-                              : () => _download(context, entry),
-                          trailing: PopupMenuButton<String>(
-                            tooltip: 'More actions',
-                            enabled: !browser.busy,
-                            onSelected: (value) => switch (value) {
-                              'save_as' => _download(context, entry),
-                              'replace' => _replace(context, entry),
-                              'rename' => _rename(context, entry),
-                              'delete' => _delete(context, entry),
-                              _ => null,
-                            },
-                            itemBuilder: (context) => [
-                              if (!entry.isDirectory)
-                                const PopupMenuItem(
-                                  value: 'save_as',
-                                  child: Text('Save as…'),
-                                ),
-                              if (browser.canWrite && !entry.isDirectory)
-                                const PopupMenuItem(
-                                  value: 'replace',
-                                  child: Text('Replace content…'),
-                                ),
-                              if (browser.canWrite)
-                                const PopupMenuItem(
-                                  value: 'rename',
-                                  child: Text('Rename'),
-                                ),
-                              if (browser.canWrite)
-                                const PopupMenuItem(
-                                  value: 'delete',
-                                  child: Text('Move to trash'),
-                                ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
-            ),
-          ],
+                            onTap: selecting
+                                ? () => browser.toggleSelection(entry)
+                                : entry.isDirectory
+                                ? () => browser.open(entry)
+                                : () => _download(context, entry),
+                            onLongPress: () => browser.toggleSelection(entry),
+                            trailing: selecting
+                                ? null
+                                : PopupMenuButton<String>(
+                                    tooltip: 'More actions',
+                                    enabled: !browser.busy,
+                                    onSelected: (value) => switch (value) {
+                                      'save_as' => _download(context, entry),
+                                      'replace' => _replace(context, entry),
+                                      'rename' => _rename(context, entry),
+                                      'delete' => _delete(context, entry),
+                                      _ => null,
+                                    },
+                                    itemBuilder: (context) => [
+                                      if (!entry.isDirectory)
+                                        const PopupMenuItem(
+                                          value: 'save_as',
+                                          child: Text('Save as…'),
+                                        ),
+                                      if (browser.canWrite &&
+                                          !entry.isDirectory)
+                                        const PopupMenuItem(
+                                          value: 'replace',
+                                          child: Text('Replace content…'),
+                                        ),
+                                      if (browser.canWrite)
+                                        const PopupMenuItem(
+                                          value: 'rename',
+                                          child: Text('Rename'),
+                                        ),
+                                      if (browser.canWrite)
+                                        const PopupMenuItem(
+                                          value: 'delete',
+                                          child: Text('Move to trash'),
+                                        ),
+                                    ],
+                                  ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
         ),
       );
     },
   );
+
+  Future<void> _moveSelected(BuildContext context) async {
+    final entries = browser.selectedEntries;
+    if (entries.isEmpty) return;
+    final target = await _pickFolder(
+      context,
+      title: entries.length == 1
+          ? 'Move "${entries.single.name}" to…'
+          : 'Move ${entries.length} items to…',
+      rootName: browser.rootName,
+      rootId: browser.share.nodeId,
+      // The picker starts at the shared folder, never the member's root.
+      loadChildren: (folderId) =>
+          browser.folderChoices(folderId ?? browser.share.nodeId),
+      excludedIds: {
+        for (final entry in entries)
+          if (entry.isDirectory) entry.node.id,
+      },
+    );
+    if (target == null || !context.mounted) return;
+    final moved = await browser.moveEntries(
+      entries,
+      target.id ?? browser.share.nodeId,
+    );
+    if (context.mounted) _reportBulk(context, moved, entries.length, 'Moved');
+  }
+
+  Future<void> _downloadSelected(BuildContext context) => _bulkDownload(
+    context,
+    run: ({String? directory, String? zipPath}) => browser.downloadEntries(
+      browser.selectedEntries,
+      directory: directory,
+      zipPath: zipPath,
+    ),
+    errorMessage: () => browser.errorMessage,
+    androidFileSaver: androidFileSaver,
+  );
+
+  Future<void> _deleteSelected(BuildContext context) async {
+    final entries = browser.selectedEntries;
+    if (entries.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          entries.length == 1
+              ? 'Move "${entries.single.name}" to trash?'
+              : 'Move ${entries.length} items to trash?',
+        ),
+        content: Text(
+          'They move to ${browser.share.ownerUsername}\'s Trash, where they can restore them.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Move to trash'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    final deleted = await browser.deleteEntries(entries);
+    if (context.mounted) {
+      _reportBulk(context, deleted, entries.length, 'Moved to trash');
+    }
+  }
+
+  void _reportBulk(BuildContext context, int done, int total, String verb) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          done == total
+              ? '$verb ${done == 1 ? '1 item' : '$done items'}.'
+              : '$verb $done of $total items. ${browser.errorMessage ?? ''}'
+                    .trim(),
+        ),
+      ),
+    );
+  }
 
   Future<void> _download(BuildContext context, SharedEntry entry) async {
     final saver = androidFileSaver;
@@ -970,4 +1094,69 @@ Future<String?> _askName(
   );
   controller.dispose();
   return result == null || result.isEmpty ? null : result;
+}
+
+/// The selection toolbar of an opened shared folder. Moving and trashing
+/// need "Can edit"; downloading works for every member.
+final class _SharedSelectionBar extends StatelessWidget {
+  const _SharedSelectionBar({
+    required this.browser,
+    required this.onMove,
+    required this.onDownload,
+    required this.onDelete,
+  });
+
+  final SharedFolderBrowser browser;
+  final VoidCallback onMove;
+  final VoidCallback onDownload;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final count = browser.selectedCount;
+    final total = browser.entries.length;
+    final idle = count > 0 && !browser.busy;
+    return Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        Checkbox(
+          tristate: true,
+          value: count == 0 ? false : (count == total ? true : null),
+          onChanged: (_) => browser.toggleSelectAll(),
+          semanticLabel: 'Select all',
+        ),
+        Text(
+          _localized(context, en: '$count selected', ru: 'Выбрано: $count'),
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        OutlinedButton.icon(
+          onPressed: idle ? onDownload : null,
+          icon: const Icon(Icons.download_outlined),
+          label: Text(_localized(context, en: 'Download', ru: 'Скачать')),
+        ),
+        if (browser.canWrite) ...[
+          OutlinedButton.icon(
+            onPressed: idle ? onMove : null,
+            icon: const Icon(Icons.drive_file_move_outline),
+            label: Text(
+              _localized(context, en: 'Move to…', ru: 'Переместить…'),
+            ),
+          ),
+          FilledButton.icon(
+            onPressed: idle ? onDelete : null,
+            icon: const Icon(Icons.delete_outline),
+            label: Text(
+              _localized(context, en: 'Move to trash', ru: 'В корзину'),
+            ),
+          ),
+        ],
+        TextButton(
+          onPressed: browser.clearSelection,
+          child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+        ),
+      ],
+    );
+  }
 }

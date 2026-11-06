@@ -21,6 +21,7 @@ import (
 	"github.com/homebox/homebox/internal/backup"
 	"github.com/homebox/homebox/internal/config"
 	"github.com/homebox/homebox/internal/database"
+	"github.com/homebox/homebox/internal/favorites"
 	"github.com/homebox/homebox/internal/httpapi"
 	"github.com/homebox/homebox/internal/httpserver"
 	"github.com/homebox/homebox/internal/maintenance"
@@ -209,7 +210,7 @@ func serve(args []string) {
 		defer close(maintenanceDone)
 		runAutomaticMaintenance(ctx, maintenanceService, time.Duration(c.Maintenance.IntervalHours)*time.Hour)
 	}()
-	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService, sharing.New(db), recovery.New(db))
+	api := httpapi.New(authService, provisioningService, nodesService, syncService, uploadsService, sharing.New(db), recovery.New(db), favorites.New(db), maintenanceService)
 	server := &http.Server{
 		Addr:              c.Address(),
 		Handler:           httpserver.New(api),

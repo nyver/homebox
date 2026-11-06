@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../core/e2ee/opaque_id.dart';
+import '../../core/storage/favorites_store.dart';
 import '../../core/storage/folder_keys_store.dart';
 import '../../core/storage/local_database.dart';
 import '../../core/storage/materialized_directories_store.dart';
@@ -60,6 +61,7 @@ final class SyncEngine extends ChangeNotifier {
        _conflictResolver = conflictResolver,
        nodeCache = NodeCache(localDatabase.db),
        folderKeys = FolderKeysStore(localDatabase.db),
+       favorites = FavoritesStore(localDatabase.db),
        trustedAccounts = TrustedAccountsStore(localDatabase.db),
        pendingOperations = PendingOperationsStore(localDatabase.db),
        materializedDirectories = MaterializedDirectoriesStore(localDatabase.db),
@@ -80,6 +82,10 @@ final class SyncEngine extends ChangeNotifier {
   /// This account's shared-folder keys, still wrapped by its Vault Key,
   /// refreshed from the server on every pass (ADR-023).
   final FolderKeysStore folderKeys;
+
+  /// This account's favorite node IDs, refreshed from the server on every
+  /// pass (spec §29).
+  final FavoritesStore favorites;
 
   /// Family members whose account identity the user verified on this
   /// device, for Family Vault sharing.
@@ -218,6 +224,7 @@ final class SyncEngine extends ChangeNotifier {
       await _pushPending(api, session.accessToken, session.user.id);
       await _pullChanges(api, session.accessToken, session.user.id);
       await _refreshFolderKeys(api, session.accessToken);
+      await _refreshFavorites(api, session.accessToken);
       _errorMessage = null;
       if (!_paused) _setStatus(SyncStatus.idle);
     } catch (e) {
@@ -653,6 +660,24 @@ final class SyncEngine extends ChangeNotifier {
   ) async {
     try {
       folderKeys.mergeAll(await api.listFolderKeys(accessToken));
+    } on transport.HomeBoxApiException catch (e) {
+      if (e.statusCode != 404) rethrow;
+    }
+  }
+
+  /// Mirrors the server's favorites. A local change made while the list
+  /// was in flight wins until the next pass. A server that predates
+  /// favorites answers 404, which means there are none.
+  Future<void> _refreshFavorites(
+    transport.HomeBoxApiClient api,
+    String accessToken,
+  ) async {
+    final generation = favorites.generation;
+    try {
+      favorites.replaceAllIfUnchanged(
+        await api.listFavorites(accessToken),
+        generation,
+      );
     } on transport.HomeBoxApiException catch (e) {
       if (e.statusCode != 404) rethrow;
     }

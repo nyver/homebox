@@ -166,6 +166,19 @@ final class NodeCache {
     return rows.map(_fromRow).toList(growable: false);
   }
 
+  /// Every live (not soft-deleted) node, for building a search index. A
+  /// node below a deleted folder is included; callers check its ancestors.
+  List<LocalNode> listLive() => _db
+      .select('SELECT * FROM nodes WHERE deleted_at IS NULL')
+      .map(_fromRow)
+      .toList(growable: false);
+
+  /// The direct children of [parentId], including soft-deleted ones.
+  List<LocalNode> listChildrenIncludingDeleted(String parentId) => _db
+      .select('SELECT * FROM nodes WHERE parent_id = ?', [parentId])
+      .map(_fromRow)
+      .toList(growable: false);
+
   List<LocalNode> listTrash() {
     final rows = _db.select(
       'SELECT * FROM nodes WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC',

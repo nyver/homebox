@@ -21,6 +21,8 @@ import (
 
 	"github.com/homebox/homebox/internal/apierror"
 	"github.com/homebox/homebox/internal/auth"
+	"github.com/homebox/homebox/internal/favorites"
+	"github.com/homebox/homebox/internal/maintenance"
 	"github.com/homebox/homebox/internal/nodes"
 	"github.com/homebox/homebox/internal/provisioning"
 	"github.com/homebox/homebox/internal/recovery"
@@ -41,10 +43,18 @@ type API struct {
 	uploads      *uploads.Service
 	shares       *sharing.Service
 	recovery     *recovery.Service
+	favorites    *favorites.Service
+	trash        TrashPurger
 }
 
-func New(authService *auth.Service, provisioningService *provisioning.Service, nodesService *nodes.Service, syncService *sync.Service, uploadsService *uploads.Service, sharingService *sharing.Service, recoveryService *recovery.Service) http.Handler {
-	api := &API{auth: authService, provisioning: provisioningService, nodes: nodesService, sync: syncService, uploads: uploadsService, shares: sharingService, recovery: recoveryService}
+// TrashPurger permanently deletes one Trash entry and its subtree on the
+// owner's request; maintenance.Service implements it.
+type TrashPurger interface {
+	PurgeTrashEntry(ctx context.Context, ownerID, nodeID string) error
+}
+
+func New(authService *auth.Service, provisioningService *provisioning.Service, nodesService *nodes.Service, syncService *sync.Service, uploadsService *uploads.Service, sharingService *sharing.Service, recoveryService *recovery.Service, favoritesService *favorites.Service, trashPurger TrashPurger) http.Handler {
+	api := &API{auth: authService, provisioning: provisioningService, nodes: nodesService, sync: syncService, uploads: uploadsService, shares: sharingService, recovery: recoveryService, favorites: favoritesService, trash: trashPurger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", api.login)
 	mux.HandleFunc("POST /api/v1/auth/refresh", api.refresh)
@@ -73,6 +83,10 @@ func New(authService *auth.Service, provisioningService *provisioning.Service, n
 	mux.Handle("DELETE /api/v1/nodes/{id}", api.authenticated(api.deleteNode))
 	mux.Handle("POST /api/v1/nodes/{id}/restore", api.authenticated(api.restoreNode))
 	mux.Handle("GET /api/v1/trash", api.authenticated(api.listTrash))
+	mux.Handle("DELETE /api/v1/trash/{id}", api.authenticated(api.purgeTrashEntry))
+	mux.Handle("GET /api/v1/favorites", api.authenticated(api.listFavorites))
+	mux.Handle("PUT /api/v1/favorites/{id}", api.authenticated(api.addFavorite))
+	mux.Handle("DELETE /api/v1/favorites/{id}", api.authenticated(api.removeFavorite))
 
 	mux.Handle("GET /api/v1/sync/changes", api.authenticated(api.syncChanges))
 
@@ -603,6 +617,10 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "share or recipient was not found")
 	case errors.Is(err, sharing.ErrForbidden):
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "share is not owned by this account")
+	case errors.Is(err, favorites.ErrNotFound):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "node not found")
+	case errors.Is(err, maintenance.ErrNotInTrash):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "node is not in the trash")
 	case errors.Is(err, sharing.ErrKeyConflict):
 		writeError(w, http.StatusConflict, "REVISION_CONFLICT", "this folder key version already exists")
 	case errors.Is(err, sharing.ErrAlreadyShared):

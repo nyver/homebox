@@ -15,7 +15,7 @@ void main() {
     final versions = second.db.select(
       'SELECT version FROM schema_migrations ORDER BY version',
     );
-    expect(versions.map((r) => r['version']), [1, 2, 3, 4, 5, 6, 7]);
+    expect(versions.map((r) => r['version']), [1, 2, 3, 4, 5, 6, 7, 8]);
     // Re-opening must not error re-applying earlier migrations, and the
     // nodes table from migration 1 must still exist and be usable.
     second.db.execute(
