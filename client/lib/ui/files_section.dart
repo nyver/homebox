@@ -86,6 +86,17 @@ const Widget _folderListIcon = SizedBox.square(
   ),
 );
 
+/// A folder this account shares with family members (spec §28).
+const Widget _sharedFolderListIcon = SizedBox.square(
+  dimension: _fileListLeadingSize,
+  child: Icon(
+    Icons.folder_shared,
+    size: _fileListLeadingSize,
+    color: Colors.lightBlue,
+    semanticLabel: 'Shared folder',
+  ),
+);
+
 /// Shows a decrypted, downscaled image thumbnail when it is inexpensive to
 /// fetch. All other files, including unsupported image encodings, retain the
 /// regular file icon.
@@ -216,6 +227,7 @@ Future<_OverwriteChoice> _askOverwrite(
 final class _FilesSection extends StatefulWidget {
   const _FilesSection({
     required this.controller,
+    required this.familyVault,
     required this.onCapturePhoto,
     required this.androidFileSaver,
     required this.androidFileSharer,
@@ -226,6 +238,9 @@ final class _FilesSection extends StatefulWidget {
   });
 
   final FilesController? controller;
+
+  /// Family Vault sharing; null until a server and its local data are open.
+  final FamilyVaultController? familyVault;
   final Future<void> Function()? onCapturePhoto;
   final AndroidFileSaver? androidFileSaver;
   final AndroidFileSharer? androidFileSharer;
@@ -943,7 +958,9 @@ final class _FilesSectionState extends State<_FilesSection> {
       );
     }
     return AnimatedBuilder(
-      animation: controller,
+      // The Family Vault controller too, so a folder's shared badge and its
+      // "Share with family" action follow share changes immediately.
+      animation: Listenable.merge([controller, ?widget.familyVault]),
       builder: (context, _) {
         // Whichever message/spinner widget a non-list state below renders,
         // it has no Scrollable of its own, so pull-to-refresh (below) would
@@ -998,8 +1015,18 @@ final class _FilesSectionState extends State<_FilesSection> {
                   defaultTargetPlatform == TargetPlatform.windows &&
                   widget.syncFolder != null &&
                   controller.materializedRelativePath(entry.node.id) != null;
+              final familyVault = widget.familyVault;
+              final sharedFolder =
+                  entry.isDirectory &&
+                  (familyVault?.isShared(entry.node.id) ?? false);
+              final canShareFolder =
+                  entry.isDirectory &&
+                  familyVault != null &&
+                  familyVault.canShare(entry.node);
               return ListTile(
-                leading: entry.isDirectory
+                leading: sharedFolder
+                    ? _sharedFolderListIcon
+                    : entry.isDirectory
                     ? _folderListIcon
                     : _FileListLeading(entry: entry, controller: controller),
                 title: entry.isConflictCopy
@@ -1040,9 +1067,26 @@ final class _FilesSectionState extends State<_FilesSection> {
                     'rename' => _renameEntry(context, entry),
                     'resolve_conflict' => _markConflictResolved(context, entry),
                     'delete' => _deleteEntry(context, entry),
+                    'family_share' => _showShareFolderDialog(
+                      context,
+                      widget.familyVault!,
+                      folderId: entry.node.id,
+                      folderName: entry.name,
+                    ),
                     _ => null,
                   },
                   itemBuilder: (context) => [
+                    if (canShareFolder)
+                      PopupMenuItem(
+                        value: 'family_share',
+                        child: Text(
+                          _localized(
+                            context,
+                            en: 'Share with family…',
+                            ru: 'Поделиться с семьёй…',
+                          ),
+                        ),
+                      ),
                     if (!entry.isDirectory && widget.androidFileSharer != null)
                       PopupMenuItem(
                         value: 'share',

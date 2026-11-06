@@ -51,7 +51,7 @@ func uploadOneChunk(t *testing.T, ctx context.Context, s *Service, userID, devic
 	if err := s.PutChunk(ctx, userID, deviceID, session.ID, 0, ciphertext); err != nil {
 		t.Fatal(err)
 	}
-	result, err := s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: uuid.NewString(), KeyScopeID: uuid.NewString(), KeyVersion: 1})
+	result, err := s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: uuid.NewString(), KeyScopeID: userID, KeyVersion: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestCompleteNeverReplacesAnotherVersionsBlob(t *testing.T) {
 	if err := s.PutChunk(ctx, userID, deviceID, session.ID, 0, []byte("attacker")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: uuid.NewString(), KeyScopeID: uuid.NewString(), KeyVersion: 1})
+	_, err = s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: uuid.NewString(), KeyScopeID: userID, KeyVersion: 1})
 	if !errors.Is(err, ErrIDConflict) {
 		t.Fatalf("error=%v, want %v", err, ErrIDConflict)
 	}
@@ -179,7 +179,7 @@ func TestCompleteRejectsAnOperationIDFromAnotherAccount(t *testing.T) {
 	if err := s.PutChunk(ctx, userID, deviceID, session.ID, 0, []byte("c")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: foreignOperation, KeyScopeID: uuid.NewString(), KeyVersion: 1})
+	_, err = s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: foreignOperation, KeyScopeID: userID, KeyVersion: 1})
 	var validation *apierror.Validation
 	if !errors.As(err, &validation) {
 		t.Fatalf("error=%v, want a validation error instead of another account's result", err)

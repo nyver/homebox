@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/homebox/homebox/internal/access"
 	"github.com/homebox/homebox/internal/apierror"
 )
 
@@ -34,6 +35,10 @@ type Node struct {
 	NodeType           string // FILE | DIRECTORY
 	MetadataCiphertext []byte
 	MetadataKeyVersion int
+	// MetadataKeyScopeID names the key that encrypts MetadataCiphertext:
+	// OwnerID for the owner's personal Vault Key, or the ID of the shared
+	// folder whose Folder Key encrypts this subtree (ADR-023).
+	MetadataKeyScopeID string
 	CurrentVersionID   *string
 	Revision           int64
 	CreatedAt          time.Time
@@ -50,12 +55,19 @@ type Service struct {
 
 func New(db *sql.DB) *Service { return &Service{db: db, now: time.Now} }
 
+// CreateInput describes a new node. OwnerID is the requesting account: the
+// node is normally stored under it, but inside a folder shared with that
+// account for READ_WRITE it is stored under the folder owner's account
+// instead, so the owner keeps a single tree, Trash, and sync feed.
 type CreateInput struct {
 	ID, OwnerID, DeviceID, OperationID string
 	ParentID                           *string
 	NodeType                           string
 	MetadataCiphertext                 []byte
 	MetadataKeyVersion                 int
+	// MetadataKeyScopeID is the declared metadata key scope; empty means
+	// the owner's personal Vault Key.
+	MetadataKeyScopeID string
 }
 
 // Create inserts an opaque node. For NodeType FILE this only creates the
@@ -91,22 +103,42 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Node, error) {
 	if err := s.validateDeviceOwnership(ctx, tx, in.OwnerID, in.DeviceID); err != nil {
 		return Node{}, err
 	}
+	ownerID := in.OwnerID
+	writeRoot := ""
 	if in.ParentID != nil {
-		if err := s.requireDirectory(ctx, tx, in.OwnerID, *in.ParentID); err != nil {
+		parentOwner, err := s.directoryOwner(ctx, tx, *in.ParentID)
+		if err != nil {
 			return Node{}, err
 		}
+		if parentOwner != in.OwnerID {
+			grant, found, err := access.ShareGrant(ctx, tx, in.OwnerID, *in.ParentID)
+			if err != nil {
+				return Node{}, err
+			}
+			if !found || !grant.CanWrite() {
+				return Node{}, ErrInvalidParent
+			}
+			ownerID, writeRoot = parentOwner, grant.RootID
+		}
+	}
+	scope := in.MetadataKeyScopeID
+	if scope == "" {
+		scope = ownerID
+	}
+	if err := access.ValidateKeyScope(ctx, tx, ownerID, in.OwnerID, writeRoot, scope, in.MetadataKeyVersion); err != nil {
+		return Node{}, err
 	}
 
 	now := s.now().UTC()
-	revision, err := s.recordChange(ctx, tx, in.OwnerID, in.ID, "CREATE")
+	revision, err := s.recordChange(ctx, tx, ownerID, in.ID, "CREATE")
 	if err != nil {
 		return Node{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes
-		(id,owner_id,parent_id,node_type,metadata_ciphertext,metadata_key_version,revision,created_at,updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?)`,
-		in.ID, in.OwnerID, nullableString(in.ParentID), in.NodeType, in.MetadataCiphertext, in.MetadataKeyVersion,
-		revision, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		(id,owner_id,parent_id,node_type,metadata_ciphertext,metadata_key_version,metadata_key_scope_id,revision,created_at,updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		in.ID, ownerID, nullableString(in.ParentID), in.NodeType, in.MetadataCiphertext, in.MetadataKeyVersion,
+		access.StoredScope(scope, ownerID), revision, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return Node{}, fmt.Errorf("create node: %w", err)
 	}
 	if err := s.recordProcessed(ctx, tx, in.OperationID, in.OwnerID, in.DeviceID, "NODE_CREATE", in.ID, revision); err != nil {
@@ -131,11 +163,9 @@ func (s *Service) Get(ctx context.Context, userID, nodeID string) (Node, error) 
 		if n.IsDeleted() {
 			return Node{}, ErrForbidden
 		}
-		shared, err := s.hasReadShare(ctx, userID, nodeID)
-		if err != nil {
+		if _, shared, err := access.ShareGrant(ctx, s.db, userID, nodeID); err != nil {
 			return Node{}, err
-		}
-		if !shared {
+		} else if !shared {
 			return Node{}, ErrForbidden
 		}
 	}
@@ -173,12 +203,12 @@ type PageRequest struct {
 // cursor is empty once the listing is exhausted.
 func (s *Service) ListChildrenPage(ctx context.Context, userID string, parentID *string, page PageRequest) ([]Node, string, error) {
 	if parentID == nil {
-		return s.listPage(ctx, `SELECT n.id,n.owner_id,n.parent_id,n.node_type,n.metadata_ciphertext,n.metadata_key_version,n.current_version_id,n.revision,n.created_at,n.updated_at,n.deleted_at
+		return s.listPage(ctx, `SELECT `+nodeColumnsN+`
 			FROM nodes n WHERE n.owner_id=? AND n.parent_id IS NULL AND n.deleted_at IS NULL
 			UNION ALL
-			SELECT n.id,n.owner_id,n.parent_id,n.node_type,n.metadata_ciphertext,n.metadata_key_version,n.current_version_id,n.revision,n.created_at,n.updated_at,n.deleted_at
+			SELECT `+nodeColumnsN+`
 			FROM nodes n JOIN shares sh ON sh.node_id=n.id
-			WHERE sh.target_user_id=? AND sh.permission='READ' AND sh.revoked_at IS NULL AND n.deleted_at IS NULL`, page, userID, userID)
+			WHERE sh.target_user_id=? AND sh.revoked_at IS NULL AND n.deleted_at IS NULL`, page, userID, userID)
 	}
 	if err := s.requireReadableDirectory(ctx, userID, *parentID); err != nil {
 		return nil, "", err
@@ -272,36 +302,14 @@ func (s *Service) requireReadableDirectory(ctx context.Context, userID, nodeID s
 		return ErrForbidden
 	}
 	if ownerID != userID {
-		shared, err := s.hasReadShare(ctx, userID, nodeID)
-		if err != nil {
+		// Any active grant, READ or READ_WRITE, lets a recipient browse.
+		if _, shared, err := access.ShareGrant(ctx, s.db, userID, nodeID); err != nil {
 			return err
-		}
-		if !shared {
+		} else if !shared {
 			return ErrForbidden
 		}
 	}
 	return nil
-}
-
-// hasReadShare authorizes any descendant of a shared folder, not just the
-// root itself, unless the node or any folder between it and the nearest
-// shared ancestor is in Trash: a recipient must lose access to a subtree
-// the owner deleted, exactly as the owner's own listings hide it. The
-// recursive walk is bounded by SQLite's recursion limit and the existing
-// node mutation cycle checks. A database error is returned rather than
-// treated as "no share", so it surfaces as an internal error instead of a
-// misleading 403.
-func (s *Service) hasReadShare(ctx context.Context, userID, nodeID string) (bool, error) {
-	var allowed bool
-	err := s.db.QueryRowContext(ctx, `WITH RECURSIVE ancestors(id,parent_id,deleted_at,depth) AS (
-		SELECT id,parent_id,deleted_at,0 FROM nodes WHERE id=?
-		UNION ALL SELECT n.id,n.parent_id,n.deleted_at,a.depth+1 FROM nodes n JOIN ancestors a ON a.parent_id=n.id
-	), nearest AS (
-		SELECT MIN(a.depth) AS depth FROM ancestors a JOIN shares sh ON sh.node_id=a.id
-		WHERE sh.target_user_id=? AND sh.permission='READ' AND sh.revoked_at IS NULL
-	) SELECT EXISTS(SELECT 1 FROM nearest WHERE nearest.depth IS NOT NULL
-		AND NOT EXISTS(SELECT 1 FROM ancestors a WHERE a.depth <= nearest.depth AND a.deleted_at IS NOT NULL))`, nodeID, userID).Scan(&allowed)
-	return allowed, err
 }
 
 type UpdateInput struct {
@@ -309,8 +317,11 @@ type UpdateInput struct {
 	ExpectedRevision                      int64
 	MetadataCiphertext                    []byte // nil = leave unchanged
 	MetadataKeyVersion                    int
-	MoveParent                            bool // when true, ParentID (possibly nil, meaning root) replaces the current parent
-	ParentID                              *string
+	// MetadataKeyScopeID is the declared scope of new metadata; empty means
+	// the owner's personal Vault Key.
+	MetadataKeyScopeID string
+	MoveParent         bool // when true, ParentID (possibly nil, meaning root) replaces the current parent
+	ParentID           *string
 }
 
 // Update renames/moves a node and/or replaces its encrypted metadata in one
@@ -343,7 +354,11 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (Node, error) {
 		return Node{}, err
 	}
 
-	current, err := s.lockNode(ctx, tx, in.UserID, in.NodeID)
+	current, err := s.lockNode(ctx, tx, in.NodeID)
+	if err != nil {
+		return Node{}, err
+	}
+	writeRoot, err := s.authorizeWrite(ctx, tx, in.UserID, current)
 	if err != nil {
 		return Node{}, err
 	}
@@ -351,31 +366,32 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (Node, error) {
 		return Node{}, ErrRevisionConflict
 	}
 	if in.MoveParent {
-		if in.ParentID != nil {
-			if *in.ParentID == in.NodeID {
-				return Node{}, apierror.NewValidation("a node cannot become its own parent")
-			}
-			if err := s.requireDirectory(ctx, tx, in.UserID, *in.ParentID); err != nil {
-				return Node{}, err
-			}
-			if err := s.forbidCycle(ctx, tx, in.NodeID, *in.ParentID); err != nil {
-				return Node{}, err
-			}
+		if err := s.validateMove(ctx, tx, in.UserID, current, writeRoot, in.ParentID); err != nil {
+			return Node{}, err
+		}
+	}
+	scope := in.MetadataKeyScopeID
+	if scope == "" {
+		scope = current.OwnerID
+	}
+	if len(in.MetadataCiphertext) > 0 {
+		if err := access.ValidateKeyScope(ctx, tx, current.OwnerID, in.UserID, writeRoot, scope, in.MetadataKeyVersion); err != nil {
+			return Node{}, err
 		}
 	}
 
 	now := s.now().UTC()
-	revision, err := s.recordChange(ctx, tx, in.UserID, in.NodeID, "UPDATE")
+	revision, err := s.recordChange(ctx, tx, current.OwnerID, in.NodeID, "UPDATE")
 	if err != nil {
 		return Node{}, err
 	}
 	switch {
 	case len(in.MetadataCiphertext) > 0 && in.MoveParent:
-		_, err = tx.ExecContext(ctx, `UPDATE nodes SET metadata_ciphertext=?, metadata_key_version=?, parent_id=?, revision=?, updated_at=? WHERE id=?`,
-			in.MetadataCiphertext, in.MetadataKeyVersion, nullableString(in.ParentID), revision, now.Format(time.RFC3339Nano), in.NodeID)
+		_, err = tx.ExecContext(ctx, `UPDATE nodes SET metadata_ciphertext=?, metadata_key_version=?, metadata_key_scope_id=?, parent_id=?, revision=?, updated_at=? WHERE id=?`,
+			in.MetadataCiphertext, in.MetadataKeyVersion, access.StoredScope(scope, current.OwnerID), nullableString(in.ParentID), revision, now.Format(time.RFC3339Nano), in.NodeID)
 	case len(in.MetadataCiphertext) > 0:
-		_, err = tx.ExecContext(ctx, `UPDATE nodes SET metadata_ciphertext=?, metadata_key_version=?, revision=?, updated_at=? WHERE id=?`,
-			in.MetadataCiphertext, in.MetadataKeyVersion, revision, now.Format(time.RFC3339Nano), in.NodeID)
+		_, err = tx.ExecContext(ctx, `UPDATE nodes SET metadata_ciphertext=?, metadata_key_version=?, metadata_key_scope_id=?, revision=?, updated_at=? WHERE id=?`,
+			in.MetadataCiphertext, in.MetadataKeyVersion, access.StoredScope(scope, current.OwnerID), revision, now.Format(time.RFC3339Nano), in.NodeID)
 	default:
 		_, err = tx.ExecContext(ctx, `UPDATE nodes SET parent_id=?, revision=?, updated_at=? WHERE id=?`,
 			nullableString(in.ParentID), revision, now.Format(time.RFC3339Nano), in.NodeID)
@@ -415,8 +431,11 @@ func (s *Service) Delete(ctx context.Context, userID, deviceID, nodeID, operatio
 	if err := s.validateDeviceOwnership(ctx, tx, userID, deviceID); err != nil {
 		return err
 	}
-	current, err := s.lockNode(ctx, tx, userID, nodeID)
+	current, err := s.lockNode(ctx, tx, nodeID)
 	if err != nil {
+		return err
+	}
+	if _, err := s.authorizeWrite(ctx, tx, userID, current); err != nil {
 		return err
 	}
 	if current.Revision != expectedRevision {
@@ -424,7 +443,7 @@ func (s *Service) Delete(ctx context.Context, userID, deviceID, nodeID, operatio
 	}
 
 	now := s.now().UTC()
-	revision, err := s.recordChange(ctx, tx, userID, nodeID, "DELETE")
+	revision, err := s.recordChange(ctx, tx, current.OwnerID, nodeID, "DELETE")
 	if err != nil {
 		return err
 	}
@@ -536,7 +555,10 @@ func (s *Service) ListTrash(ctx context.Context, userID string) ([]Node, error) 
 	return nodes, rows.Err()
 }
 
-const selectNodeColumns = `SELECT id,owner_id,parent_id,node_type,metadata_ciphertext,metadata_key_version,current_version_id,revision,created_at,updated_at,deleted_at`
+const selectNodeColumns = `SELECT id,owner_id,parent_id,node_type,metadata_ciphertext,metadata_key_version,current_version_id,revision,created_at,updated_at,deleted_at,COALESCE(metadata_key_scope_id,owner_id) AS metadata_key_scope_id`
+
+// nodeColumnsN is selectNodeColumns for queries that alias nodes as n.
+const nodeColumnsN = `n.id,n.owner_id,n.parent_id,n.node_type,n.metadata_ciphertext,n.metadata_key_version,n.current_version_id,n.revision,n.created_at,n.updated_at,n.deleted_at,COALESCE(n.metadata_key_scope_id,n.owner_id) AS metadata_key_scope_id`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -554,7 +576,7 @@ func scanNodeWithCreatedAt(row rowScanner) (Node, string, error) {
 	var parentID, currentVersionID, deletedAt sql.NullString
 	var createdAt, updatedAt string
 	if err := row.Scan(&n.ID, &n.OwnerID, &parentID, &n.NodeType, &n.MetadataCiphertext, &n.MetadataKeyVersion,
-		&currentVersionID, &n.Revision, &createdAt, &updatedAt, &deletedAt); err != nil {
+		&currentVersionID, &n.Revision, &createdAt, &updatedAt, &deletedAt, &n.MetadataKeyScopeID); err != nil {
 		return Node{}, "", err
 	}
 	if parentID.Valid {
@@ -580,7 +602,9 @@ func scanNodeWithCreatedAt(row rowScanner) (Node, string, error) {
 	return n, createdAt, nil
 }
 
-func (s *Service) lockNode(ctx context.Context, tx *sql.Tx, userID, nodeID string) (Node, error) {
+// lockNode reads a node that is about to be mutated. Callers authorize the
+// actor with authorizeWrite before relying on it.
+func (s *Service) lockNode(ctx context.Context, tx *sql.Tx, nodeID string) (Node, error) {
 	row := tx.QueryRowContext(ctx, selectNodeColumns+" FROM nodes WHERE id = ?", nodeID)
 	n, err := scanNode(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -589,33 +613,95 @@ func (s *Service) lockNode(ctx context.Context, tx *sql.Tx, userID, nodeID strin
 	if err != nil {
 		return Node{}, err
 	}
-	if n.OwnerID != userID {
-		return Node{}, ErrForbidden
-	}
-	if n.IsDeleted() {
-		return Node{}, apierror.NewValidation("node is in trash; restore it before updating")
-	}
 	return n, nil
 }
 
-func (s *Service) requireDirectory(ctx context.Context, tx queryRower, userID, nodeID string) error {
-	var ownerID, nodeType string
-	var deletedAt sql.NullString
-	q := s.db.QueryRowContext
-	if tx != nil {
-		q = tx.QueryRowContext
+// authorizeWrite lets the owner change any of its nodes, and a READ_WRITE
+// recipient change nodes strictly below the shared root. The root itself
+// stays under the owner's control: a member can neither rename, move, nor
+// delete the folder that was shared with them. writeRoot is that share
+// root for a recipient and "" for the owner.
+func (s *Service) authorizeWrite(ctx context.Context, tx *sql.Tx, userID string, n Node) (writeRoot string, err error) {
+	if n.OwnerID != userID {
+		grant, found, err := access.ShareGrant(ctx, tx, userID, n.ID)
+		if err != nil {
+			return "", err
+		}
+		if !found || !grant.CanWrite() || grant.RootID == n.ID {
+			return "", ErrForbidden
+		}
+		writeRoot = grant.RootID
 	}
-	err := q(ctx, "SELECT owner_id, node_type, deleted_at FROM nodes WHERE id = ?", nodeID).Scan(&ownerID, &nodeType, &deletedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrInvalidParent
+	if n.IsDeleted() {
+		return "", apierror.NewValidation("node is in trash; restore it before updating")
 	}
+	return writeRoot, nil
+}
+
+// validateMove checks a new parent. A recipient may move a node only within
+// the folder shared with it; the owner may move anywhere in its own tree as
+// long as shared folders never end up nested.
+func (s *Service) validateMove(ctx context.Context, tx *sql.Tx, userID string, n Node, writeRoot string, parentID *string) error {
+	if parentID == nil {
+		if writeRoot != "" {
+			return ErrInvalidParent
+		}
+		return nil
+	}
+	if *parentID == n.ID {
+		return apierror.NewValidation("a node cannot become its own parent")
+	}
+	parentOwner, err := s.directoryOwner(ctx, tx, *parentID)
 	if err != nil {
 		return err
 	}
-	if ownerID != userID || nodeType != "DIRECTORY" || deletedAt.Valid {
+	if parentOwner != n.OwnerID {
 		return ErrInvalidParent
 	}
+	if writeRoot != "" {
+		grant, found, err := access.ShareGrant(ctx, tx, userID, *parentID)
+		if err != nil {
+			return err
+		}
+		if !found || grant.RootID != writeRoot || !grant.CanWrite() {
+			return ErrInvalidParent
+		}
+	}
+	if err := s.forbidCycle(ctx, tx, n.ID, *parentID); err != nil {
+		return err
+	}
+	// Most accounts share nothing; skip both tree walks for them.
+	var sharesFolders bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM folder_keys WHERE owner_user_id=?)", n.OwnerID).Scan(&sharesFolders); err != nil || !sharesFolders {
+		return err
+	}
+	hasKeyed, err := access.SubtreeHasKeyedFolder(ctx, tx, n.ID)
+	if err != nil || !hasKeyed {
+		return err
+	}
+	if outer, err := access.NearestKeyedFolder(ctx, tx, *parentID); err != nil {
+		return err
+	} else if outer != "" {
+		return access.ErrNestedSharedFolder
+	}
 	return nil
+}
+
+// directoryOwner returns the owner of an existing, non-deleted directory.
+func (s *Service) directoryOwner(ctx context.Context, tx *sql.Tx, nodeID string) (string, error) {
+	var ownerID, nodeType string
+	var deletedAt sql.NullString
+	err := tx.QueryRowContext(ctx, "SELECT owner_id, node_type, deleted_at FROM nodes WHERE id = ?", nodeID).Scan(&ownerID, &nodeType, &deletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrInvalidParent
+	}
+	if err != nil {
+		return "", err
+	}
+	if nodeType != "DIRECTORY" || deletedAt.Valid {
+		return "", ErrInvalidParent
+	}
+	return ownerID, nil
 }
 
 // forbidCycle walks newParentID's ancestor chain to ensure movingNodeID is
@@ -722,4 +808,121 @@ func nullableString(v *string) any {
 		return nil
 	}
 	return *v
+}
+
+// MaxRekeyItems bounds one rekey batch so a single request cannot hold
+// SQLite's write lock for long; clients send a large subtree in pages.
+const MaxRekeyItems = 200
+
+// maxRekeyVersions bounds the file versions one rekey item may rewrap. The
+// version retention policy keeps far fewer than this per file.
+const maxRekeyVersions = 256
+
+// RekeyVersion is one file version's File DEK rewrapped under a new key.
+type RekeyVersion struct {
+	ID             string
+	WrappedFileKey []byte
+	KeyScopeID     string
+	KeyVersion     int
+}
+
+// RekeyItem re-encrypts one node's metadata and rewraps its file versions.
+type RekeyItem struct {
+	NodeID             string
+	ExpectedRevision   int64
+	MetadataCiphertext []byte
+	MetadataKeyVersion int
+	MetadataKeyScopeID string
+	Versions           []RekeyVersion
+}
+
+type RekeyInput struct {
+	UserID, DeviceID string
+	Items            []RekeyItem
+}
+
+// Rekey moves existing nodes into another key scope (ADR-023): when a
+// folder is first shared, everything below it must be readable with that
+// folder's key instead of the owner's personal Vault Key. The owner's
+// client re-encrypts each node's metadata and rewraps every File DEK
+// locally; ciphertext blobs never change. Only the owner may rekey, the
+// batch is atomic, and every node is checked against its expected revision
+// so a concurrent change is never overwritten with stale metadata. A
+// retried batch that already applied fails with a revision conflict, which
+// the client resolves by re-reading the nodes.
+func (s *Service) Rekey(ctx context.Context, in RekeyInput) ([]Node, error) {
+	if len(in.Items) == 0 || len(in.Items) > MaxRekeyItems {
+		return nil, apierror.NewValidation(fmt.Sprintf("a rekey batch needs 1 to %d nodes", MaxRekeyItems))
+	}
+	seen := make(map[string]bool, len(in.Items))
+	for _, item := range in.Items {
+		if !validUUID(item.NodeID) || seen[item.NodeID] || len(item.MetadataCiphertext) == 0 || len(item.MetadataCiphertext) > 1<<17 || len(item.Versions) > maxRekeyVersions {
+			return nil, apierror.NewValidation("rekey items need unique node IDs, encrypted metadata, and a bounded version list")
+		}
+		seen[item.NodeID] = true
+		for _, version := range item.Versions {
+			if !validUUID(version.ID) || len(version.WrappedFileKey) == 0 || len(version.WrappedFileKey) > 1024 {
+				return nil, apierror.NewValidation("rekeyed file versions need an ID and a wrapped file key")
+			}
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := s.validateDeviceOwnership(ctx, tx, in.UserID, in.DeviceID); err != nil {
+		return nil, err
+	}
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	for _, item := range in.Items {
+		current, err := s.lockNode(ctx, tx, item.NodeID)
+		if err != nil {
+			return nil, err
+		}
+		if current.OwnerID != in.UserID {
+			return nil, ErrForbidden
+		}
+		if current.Revision != item.ExpectedRevision {
+			return nil, ErrRevisionConflict
+		}
+		if err := access.ValidateKeyScope(ctx, tx, current.OwnerID, in.UserID, "", item.MetadataKeyScopeID, item.MetadataKeyVersion); err != nil {
+			return nil, err
+		}
+		for _, version := range item.Versions {
+			if err := access.ValidateKeyScope(ctx, tx, current.OwnerID, in.UserID, "", version.KeyScopeID, version.KeyVersion); err != nil {
+				return nil, err
+			}
+			result, err := tx.ExecContext(ctx, `UPDATE file_versions SET wrapped_file_key=?, key_scope_id=?, key_version=? WHERE id=? AND node_id=?`,
+				version.WrappedFileKey, version.KeyScopeID, version.KeyVersion, version.ID, item.NodeID)
+			if err != nil {
+				return nil, fmt.Errorf("rewrap file version: %w", err)
+			}
+			if affected, err := result.RowsAffected(); err != nil {
+				return nil, err
+			} else if affected != 1 {
+				return nil, apierror.NewValidation("a rekeyed file version does not belong to its node")
+			}
+		}
+		revision, err := s.recordChange(ctx, tx, current.OwnerID, item.NodeID, "UPDATE")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET metadata_ciphertext=?, metadata_key_version=?, metadata_key_scope_id=?, revision=?, updated_at=? WHERE id=?`,
+			item.MetadataCiphertext, item.MetadataKeyVersion, access.StoredScope(item.MetadataKeyScopeID, current.OwnerID), revision, now, item.NodeID); err != nil {
+			return nil, fmt.Errorf("rekey node: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	out := make([]Node, 0, len(in.Items))
+	for _, item := range in.Items {
+		n, err := s.Get(ctx, in.UserID, item.NodeID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }

@@ -38,7 +38,7 @@ func TestCompleteStoresOnlyJoinedCiphertextAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	operationID := uuid.NewString()
-	result, err := s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: operationID, KeyScopeID: uuid.NewString(), KeyVersion: 1, SyncPayloadCiphertext: []byte("encrypted-change")})
+	result, err := s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: operationID, KeyScopeID: userID, KeyVersion: 1, SyncPayloadCiphertext: []byte("encrypted-change")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestCompleteStoresOnlyJoinedCiphertextAndIsIdempotent(t *testing.T) {
 	if string(storedMetadata) != "encrypted-metadata" || storedMetadataVersion != 2 {
 		t.Fatalf("metadata was not committed atomically: ciphertext=%q version=%d", storedMetadata, storedMetadataVersion)
 	}
-	again, err := s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: operationID, KeyScopeID: uuid.NewString(), KeyVersion: 1})
+	again, err := s.Complete(ctx, session.ID, CompleteInput{UserID: userID, DeviceID: deviceID, OperationID: operationID, KeyScopeID: userID, KeyVersion: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

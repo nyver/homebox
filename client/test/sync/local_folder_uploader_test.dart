@@ -1,3 +1,5 @@
+import '../support/test_key_ring.dart';
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -141,8 +143,7 @@ void main() {
     final downloaded = await downloadAndDecryptFile(
       api: serverConnection.api!,
       accessToken: session.accessToken,
-      vaultKey: vaultKey,
-      vaultId: uuidStringToBytes(session.user.id),
+      keys: vaultOnlyKeyRing(vaultKey, session.user.id),
       nodeId: uploaded.id,
     );
     expect(utf8.decode(downloaded), 'authoritative local state');
@@ -218,8 +219,7 @@ void main() {
     final downloaded = await downloadAndDecryptFile(
       api: serverConnection.api!,
       accessToken: session.accessToken,
-      vaultKey: vaultKey,
-      vaultId: uuidStringToBytes(session.user.id),
+      keys: vaultOnlyKeyRing(vaultKey, session.user.id),
       nodeId: uploadedNode.id,
     );
     expect(utf8.decode(downloaded), 'dropped by the user');
@@ -342,8 +342,10 @@ void main() {
     final downloaded = await downloadAndDecryptFile(
       api: serverConnection.api!,
       accessToken: session.accessToken,
-      vaultKey: (await vaultKeyStore.loadVaultKey())!,
-      vaultId: uuidStringToBytes(session.user.id),
+      keys: vaultOnlyKeyRing(
+        (await vaultKeyStore.loadVaultKey())!,
+        session.user.id,
+      ),
       nodeId: uploaded.node.id,
     );
     expect(utf8.decode(downloaded), 'edited by the user');
@@ -547,8 +549,10 @@ void main() {
       final downloaded = await downloadAndDecryptFile(
         api: serverConnection.api!,
         accessToken: serverConnection.session!.accessToken,
-        vaultKey: (await vaultKeyStore.loadVaultKey())!,
-        vaultId: uuidStringToBytes(FakeNodeServer.userId),
+        keys: vaultOnlyKeyRing(
+          (await vaultKeyStore.loadVaultKey())!,
+          FakeNodeServer.userId,
+        ),
         nodeId: file.id,
       );
       expect(utf8.decode(downloaded), 'nested local file');

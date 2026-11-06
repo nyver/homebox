@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/homebox/homebox/internal/access"
 	"github.com/homebox/homebox/internal/apierror"
 )
 
@@ -400,18 +401,26 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 		}
 		return CompleteResult{}, err
 	}
-	if ownerID != in.UserID {
-		return CompleteResult{}, ErrForbidden
+	writeRoot, err := authorizeFileWrite(ctx, tx, in.UserID, ownerID, session.targetNodeID)
+	if err != nil {
+		return CompleteResult{}, err
 	}
 	if currentRevision != expectedRevision {
 		return CompleteResult{}, ErrRevisionConflict
+	}
+	// Metadata and the File DEK of one version always share a key scope.
+	if err := access.ValidateKeyScope(ctx, tx, ownerID, in.UserID, writeRoot, in.KeyScopeID, in.KeyVersion); err != nil {
+		return CompleteResult{}, err
+	}
+	if err := access.ValidateKeyScope(ctx, tx, ownerID, in.UserID, writeRoot, in.KeyScopeID, session.metadataKeyVersion); err != nil {
+		return CompleteResult{}, err
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
 	relPath := filepath.ToSlash(filepath.Join("blobs", session.BlobID+".hbxblob"))
 	if _, err := tx.ExecContext(ctx, `INSERT INTO blobs (id,ciphertext_size,storage_rel_path,ciphertext_sha256,format_version,chunk_count,created_at) VALUES (?,?,?,?,1,?,?)`, session.BlobID, totalSize, relPath, digest, session.ChunkCount, now); err != nil {
 		return CompleteResult{}, fmt.Errorf("create blob record: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sync_changes (user_scope_id,node_id,operation,payload_ciphertext,created_at) VALUES (?,?, 'UPDATE', ?, ?)`, in.UserID, session.targetNodeID, in.SyncPayloadCiphertext, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sync_changes (user_scope_id,node_id,operation,payload_ciphertext,created_at) VALUES (?,?, 'UPDATE', ?, ?)`, ownerID, session.targetNodeID, in.SyncPayloadCiphertext, now); err != nil {
 		return CompleteResult{}, err
 	}
 	var revision int64
@@ -421,8 +430,8 @@ func (s *Service) Complete(ctx context.Context, uploadID string, in CompleteInpu
 	if _, err := tx.ExecContext(ctx, `INSERT INTO file_versions (id,node_id,blob_id,e2ee_header,wrapped_file_key,key_scope_id,key_version,created_at,created_by_device_id,revision) VALUES (?,?,?,?,?,?,?,?,?,?)`, session.FileVersionID, session.targetNodeID, session.BlobID, session.e2eeHeader, session.wrappedFileKey, in.KeyScopeID, in.KeyVersion, now, in.DeviceID, revision); err != nil {
 		return CompleteResult{}, err
 	}
-	updateResult, err := tx.ExecContext(ctx, `UPDATE nodes SET current_version_id=?,metadata_ciphertext=?,metadata_key_version=?,revision=?,updated_at=? WHERE id=? AND revision=?`,
-		session.FileVersionID, session.metadataCiphertext, session.metadataKeyVersion, revision, now, session.targetNodeID, expectedRevision)
+	updateResult, err := tx.ExecContext(ctx, `UPDATE nodes SET current_version_id=?,metadata_ciphertext=?,metadata_key_version=?,metadata_key_scope_id=?,revision=?,updated_at=? WHERE id=? AND revision=?`,
+		session.FileVersionID, session.metadataCiphertext, session.metadataKeyVersion, access.StoredScope(in.KeyScopeID, ownerID), revision, now, session.targetNodeID, expectedRevision)
 	if err != nil {
 		return CompleteResult{}, err
 	}
@@ -491,10 +500,25 @@ func (s *Service) validateActorAndTarget(ctx context.Context, userID, deviceID, 
 		}
 		return err
 	}
-	if ownerID != userID {
-		return ErrForbidden
+	_, err := authorizeFileWrite(ctx, s.db, userID, ownerID, nodeID)
+	return err
+}
+
+// authorizeFileWrite lets the owner add a version to its own file, and a
+// READ_WRITE Family Vault recipient add one to a file inside the folder
+// shared with it. writeRoot is that shared folder for a recipient.
+func authorizeFileWrite(ctx context.Context, q access.Querier, userID, ownerID, nodeID string) (writeRoot string, err error) {
+	if ownerID == userID {
+		return "", nil
 	}
-	return nil
+	grant, found, err := access.ShareGrant(ctx, q, userID, nodeID)
+	if err != nil {
+		return "", err
+	}
+	if !found || !grant.CanWrite() {
+		return "", ErrForbidden
+	}
+	return grant.RootID, nil
 }
 
 type ciphertextChunk struct{ relativePath, digest string }

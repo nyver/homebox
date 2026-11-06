@@ -22,6 +22,7 @@ final class LocalNode {
     required this.updatedAt,
     this.deletedAt,
     required this.pendingCreate,
+    this.keyScopeId,
   });
 
   final String id;
@@ -40,8 +41,45 @@ final class LocalNode {
   /// this node must wait for that create to land first (see SyncEngine).
   final bool pendingCreate;
 
+  /// The key scope of [metadataCiphertext]: null or the owner's account ID
+  /// for its personal Vault Key, otherwise a shared folder's ID (ADR-023).
+  final String? keyScopeId;
+
   bool get isDeleted => deletedAt != null;
   bool get isDirectory => nodeType == 'DIRECTORY';
+
+  /// The scope ID used to decrypt this node's metadata, given the ID of the
+  /// account that owns it.
+  String scopeOrOwner(String ownerUserId) => keyScopeId ?? ownerUserId;
+
+  /// A copy with selected fields replaced. Nullable fields that may need to
+  /// be cleared (none so far) would need explicit sentinels.
+  LocalNode copyWith({
+    String? parentId,
+    bool clearParent = false,
+    Uint8List? metadataCiphertext,
+    int? metadataKeyVersion,
+    String? keyScopeId,
+    String? currentVersionId,
+    int? revision,
+    DateTime? updatedAt,
+    DateTime? deletedAt,
+    bool clearDeletedAt = false,
+    bool? pendingCreate,
+  }) => LocalNode(
+    id: id,
+    parentId: clearParent ? null : parentId ?? this.parentId,
+    nodeType: nodeType,
+    metadataCiphertext: metadataCiphertext ?? this.metadataCiphertext,
+    metadataKeyVersion: metadataKeyVersion ?? this.metadataKeyVersion,
+    currentVersionId: currentVersionId ?? this.currentVersionId,
+    revision: revision ?? this.revision,
+    createdAt: createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+    deletedAt: clearDeletedAt ? null : deletedAt ?? this.deletedAt,
+    pendingCreate: pendingCreate ?? this.pendingCreate,
+    keyScopeId: keyScopeId ?? this.keyScopeId,
+  );
 }
 
 /// Converts a server-confirmed node into its local-cache representation.
@@ -64,6 +102,7 @@ LocalNode localNodeFromServerNode(
   updatedAt: node.updatedAt,
   deletedAt: node.deletedAt,
   pendingCreate: pendingCreate,
+  keyScopeId: node.metadataKeyScopeId,
 );
 
 /// CRUD for the local `nodes` cache table (spec §13). Every method is
@@ -78,8 +117,8 @@ final class NodeCache {
   void upsert(LocalNode node) {
     _db.execute(
       '''
-      INSERT INTO nodes (id, parent_id, node_type, metadata_ciphertext, metadata_key_version, current_version_id, revision, created_at, updated_at, deleted_at, pending_create)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO nodes (id, parent_id, node_type, metadata_ciphertext, metadata_key_version, current_version_id, revision, created_at, updated_at, deleted_at, pending_create, metadata_key_scope_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         parent_id = excluded.parent_id,
         node_type = excluded.node_type,
@@ -89,7 +128,8 @@ final class NodeCache {
         revision = excluded.revision,
         updated_at = excluded.updated_at,
         deleted_at = excluded.deleted_at,
-        pending_create = excluded.pending_create
+        pending_create = excluded.pending_create,
+        metadata_key_scope_id = excluded.metadata_key_scope_id
       ''',
       [
         node.id,
@@ -103,6 +143,7 @@ final class NodeCache {
         node.updatedAt.toUtc().toIso8601String(),
         node.deletedAt?.toUtc().toIso8601String(),
         node.pendingCreate ? 1 : 0,
+        node.keyScopeId,
       ],
     );
   }
@@ -152,5 +193,6 @@ final class NodeCache {
         ? DateTime.parse(row['deleted_at'] as String)
         : null,
     pendingCreate: (row['pending_create'] as int) != 0,
+    keyScopeId: row['metadata_key_scope_id'] as String?,
   );
 }

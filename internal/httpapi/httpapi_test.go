@@ -167,6 +167,17 @@ func (s testServer) do(t *testing.T, method, path string, body any, accessToken 
 }
 
 // get is a convenience wrapper for a GET request that returns a JSON object.
+// accountIDOf returns the account ID behind accessToken, which is also the
+// key scope of that account's personal Vault.
+func accountIDOf(t *testing.T, s testServer, accessToken string) string {
+	t.Helper()
+	resp, me := s.get(t, "/api/v1/users/me", accessToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("users/me status=%d", resp.StatusCode)
+	}
+	return me["id"].(string)
+}
+
 func (s testServer) get(t *testing.T, path, accessToken string) (*http.Response, map[string]any) {
 	t.Helper()
 	return s.do(t, http.MethodGet, path, nil, accessToken)

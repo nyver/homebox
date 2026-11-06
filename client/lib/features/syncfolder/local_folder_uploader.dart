@@ -3,9 +3,9 @@
 // ignore_for_file: prefer_initializing_formals
 import 'dart:io';
 
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
@@ -16,6 +16,7 @@ import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/util/local_path.dart';
 import '../files/file_transfer.dart';
 import '../server/server_connection_controller.dart';
+import '../sharing/key_scopes.dart';
 import '../sync/conflict_naming.dart';
 import '../sync/sync_engine.dart';
 import 'conflict_copies.dart';
@@ -112,21 +113,19 @@ final class LocalFolderUploader extends ChangeNotifier {
     // Not _serverConnection.session directly — see FilesController's
     // _requireContext for why (mobile OSes suspend background timers).
     final session = await _serverConnection.ensureFreshSession();
-    final vaultKey = await _vaultKeyStore.loadVaultKey();
-    if (api == null || session == null || vaultKey == null) return;
+    if (api == null || session == null) return;
+    final keys = await _openKeys(session.user.id);
+    if (keys == null) return;
     _clearTransferProgress();
     _setStatus(LocalUploadStatus.scanning);
     try {
-      final vaultId = uuidStringToBytes(session.user.id);
       await _scanDirectory(
         rootPath: rootPath,
         parentId: null,
         relativePath: '',
         api: api,
         accessToken: session.accessToken,
-        keyScopeId: session.user.id,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
+        keys: keys,
         tracked: _TrackedPaths.snapshot(_syncEngine),
       );
       _errorMessage = null;
@@ -135,8 +134,27 @@ final class LocalFolderUploader extends ChangeNotifier {
       _errorMessage = describeError(e);
       _setStatus(LocalUploadStatus.error);
     } finally {
+      keys.dispose();
       _clearTransferProgress();
     }
+  }
+
+  Future<_Keys?> _openKeys(String userId) async {
+    final ring = await openOwnerKeyRing(
+      vaultKeyStore: _vaultKeyStore,
+      userId: userId,
+      wrappedFolderKeys: _syncEngine.folderKeys.all(),
+    );
+    if (ring == null) return null;
+    return _Keys(
+      ring,
+      KeyScopeResolver(
+        nodeCache: _syncEngine.nodeCache,
+        isKeyedFolder: _syncEngine.folderKeys.isKeyedFolder,
+        userId: userId,
+      ),
+      _metadataCipher,
+    );
   }
 
   /// Replaces the active personal Vault with a fresh encrypted snapshot of
@@ -165,14 +183,15 @@ final class LocalFolderUploader extends ChangeNotifier {
     }
     final api = _serverConnection.api;
     final session = await _serverConnection.ensureFreshSession();
-    final vaultKey = await _vaultKeyStore.loadVaultKey();
-    if (api == null || session == null || vaultKey == null) {
+    final keys = session == null ? null : await _openKeys(session.user.id);
+    if (api == null || session == null || keys == null) {
       _errorMessage =
           'Connect to the server and unlock the E2EE vault before resyncing.';
       _setStatus(LocalUploadStatus.error);
       return false;
     }
     if (_syncEngine.pendingOperations.hasUnfinishedOperations) {
+      keys.dispose();
       _errorMessage =
           'Pending server changes must finish before the Vault can be rebuilt.';
       _setStatus(LocalUploadStatus.error);
@@ -222,9 +241,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         relativePath: '',
         api: api,
         accessToken: session.accessToken,
-        keyScopeId: session.user.id,
-        vaultKey: vaultKey,
-        vaultId: uuidStringToBytes(session.user.id),
+        keys: keys,
         tracked: _TrackedPaths.snapshot(_syncEngine),
         strict: true,
       );
@@ -237,6 +254,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       _setStatus(LocalUploadStatus.error);
       return false;
     } finally {
+      keys.dispose();
       _clearTransferProgress();
     }
   }
@@ -247,9 +265,7 @@ final class LocalFolderUploader extends ChangeNotifier {
     required String relativePath,
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required String keyScopeId,
-    required SecretKey vaultKey,
-    required Uint8List vaultId,
+    required _Keys keys,
     required _TrackedPaths tracked,
     bool strict = false,
   }) async {
@@ -280,7 +296,7 @@ final class LocalFolderUploader extends ChangeNotifier {
     final expectedChildren = <String, (LocalNode, SensitiveNodeMetadata)>{};
     for (final node in _syncEngine.nodeCache.listChildren(parentId)) {
       try {
-        final metadata = await _decryptMetadata(node, vaultKey, vaultId);
+        final metadata = await keys.decrypt(node);
         expectedChildren[metadata.fileName] = (node, metadata);
       } catch (_) {
         // Can't decrypt or parse this node's metadata - skip it, matching
@@ -306,9 +322,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         rootPath: rootPath,
         api: api,
         accessToken: accessToken,
-        keyScopeId: keyScopeId,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
+        keys: keys,
         node: node,
         currentMetadata: metadata,
         name: name,
@@ -329,9 +343,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       await _uploadNewFile(
         api: api,
         accessToken: accessToken,
-        keyScopeId: keyScopeId,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
+        keys: keys,
         parentId: parentId,
         name: name,
         relativePath: relativePath,
@@ -346,8 +358,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       final createdDirectory = await _createRemoteDirectory(
         api: api,
         accessToken: accessToken,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
+        keys: keys,
         parentId: parentId,
         name: name,
         strict: strict,
@@ -359,9 +370,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         relativePath: childPath(name),
         api: api,
         accessToken: accessToken,
-        keyScopeId: keyScopeId,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
+        keys: keys,
         tracked: tracked,
         strict: strict,
       );
@@ -383,9 +392,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         relativePath: childPath(entry.key),
         api: api,
         accessToken: accessToken,
-        keyScopeId: keyScopeId,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
+        keys: keys,
         tracked: tracked,
         strict: strict,
       );
@@ -396,9 +403,7 @@ final class LocalFolderUploader extends ChangeNotifier {
     required String rootPath,
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required String keyScopeId,
-    required SecretKey vaultKey,
-    required Uint8List vaultId,
+    required _Keys keys,
     required LocalNode node,
     required SensitiveNodeMetadata currentMetadata,
     required String name,
@@ -476,9 +481,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         await _uploadNewFile(
           api: api,
           accessToken: accessToken,
-          keyScopeId: keyScopeId,
-          vaultKey: vaultKey,
-          vaultId: vaultId,
+          keys: keys,
           parentId: node.parentId,
           name: basenameOfLocalPath(copyPath),
           relativePath: relativePath,
@@ -486,6 +489,7 @@ final class LocalFolderUploader extends ChangeNotifier {
         );
         return;
       }
+      final key = await keys.forExisting(node);
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(
           fileName: name,
@@ -496,10 +500,10 @@ final class LocalFolderUploader extends ChangeNotifier {
           conflictDetails: currentMetadata.conflictDetails,
           labels: currentMetadata.labels,
         ),
-        metadataKey: vaultKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKey: key.key,
+        keyVersion: key.version,
         nodeType: MetadataNodeType.file,
-        scopeId: vaultId,
+        scopeId: key.scopeIdBytes,
         nodeId: uuidStringToBytes(node.id),
       );
       final metadataCiphertext = metadataEnvelope.encode();
@@ -508,9 +512,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       final uploadedNode = await uploadFilePathVersion(
         api: api,
         accessToken: accessToken,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
-        keyScopeId: keyScopeId,
+        key: key,
         targetNodeId: node.id,
         expectedRevision: node.revision,
         file: localFile,
@@ -547,9 +549,7 @@ final class LocalFolderUploader extends ChangeNotifier {
   Future<void> _uploadNewFile({
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required String keyScopeId,
-    required SecretKey vaultKey,
-    required Uint8List vaultId,
+    required _Keys keys,
     required String? parentId,
     required String name,
     required String relativePath,
@@ -576,6 +576,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       );
 
       final nodeId = generateUuidV4();
+      final key = await keys.forNewChild(parentId);
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(
           fileName: name,
@@ -590,10 +591,10 @@ final class LocalFolderUploader extends ChangeNotifier {
                   reason: conflictCopyReason(conflict.kind),
                 ),
         ),
-        metadataKey: vaultKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKey: key.key,
+        keyVersion: key.version,
         nodeType: MetadataNodeType.file,
-        scopeId: vaultId,
+        scopeId: key.scopeIdBytes,
         nodeId: uuidStringToBytes(nodeId),
       );
       final metadataCiphertext = metadataEnvelope.encode();
@@ -605,7 +606,8 @@ final class LocalFolderUploader extends ChangeNotifier {
         parentId: parentId,
         nodeType: 'FILE',
         metadataCiphertext: metadataCiphertext,
-        metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKeyVersion: key.version,
+        metadataKeyScopeId: key.scopeId,
       );
       _syncEngine.nodeCache.upsert(localNodeFromServerNode(createdNode));
       _setTransferProgress(name, 0);
@@ -613,9 +615,7 @@ final class LocalFolderUploader extends ChangeNotifier {
       final uploadedNode = await uploadFilePathVersion(
         api: api,
         accessToken: accessToken,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
-        keyScopeId: keyScopeId,
+        key: key,
         targetNodeId: nodeId,
         expectedRevision: createdNode.revision,
         file: localFile,
@@ -650,20 +650,20 @@ final class LocalFolderUploader extends ChangeNotifier {
   Future<LocalNode?> _createRemoteDirectory({
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required SecretKey vaultKey,
-    required Uint8List vaultId,
+    required _Keys keys,
     required String? parentId,
     required String name,
     bool strict = false,
   }) async {
     try {
       final nodeId = generateUuidV4();
+      final key = await keys.forNewChild(parentId);
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(fileName: name),
-        metadataKey: vaultKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKey: key.key,
+        keyVersion: key.version,
         nodeType: MetadataNodeType.directory,
-        scopeId: vaultId,
+        scopeId: key.scopeIdBytes,
         nodeId: uuidStringToBytes(nodeId),
       );
       final created = await api.createNode(
@@ -673,7 +673,8 @@ final class LocalFolderUploader extends ChangeNotifier {
         parentId: parentId,
         nodeType: 'DIRECTORY',
         metadataCiphertext: metadataEnvelope.encode(),
-        metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKeyVersion: key.version,
+        metadataKeyScopeId: key.scopeId,
       );
       final local = localNodeFromServerNode(created);
       _syncEngine.nodeCache.upsert(local);
@@ -710,23 +711,6 @@ final class LocalFolderUploader extends ChangeNotifier {
       // (someone else changed the file first) is left for the next scan()
       // pass, which will re-derive the correct outcome from fresh state.
     }
-  }
-
-  Future<SensitiveNodeMetadata> _decryptMetadata(
-    LocalNode node,
-    SecretKey vaultKey,
-    Uint8List vaultId,
-  ) {
-    final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
-    return _metadataCipher.decrypt(
-      envelope: envelope,
-      metadataKey: vaultKey,
-      nodeType: node.isDirectory
-          ? MetadataNodeType.directory
-          : MetadataNodeType.file,
-      scopeId: vaultId,
-      nodeId: uuidStringToBytes(node.id),
-    );
   }
 
   void _setStatus(LocalUploadStatus status) {
@@ -772,4 +756,38 @@ final class _TrackedPaths {
 
   final Set<String> files;
   final Set<String> directories;
+}
+
+/// The keys one scan or Resync pass encrypts and decrypts with (ADR-023).
+final class _Keys {
+  _Keys(this.ring, this.scopes, this._cipher);
+
+  final OwnerKeyRing ring;
+  final KeyScopeResolver scopes;
+  final MetadataCipher _cipher;
+
+  Future<SensitiveNodeMetadata> decrypt(LocalNode node) async {
+    final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
+    final key = await ring.key(
+      node.scopeOrOwner(ring.userId),
+      envelope.keyVersion,
+    );
+    return _cipher.decrypt(
+      envelope: envelope,
+      metadataKey: key.key,
+      nodeType: node.isDirectory
+          ? MetadataNodeType.directory
+          : MetadataNodeType.file,
+      scopeId: key.scopeIdBytes,
+      nodeId: uuidStringToBytes(node.id),
+    );
+  }
+
+  Future<ScopedKey> forNewChild(String? parentId) =>
+      ring.current(scopes.forNewChild(parentId));
+
+  Future<ScopedKey> forExisting(LocalNode node) =>
+      ring.current(node.scopeOrOwner(ring.userId));
+
+  void dispose() => ring.dispose();
 }

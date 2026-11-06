@@ -91,9 +91,10 @@ void main() {
       expect(devices.single.platform, 'ANDROID');
       expect(devices.single.publicKey, List.filled(32, 9));
 
-      final created = await api.createReadShare(
+      final created = await api.createShare(
         'access-token',
         operationId: 'operation-1',
+        permission: SharePermission.read,
         nodeId: 'folder-1',
         targetUserId: 'member-1',
         envelopes: [

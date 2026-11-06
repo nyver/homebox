@@ -167,4 +167,24 @@ final List<_Migration> _migrations = [
     CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open ON sync_conflicts(dismissed, detected_at);
     CREATE INDEX IF NOT EXISTS idx_sync_conflicts_copy ON sync_conflicts(conflict_copy_path);
   '''),
+  // Family Vault (ADR-023): metadata_key_scope_id names the key a node's
+  // metadata is encrypted with (NULL = the account's personal Vault Key),
+  // folder_keys caches the account's shared-folder keys, still wrapped by
+  // its Vault Key, so shared folders stay usable offline, and
+  // trusted_accounts pins the account identity of each family member whose
+  // fingerprint the user compared out of band.
+  _Migration(7, '''
+    ALTER TABLE nodes ADD COLUMN metadata_key_scope_id TEXT;
+    CREATE TABLE IF NOT EXISTS folder_keys (
+      folder_id TEXT NOT NULL,
+      key_version INTEGER NOT NULL,
+      owner_envelope BLOB NOT NULL,
+      PRIMARY KEY (folder_id, key_version)
+    );
+    CREATE TABLE IF NOT EXISTS trusted_accounts (
+      account_id TEXT PRIMARY KEY,
+      identity_public_key BLOB NOT NULL,
+      verified_at TEXT NOT NULL
+    );
+  '''),
 ];

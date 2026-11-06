@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../core/e2ee/opaque_id.dart';
+import '../../core/storage/folder_keys_store.dart';
 import '../../core/storage/local_database.dart';
 import '../../core/storage/materialized_directories_store.dart';
 import '../../core/storage/materialization_failures_store.dart';
@@ -16,6 +17,7 @@ import '../../core/storage/node_cache.dart';
 import '../../core/storage/pending_operations_store.dart';
 import '../../core/storage/sync_conflicts_store.dart';
 import '../../core/storage/sync_state_store.dart';
+import '../../core/storage/trusted_accounts_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import 'outbox_conflict_resolver.dart';
 import 'sync_conflict_log.dart';
@@ -57,6 +59,8 @@ final class SyncEngine extends ChangeNotifier {
        _localDatabase = localDatabase,
        _conflictResolver = conflictResolver,
        nodeCache = NodeCache(localDatabase.db),
+       folderKeys = FolderKeysStore(localDatabase.db),
+       trustedAccounts = TrustedAccountsStore(localDatabase.db),
        pendingOperations = PendingOperationsStore(localDatabase.db),
        materializedDirectories = MaterializedDirectoriesStore(localDatabase.db),
        materializationFailures = MaterializationFailuresStore(localDatabase.db),
@@ -72,6 +76,14 @@ final class SyncEngine extends ChangeNotifier {
   final LocalDatabase _localDatabase;
   final OutboxConflictResolver? _conflictResolver;
   final NodeCache nodeCache;
+
+  /// This account's shared-folder keys, still wrapped by its Vault Key,
+  /// refreshed from the server on every pass (ADR-023).
+  final FolderKeysStore folderKeys;
+
+  /// Family members whose account identity the user verified on this
+  /// device, for Family Vault sharing.
+  final TrustedAccountsStore trustedAccounts;
   final PendingOperationsStore pendingOperations;
   final MaterializedDirectoriesStore materializedDirectories;
   final MaterializationFailuresStore materializationFailures;
@@ -205,6 +217,7 @@ final class SyncEngine extends ChangeNotifier {
       }
       await _pushPending(api, session.accessToken, session.user.id);
       await _pullChanges(api, session.accessToken, session.user.id);
+      await _refreshFolderKeys(api, session.accessToken);
       _errorMessage = null;
       if (!_paused) _setStatus(SyncStatus.idle);
     } catch (e) {
@@ -450,6 +463,7 @@ final class SyncEngine extends ChangeNotifier {
       nodeType: payload['nodeType'] as String,
       metadataCiphertext: base64Decode(payload['metadataCiphertext'] as String),
       metadataKeyVersion: payload['metadataKeyVersion'] as int,
+      metadataKeyScopeId: payload[metadataScopePayloadKey] as String?,
     );
     await _refreshNodeFromServer(api, accessToken, op.nodeId);
     return created.revision;
@@ -471,6 +485,7 @@ final class SyncEngine extends ChangeNotifier {
           ? base64Decode(metadataCiphertextB64)
           : null,
       metadataKeyVersion: payload['metadataKeyVersion'] as int? ?? 1,
+      metadataKeyScopeId: payload[metadataScopePayloadKey] as String?,
       moveParent: payload['moveParent'] as bool? ?? false,
       parentId: payload['parentId'] as String?,
     );
@@ -519,21 +534,7 @@ final class SyncEngine extends ChangeNotifier {
       return false;
     }
     final now = DateTime.now().toUtc();
-    nodeCache.upsert(
-      LocalNode(
-        id: current.id,
-        parentId: current.parentId,
-        nodeType: current.nodeType,
-        metadataCiphertext: current.metadataCiphertext,
-        metadataKeyVersion: current.metadataKeyVersion,
-        currentVersionId: current.currentVersionId,
-        revision: current.revision,
-        createdAt: current.createdAt,
-        updatedAt: now,
-        deletedAt: now,
-        pendingCreate: current.pendingCreate,
-      ),
-    );
+    nodeCache.upsert(current.copyWith(updatedAt: now, deletedAt: now));
     final operation = PendingOperation(
       id: generateUuidV4(),
       operationId: generateUuidV4(),
@@ -639,6 +640,21 @@ final class SyncEngine extends ChangeNotifier {
         _syncState.advance(serverScopeId, after);
       }
       if (!page.hasMore) break;
+    }
+  }
+
+  /// Mirrors the account's wrapped folder keys so shared folders can be
+  /// used offline and new content lands in the right key scope. A server
+  /// that predates Family Vault folder keys answers 404, which simply
+  /// means there are none.
+  Future<void> _refreshFolderKeys(
+    transport.HomeBoxApiClient api,
+    String accessToken,
+  ) async {
+    try {
+      folderKeys.replaceAll(await api.listFolderKeys(accessToken));
+    } on transport.HomeBoxApiException catch (e) {
+      if (e.statusCode != 404) rethrow;
     }
   }
 

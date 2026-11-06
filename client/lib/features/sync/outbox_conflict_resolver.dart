@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
@@ -44,6 +45,14 @@ final class UpdateConflicts extends UpdateConflictResolution {
 /// Decides how an outbox mutation that lost a revision race is replayed.
 /// [SyncEngine] holds no key material, so this is the boundary through which
 /// it asks a vault-aware component to compare encrypted metadata.
+/// Outbox payload key of the key scope [metadataCiphertext] is encrypted
+/// with. Absent in operations queued before Family Vault folder keys,
+/// which always used the account's personal Vault Key.
+const String metadataScopePayloadKey = 'metadataKeyScopeId';
+
+/// Outbox payload key of the key scope of [baseMetadataPayloadKey].
+const String baseMetadataScopePayloadKey = 'baseMetadataKeyScopeId';
+
 abstract interface class OutboxConflictResolver {
   Future<UpdateConflictResolution> resolveUpdate({
     required PendingOperation operation,
@@ -68,10 +77,22 @@ abstract interface class OutboxConflictResolver {
 /// - a change to an item deleted remotely is never replayed, so it cannot
 ///   silently undo the delete.
 final class VaultOutboxConflictResolver implements OutboxConflictResolver {
-  VaultOutboxConflictResolver(this._vaultKeyStore);
+  /// [folderKeys] supplies the account's wrapped shared-folder keys, so a
+  /// conflict on a node inside a shared folder can be decrypted too.
+  VaultOutboxConflictResolver(
+    this._vaultKeyStore, {
+    Map<String, Map<int, Uint8List>> Function()? folderKeys,
+  }) : _folderKeys = folderKeys; // ignore: prefer_initializing_formals
 
   final VaultKeyStore _vaultKeyStore;
+  final Map<String, Map<int, Uint8List>> Function()? _folderKeys;
   final MetadataCipher _cipher = MetadataCipher();
+
+  Future<OwnerKeyRing?> _openKeys(String userId) => openOwnerKeyRing(
+    vaultKeyStore: _vaultKeyStore,
+    userId: userId,
+    wrappedFolderKeys: _folderKeys?.call() ?? {},
+  );
 
   @override
   Future<UpdateConflictResolution> resolveUpdate({
@@ -80,37 +101,51 @@ final class VaultOutboxConflictResolver implements OutboxConflictResolver {
     required String scopeId,
   }) async {
     final payload = operation.payload;
-    final localMetadataB64 = payload['metadataCiphertext'] as String?;
     final requestedMove = payload['moveParent'] as bool? ?? false;
-    final targetParentId = payload['parentId'] as String?;
     final fallbackKind = requestedMove
         ? SyncConflictKind.moveRejected
         : SyncConflictKind.renameRejected;
+    final keys = await _openKeys(scopeId);
+    if (keys == null) return UpdateConflicts(fallbackKind);
+    try {
+      return await _resolve(operation, server, scopeId, keys, fallbackKind);
+    } finally {
+      keys.dispose();
+    }
+  }
 
-    final vaultKey = await _vaultKeyStore.loadVaultKey();
-    if (vaultKey == null) return UpdateConflicts(fallbackKind);
-    final vaultId = uuidStringToBytes(scopeId);
+  Future<UpdateConflictResolution> _resolve(
+    PendingOperation operation,
+    transport.NodeInfo server,
+    String userId,
+    KeyRing keys,
+    SyncConflictKind fallbackKind,
+  ) async {
+    final payload = operation.payload;
+    final localMetadataB64 = payload['metadataCiphertext'] as String?;
+    final requestedMove = payload['moveParent'] as bool? ?? false;
+    final targetParentId = payload['parentId'] as String?;
     final nodeId = uuidStringToBytes(server.id);
     final nodeType = server.nodeType == 'DIRECTORY'
         ? MetadataNodeType.directory
         : MetadataNodeType.file;
 
-    Future<SensitiveNodeMetadata> decrypt(List<int> ciphertext) =>
-        _cipher.decrypt(
-          envelope: EncryptedMetadataEnvelope.decode(ciphertext),
-          metadataKey: vaultKey,
-          nodeType: nodeType,
-          scopeId: vaultId,
-          nodeId: nodeId,
-        );
+    // Each ciphertext names its own scope: the node may have moved into a
+    // shared folder's key between when the change was queued and now.
+    Future<SensitiveNodeMetadata> decrypt(List<int> ciphertext, String scope) =>
+        _decryptIn(keys, ciphertext, scope, nodeType, nodeId);
 
+    final remoteScope = server.metadataKeyScopeId ?? userId;
     final SensitiveNodeMetadata remote;
     final SensitiveNodeMetadata? local;
     try {
-      remote = await decrypt(server.metadataCiphertext);
+      remote = await decrypt(server.metadataCiphertext, remoteScope);
       local = localMetadataB64 == null
           ? null
-          : await decrypt(base64Decode(localMetadataB64));
+          : await decrypt(
+              base64Decode(localMetadataB64),
+              payload[metadataScopePayloadKey] as String? ?? userId,
+            );
     } catch (_) {
       return UpdateConflicts(fallbackKind);
     }
@@ -126,7 +161,10 @@ final class VaultOutboxConflictResolver implements OutboxConflictResolver {
     }
     final SensitiveNodeMetadata base;
     try {
-      base = await decrypt(base64Decode(baseMetadataB64));
+      base = await decrypt(
+        base64Decode(baseMetadataB64),
+        payload[baseMetadataScopePayloadKey] as String? ?? userId,
+      );
     } catch (_) {
       return UpdateConflicts(fallbackKind, fileName: remote.fileName);
     }
@@ -155,7 +193,11 @@ final class VaultOutboxConflictResolver implements OutboxConflictResolver {
     if (!applyRename && !applyMove) return const UpdateAlreadyApplied();
 
     Uint8List? metadataCiphertext;
+    var metadataKeyVersion = 0;
     if (applyRename) {
+      // Re-encrypted in the server node's current scope, which its File
+      // DEKs share.
+      final key = await keys.current(remoteScope);
       final envelope = await _cipher.encrypt(
         metadata: SensitiveNodeMetadata(
           fileName: local.fileName,
@@ -165,24 +207,44 @@ final class VaultOutboxConflictResolver implements OutboxConflictResolver {
           conflictDetails: remote.conflictDetails,
           labels: remote.labels,
         ),
-        metadataKey: vaultKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKey: key.key,
+        keyVersion: key.version,
         nodeType: nodeType,
-        scopeId: vaultId,
+        scopeId: key.scopeIdBytes,
         nodeId: nodeId,
       );
       metadataCiphertext = envelope.encode();
+      metadataKeyVersion = key.version;
     }
     return RetryUpdate({
       if (metadataCiphertext != null)
         'metadataCiphertext': base64Encode(metadataCiphertext),
-      if (metadataCiphertext != null)
-        'metadataKeyVersion': homeBoxPersonalVaultKeyVersion,
+      if (metadataCiphertext != null) 'metadataKeyVersion': metadataKeyVersion,
+      if (metadataCiphertext != null) metadataScopePayloadKey: remoteScope,
       'moveParent': applyMove,
       'parentId': applyMove ? targetParentId : server.parentId,
       baseParentIdPayloadKey: server.parentId,
       baseMetadataPayloadKey: base64Encode(server.metadataCiphertext),
+      baseMetadataScopePayloadKey: remoteScope,
     });
+  }
+
+  Future<SensitiveNodeMetadata> _decryptIn(
+    KeyRing keys,
+    List<int> ciphertext,
+    String scope,
+    MetadataNodeType nodeType,
+    Uint8List nodeId,
+  ) async {
+    final envelope = EncryptedMetadataEnvelope.decode(ciphertext);
+    final key = await keys.key(scope, envelope.keyVersion);
+    return _cipher.decrypt(
+      envelope: envelope,
+      metadataKey: key.key,
+      nodeType: nodeType,
+      scopeId: key.scopeIdBytes,
+      nodeId: nodeId,
+    );
   }
 
   @override
@@ -190,21 +252,24 @@ final class VaultOutboxConflictResolver implements OutboxConflictResolver {
     required transport.NodeInfo server,
     required String scopeId,
   }) async {
+    OwnerKeyRing? keys;
     try {
-      final vaultKey = await _vaultKeyStore.loadVaultKey();
-      if (vaultKey == null) return null;
-      final metadata = await _cipher.decrypt(
-        envelope: EncryptedMetadataEnvelope.decode(server.metadataCiphertext),
-        metadataKey: vaultKey,
-        nodeType: server.nodeType == 'DIRECTORY'
+      keys = await _openKeys(scopeId);
+      if (keys == null) return null;
+      final metadata = await _decryptIn(
+        keys,
+        server.metadataCiphertext,
+        server.metadataKeyScopeId ?? scopeId,
+        server.nodeType == 'DIRECTORY'
             ? MetadataNodeType.directory
             : MetadataNodeType.file,
-        scopeId: uuidStringToBytes(scopeId),
-        nodeId: uuidStringToBytes(server.id),
+        uuidStringToBytes(server.id),
       );
       return metadata.fileName;
     } catch (_) {
       return null;
+    } finally {
+      keys?.dispose();
     }
   }
 }

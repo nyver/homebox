@@ -8,10 +8,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 
 import '../../core/e2ee/file_cipher.dart' show homeBoxChunkMacLength;
+import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/portable_name.dart';
@@ -21,8 +21,13 @@ import '../../core/storage/pending_operations_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/util/local_path.dart';
 import '../server/server_connection_controller.dart';
+import '../sharing/key_scopes.dart';
 import '../sync/outbox_conflict_resolver.dart'
-    show baseMetadataPayloadKey, baseParentIdPayloadKey;
+    show
+        baseMetadataPayloadKey,
+        baseMetadataScopePayloadKey,
+        baseParentIdPayloadKey,
+        metadataScopePayloadKey;
 import '../sync/sync_engine.dart';
 import 'file_transfer.dart';
 import '../../core/util/user_facing_error.dart';
@@ -116,15 +121,28 @@ final class _UploadContext {
   const _UploadContext({
     required this.api,
     required this.accessToken,
-    required this.vaultKey,
-    required this.vaultId,
+    required this.keys,
+    required this.scopes,
     required this.userId,
   });
   final transport.HomeBoxApiClient api;
   final String accessToken;
-  final SecretKey vaultKey;
-  final Uint8List vaultId;
+
+  /// The Vault Key and every shared-folder key of this account (ADR-023).
+  final OwnerKeyRing keys;
+  final KeyScopeResolver scopes;
   final String userId;
+
+  /// The newest key of the scope a new child of [parentId] belongs to.
+  Future<ScopedKey> keyForNewChild(String? parentId) =>
+      keys.current(scopes.forNewChild(parentId));
+
+  /// The newest key of the scope [node] is currently encrypted in. A
+  /// rename or new version stays in that scope, so the node's metadata and
+  /// File DEKs never diverge; moving into a shared folder's scope is done
+  /// by the shared-scope reconciler for both at once.
+  Future<ScopedKey> keyForExisting(LocalNode node) =>
+      keys.current(node.scopeOrOwner(userId));
 }
 
 /// Drives the Files browser. Folder create/rename/delete go through
@@ -135,9 +153,8 @@ final class _UploadContext {
 /// "upload its content" into two independently-queued steps wouldn't add
 /// real offline value here.
 ///
-/// Scoped to this account's one personal vault (`vaultId == userId`, key
-/// version 1); Folder-specific keys, sharing, and rotation are later
-/// milestones (§28, §10.11).
+/// Content is encrypted with this account's personal Vault Key, or, below a
+/// folder this account shares, with that folder's key (spec §28, ADR-023).
 final class FilesController extends ChangeNotifier {
   // Named `serverConnection`/`vaultKeyStore`/`syncEngine` rather than
   // initializing formals so callers get readable named arguments instead of
@@ -423,12 +440,13 @@ final class FilesController extends ChangeNotifier {
     if (ctx == null) return false;
     try {
       final nodeId = generateUuidV4();
+      final key = await ctx.keyForNewChild(_currentParentId);
       final envelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(fileName: name),
-        metadataKey: ctx.vaultKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKey: key.key,
+        keyVersion: key.version,
         nodeType: MetadataNodeType.directory,
-        scopeId: ctx.vaultId,
+        scopeId: key.scopeIdBytes,
         nodeId: uuidStringToBytes(nodeId),
       );
       final metadataCiphertext = envelope.encode();
@@ -439,7 +457,8 @@ final class FilesController extends ChangeNotifier {
           parentId: _currentParentId,
           nodeType: 'DIRECTORY',
           metadataCiphertext: metadataCiphertext,
-          metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+          metadataKeyVersion: key.version,
+          keyScopeId: key.scopeId,
           currentVersionId: null,
           revision: 0,
           createdAt: now,
@@ -457,7 +476,8 @@ final class FilesController extends ChangeNotifier {
             'parentId': _currentParentId,
             'nodeType': 'DIRECTORY',
             'metadataCiphertext': base64Encode(metadataCiphertext),
-            'metadataKeyVersion': homeBoxPersonalVaultKeyVersion,
+            'metadataKeyVersion': key.version,
+            metadataScopePayloadKey: key.scopeId,
           },
           createdAt: now,
           retryCount: 0,
@@ -486,6 +506,11 @@ final class FilesController extends ChangeNotifier {
     final ctx = await _requireContext();
     if (ctx == null) return false;
     try {
+      final targetParentId = move ? newParentId : entry.node.parentId;
+      if (move) {
+        _checkMoveKeepsSharedFoldersApart(entry.node, targetParentId, ctx);
+      }
+      final key = await ctx.keyForExisting(entry.node);
       final envelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(
           fileName: newName,
@@ -495,34 +520,30 @@ final class FilesController extends ChangeNotifier {
           conflictDetails: entry.metadata.conflictDetails,
           labels: entry.metadata.labels,
         ),
-        metadataKey: ctx.vaultKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKey: key.key,
+        keyVersion: key.version,
         nodeType: entry.isDirectory
             ? MetadataNodeType.directory
             : MetadataNodeType.file,
-        scopeId: ctx.vaultId,
+        scopeId: key.scopeIdBytes,
         nodeId: uuidStringToBytes(entry.node.id),
       );
       final metadataCiphertext = envelope.encode();
-      final targetParentId = move ? newParentId : entry.node.parentId;
       _syncEngine.nodeCache.upsert(
-        LocalNode(
-          id: entry.node.id,
+        entry.node.copyWith(
           parentId: targetParentId,
-          nodeType: entry.node.nodeType,
+          clearParent: targetParentId == null,
           metadataCiphertext: metadataCiphertext,
-          metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
-          currentVersionId: entry.node.currentVersionId,
-          revision: entry.node.revision,
-          createdAt: entry.node.createdAt,
+          metadataKeyVersion: key.version,
+          keyScopeId: key.scopeId,
           updatedAt: DateTime.now().toUtc(),
-          pendingCreate: entry.node.pendingCreate,
         ),
       );
       _enqueueUpdate(
         entry.node,
         baseRevision: entry.node.revision,
         metadataCiphertext: metadataCiphertext,
+        metadataKey: key,
         moveParent: move,
         parentId: targetParentId,
       );
@@ -544,6 +565,7 @@ final class FilesController extends ChangeNotifier {
     final ctx = await _requireContext();
     if (ctx == null) return false;
     try {
+      final key = await ctx.keyForExisting(entry.node);
       final envelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(
           fileName: entry.metadata.fileName,
@@ -552,33 +574,28 @@ final class FilesController extends ChangeNotifier {
           plaintextSize: entry.metadata.plaintextSize,
           labels: entry.metadata.labels,
         ),
-        metadataKey: ctx.vaultKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKey: key.key,
+        keyVersion: key.version,
         nodeType: entry.isDirectory
             ? MetadataNodeType.directory
             : MetadataNodeType.file,
-        scopeId: ctx.vaultId,
+        scopeId: key.scopeIdBytes,
         nodeId: uuidStringToBytes(entry.node.id),
       );
       final metadataCiphertext = envelope.encode();
       _syncEngine.nodeCache.upsert(
-        LocalNode(
-          id: entry.node.id,
-          parentId: entry.node.parentId,
-          nodeType: entry.node.nodeType,
+        entry.node.copyWith(
           metadataCiphertext: metadataCiphertext,
-          metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
-          currentVersionId: entry.node.currentVersionId,
-          revision: entry.node.revision,
-          createdAt: entry.node.createdAt,
+          metadataKeyVersion: key.version,
+          keyScopeId: key.scopeId,
           updatedAt: DateTime.now().toUtc(),
-          pendingCreate: entry.node.pendingCreate,
         ),
       );
       _enqueueUpdate(
         entry.node,
         baseRevision: entry.node.revision,
         metadataCiphertext: metadataCiphertext,
+        metadataKey: key,
         parentId: entry.node.parentId,
       );
       unawaited(_syncEngine.runOnce());
@@ -599,19 +616,7 @@ final class FilesController extends ChangeNotifier {
     try {
       final now = DateTime.now().toUtc();
       _syncEngine.nodeCache.upsert(
-        LocalNode(
-          id: entry.node.id,
-          parentId: entry.node.parentId,
-          nodeType: entry.node.nodeType,
-          metadataCiphertext: entry.node.metadataCiphertext,
-          metadataKeyVersion: entry.node.metadataKeyVersion,
-          currentVersionId: entry.node.currentVersionId,
-          revision: entry.node.revision,
-          createdAt: entry.node.createdAt,
-          updatedAt: now,
-          deletedAt: now,
-          pendingCreate: entry.node.pendingCreate,
-        ),
+        entry.node.copyWith(updatedAt: now, deletedAt: now),
       );
       _syncEngine.pendingOperations.enqueue(
         PendingOperation(
@@ -640,6 +645,7 @@ final class FilesController extends ChangeNotifier {
     LocalNode node, {
     required int baseRevision,
     Uint8List? metadataCiphertext,
+    ScopedKey? metadataKey,
     bool moveParent = false,
     String? parentId,
   }) {
@@ -653,7 +659,9 @@ final class FilesController extends ChangeNotifier {
           if (metadataCiphertext != null)
             'metadataCiphertext': base64Encode(metadataCiphertext),
           if (metadataCiphertext != null)
-            'metadataKeyVersion': homeBoxPersonalVaultKeyVersion,
+            'metadataKeyVersion': metadataKey!.version,
+          if (metadataCiphertext != null)
+            metadataScopePayloadKey: metadataKey!.scopeId,
           'moveParent': moveParent,
           'parentId': parentId,
           // The node as this change saw it, so a revision conflict can be
@@ -661,6 +669,7 @@ final class FilesController extends ChangeNotifier {
           // being dropped or overwriting a concurrent change.
           baseParentIdPayloadKey: node.parentId,
           baseMetadataPayloadKey: base64Encode(node.metadataCiphertext),
+          baseMetadataScopePayloadKey: ?node.keyScopeId,
         },
         baseRevision: baseRevision,
         createdAt: DateTime.now().toUtc(),
@@ -790,6 +799,7 @@ final class FilesController extends ChangeNotifier {
 
     final nodeId = generateUuidV4();
     final nodeIdBytes = uuidStringToBytes(nodeId);
+    final key = await ctx.keyForNewChild(parentId);
     final metadataEnvelope = await _metadataCipher.encrypt(
       metadata: SensitiveNodeMetadata(
         fileName: fileName,
@@ -797,10 +807,10 @@ final class FilesController extends ChangeNotifier {
         plaintextSha256: plaintextHash,
         plaintextSize: plaintextLength,
       ),
-      metadataKey: ctx.vaultKey,
-      keyVersion: homeBoxPersonalVaultKeyVersion,
+      metadataKey: key.key,
+      keyVersion: key.version,
       nodeType: MetadataNodeType.file,
-      scopeId: ctx.vaultId,
+      scopeId: key.scopeIdBytes,
       nodeId: nodeIdBytes,
     );
     final metadataCiphertext = metadataEnvelope.encode();
@@ -811,16 +821,15 @@ final class FilesController extends ChangeNotifier {
       parentId: parentId,
       nodeType: 'FILE',
       metadataCiphertext: metadataCiphertext,
-      metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+      metadataKeyVersion: key.version,
+      metadataKeyScopeId: key.scopeId,
     );
     _upsertFromServer(createdNode);
 
     final updatedNode = await uploadFilePathVersion(
       api: ctx.api,
       accessToken: ctx.accessToken,
-      vaultKey: ctx.vaultKey,
-      vaultId: ctx.vaultId,
-      keyScopeId: ctx.userId,
+      key: key,
       targetNodeId: nodeId,
       expectedRevision: createdNode.revision,
       file: file,
@@ -866,6 +875,7 @@ final class FilesController extends ChangeNotifier {
         throw const FormatException('HomeBox files are limited to 500 MiB.');
       }
       final plaintextHash = await plaintextFileSha256(file);
+      final key = await ctx.keyForExisting(entry.node);
       final metadataEnvelope = await _metadataCipher.encrypt(
         metadata: SensitiveNodeMetadata(
           fileName: entry.name,
@@ -874,10 +884,10 @@ final class FilesController extends ChangeNotifier {
           plaintextSha256: plaintextHash,
           plaintextSize: plaintextLength,
         ),
-        metadataKey: ctx.vaultKey,
-        keyVersion: homeBoxPersonalVaultKeyVersion,
+        metadataKey: key.key,
+        keyVersion: key.version,
         nodeType: MetadataNodeType.file,
-        scopeId: ctx.vaultId,
+        scopeId: key.scopeIdBytes,
         nodeId: uuidStringToBytes(entry.node.id),
       );
       final metadataCiphertext = metadataEnvelope.encode();
@@ -885,9 +895,7 @@ final class FilesController extends ChangeNotifier {
       final uploadedNode = await uploadFilePathVersion(
         api: ctx.api,
         accessToken: ctx.accessToken,
-        vaultKey: ctx.vaultKey,
-        vaultId: ctx.vaultId,
-        keyScopeId: ctx.userId,
+        key: key,
         targetNodeId: entry.node.id,
         expectedRevision: entry.node.revision,
         file: file,
@@ -931,8 +939,7 @@ final class FilesController extends ChangeNotifier {
       await downloadAndDecryptFileToPath(
         api: ctx.api,
         accessToken: ctx.accessToken,
-        vaultKey: ctx.vaultKey,
-        vaultId: ctx.vaultId,
+        keys: ctx.keys,
         nodeId: entry.node.id,
         expectedVersionId: entry.node.currentVersionId,
         destinationPath: destinationPath,
@@ -1005,20 +1012,7 @@ final class FilesController extends ChangeNotifier {
       }
       final now = DateTime.now().toUtc();
       for (final (index, deleted) in toRestore.indexed) {
-        cache.upsert(
-          LocalNode(
-            id: deleted.id,
-            parentId: deleted.parentId,
-            nodeType: deleted.nodeType,
-            metadataCiphertext: deleted.metadataCiphertext,
-            metadataKeyVersion: deleted.metadataKeyVersion,
-            currentVersionId: deleted.currentVersionId,
-            revision: deleted.revision,
-            createdAt: deleted.createdAt,
-            updatedAt: now,
-            pendingCreate: deleted.pendingCreate,
-          ),
-        );
+        cache.upsert(deleted.copyWith(updatedAt: now, clearDeletedAt: true));
         _syncEngine.pendingOperations.enqueue(
           PendingOperation(
             id: generateUuidV4(),
@@ -1218,8 +1212,7 @@ final class FilesController extends ChangeNotifier {
     await downloadAndDecryptFileToPath(
       api: ctx.api,
       accessToken: ctx.accessToken,
-      vaultKey: ctx.vaultKey,
-      vaultId: ctx.vaultId,
+      keys: ctx.keys,
       nodeId: entry.node.id,
       expectedVersionId: version.id,
       destinationPath: destinationPath,
@@ -1268,20 +1261,24 @@ final class FilesController extends ChangeNotifier {
     try {
       final api = _serverConnection.api;
       final session = _serverConnection.session;
-      final vaultKey = await _vaultKeyStore.loadVaultKey();
-      if (api == null || session == null || vaultKey == null) return null;
-      return await downloadAndDecryptFile(
-        api: api,
-        accessToken: session.accessToken,
-        vaultKey: vaultKey,
-        vaultId: uuidStringToBytes(session.user.id),
-        nodeId: entry.node.id,
-        expectedVersionId: entry.node.currentVersionId,
-        expectedPlaintextSha256: entry.metadata.plaintextSha256,
-        // Thumbnails are cosmetic and decoded in memory. Large images remain
-        // available through the bounded streaming download path instead.
-        maxCiphertextBytes: 25 * 1024 * 1024,
-      );
+      if (api == null || session == null) return null;
+      final keys = await _openKeys(session.user.id);
+      if (keys == null) return null;
+      try {
+        return await downloadAndDecryptFile(
+          api: api,
+          accessToken: session.accessToken,
+          keys: keys,
+          nodeId: entry.node.id,
+          expectedVersionId: entry.node.currentVersionId,
+          expectedPlaintextSha256: entry.metadata.plaintextSha256,
+          // Thumbnails are cosmetic and decoded in memory. Large images remain
+          // available through the bounded streaming download path instead.
+          maxCiphertextBytes: 25 * 1024 * 1024,
+        );
+      } finally {
+        keys.dispose();
+      }
     } catch (_) {
       // A thumbnail is cosmetic. Keep the normal file icon if downloading or
       // decoding it fails, without changing the Files page's error state.
@@ -1296,17 +1293,60 @@ final class FilesController extends ChangeNotifier {
   Future<SensitiveNodeMetadata> _decryptMetadata(
     LocalNode node,
     _UploadContext ctx,
-  ) {
+  ) async {
     final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
+    final key = await ctx.keys.key(
+      node.scopeOrOwner(ctx.userId),
+      envelope.keyVersion,
+    );
     return _metadataCipher.decrypt(
       envelope: envelope,
-      metadataKey: ctx.vaultKey,
+      metadataKey: key.key,
       nodeType: node.isDirectory
           ? MetadataNodeType.directory
           : MetadataNodeType.file,
-      scopeId: ctx.vaultId,
+      scopeId: key.scopeIdBytes,
       nodeId: uuidStringToBytes(node.id),
     );
+  }
+
+  KeyScopeResolver _scopesFor(String userId) => KeyScopeResolver(
+    nodeCache: _syncEngine.nodeCache,
+    isKeyedFolder: _syncEngine.folderKeys.isKeyedFolder,
+    userId: userId,
+  );
+
+  Future<OwnerKeyRing?> _openKeys(String userId) => openOwnerKeyRing(
+    vaultKeyStore: _vaultKeyStore,
+    userId: userId,
+    wrappedFolderKeys: _syncEngine.folderKeys.all(),
+  );
+
+  /// Refuses a move the server would reject anyway: shared folders never
+  /// nest, so one that contains a shared folder cannot go into another.
+  void _checkMoveKeepsSharedFoldersApart(
+    LocalNode node,
+    String? newParentId,
+    _UploadContext ctx,
+  ) {
+    if (newParentId == null ||
+        ctx.scopes.nearestKeyedFolder(newParentId) == null) {
+      return;
+    }
+    final pending = [node.id];
+    final visited = <String>{};
+    while (pending.isNotEmpty) {
+      final id = pending.removeLast();
+      if (!visited.add(id)) continue;
+      if (_syncEngine.folderKeys.isKeyedFolder(id)) {
+        throw StateError(
+          'A shared folder cannot be moved into another shared folder.',
+        );
+      }
+      for (final child in _syncEngine.nodeCache.listChildren(id)) {
+        if (child.isDirectory) pending.add(child.id);
+      }
+    }
   }
 
   Future<_UploadContext?> _requireContext() async {
@@ -1316,8 +1356,8 @@ final class FilesController extends ChangeNotifier {
     // refresh timer alone cannot guarantee on a mobile OS that suspended
     // it while HomeBox was backgrounded (see its doc comment).
     final session = await _serverConnection.ensureFreshSession();
-    final vaultKey = await _vaultKeyStore.loadVaultKey();
-    if (api == null || session == null || vaultKey == null) {
+    final keys = session == null ? null : await _openKeys(session.user.id);
+    if (api == null || session == null || keys == null) {
       _errorMessage =
           'Connect to a server, sign in, and set up the vault first.';
       return null;
@@ -1325,8 +1365,8 @@ final class FilesController extends ChangeNotifier {
     return _UploadContext(
       api: api,
       accessToken: session.accessToken,
-      vaultKey: vaultKey,
-      vaultId: uuidStringToBytes(session.user.id),
+      keys: keys,
+      scopes: _scopesFor(session.user.id),
       userId: session.user.id,
     );
   }

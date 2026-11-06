@@ -15,6 +15,7 @@ type nodeResponse struct {
 	NodeType           string  `json:"nodeType"`
 	MetadataCiphertext string  `json:"metadataCiphertext"` // base64
 	MetadataKeyVersion int     `json:"metadataKeyVersion"`
+	MetadataKeyScopeID string  `json:"metadataKeyScopeId"`
 	CurrentVersionID   *string `json:"currentVersionId,omitempty"`
 	Revision           int64   `json:"revision"`
 	CreatedAt          string  `json:"createdAt"`
@@ -26,7 +27,7 @@ func toNodeResponse(n nodes.Node) nodeResponse {
 	resp := nodeResponse{
 		ID: n.ID, ParentID: n.ParentID, NodeType: n.NodeType,
 		MetadataCiphertext: base64.StdEncoding.EncodeToString(n.MetadataCiphertext),
-		MetadataKeyVersion: n.MetadataKeyVersion, CurrentVersionID: n.CurrentVersionID, Revision: n.Revision,
+		MetadataKeyVersion: n.MetadataKeyVersion, MetadataKeyScopeID: n.MetadataKeyScopeID, CurrentVersionID: n.CurrentVersionID, Revision: n.Revision,
 		CreatedAt: n.CreatedAt.Format(time.RFC3339Nano), UpdatedAt: n.UpdatedAt.Format(time.RFC3339Nano),
 	}
 	if n.DeletedAt != nil {
@@ -43,6 +44,9 @@ type createNodeRequest struct {
 	NodeType           string  `json:"nodeType"`
 	MetadataCiphertext string  `json:"metadataCiphertext"` // base64
 	MetadataKeyVersion int     `json:"metadataKeyVersion"`
+	// MetadataKeyScopeID is optional; omitted means the owner's personal
+	// Vault Key, as sent by clients that predate Family Vault folder keys.
+	MetadataKeyScopeID string `json:"metadataKeyScopeId"`
 }
 
 func (a *API) createNode(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +62,7 @@ func (a *API) createNode(w http.ResponseWriter, r *http.Request) {
 	node, err := a.nodes.Create(r.Context(), nodes.CreateInput{
 		ID: req.ID, OwnerID: requestUserID(r), DeviceID: requestDeviceID(r), OperationID: req.OperationID,
 		ParentID: req.ParentID, NodeType: req.NodeType, MetadataCiphertext: metadata, MetadataKeyVersion: req.MetadataKeyVersion,
+		MetadataKeyScopeID: req.MetadataKeyScopeID,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -153,6 +158,7 @@ type updateNodeRequest struct {
 	ExpectedRevision   int64   `json:"expectedRevision"`
 	MetadataCiphertext *string `json:"metadataCiphertext"` // base64; omitted/null = unchanged
 	MetadataKeyVersion int     `json:"metadataKeyVersion"`
+	MetadataKeyScopeID string  `json:"metadataKeyScopeId"`
 	MoveParent         bool    `json:"moveParent"`
 	ParentID           *string `json:"parentId"`
 }
@@ -178,13 +184,73 @@ func (a *API) updateNode(w http.ResponseWriter, r *http.Request) {
 	node, err := a.nodes.Update(r.Context(), nodes.UpdateInput{
 		UserID: requestUserID(r), DeviceID: requestDeviceID(r), OperationID: req.OperationID, NodeID: id,
 		ExpectedRevision: req.ExpectedRevision, MetadataCiphertext: metadata, MetadataKeyVersion: req.MetadataKeyVersion,
-		MoveParent: req.MoveParent, ParentID: req.ParentID,
+		MetadataKeyScopeID: req.MetadataKeyScopeID, MoveParent: req.MoveParent, ParentID: req.ParentID,
 	})
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toNodeResponse(node))
+}
+
+type rekeyVersionRequest struct {
+	ID             string `json:"id"`
+	WrappedFileKey string `json:"wrappedFileKey"` // base64
+	KeyScopeID     string `json:"keyScopeId"`
+	KeyVersion     int    `json:"keyVersion"`
+}
+
+type rekeyItemRequest struct {
+	NodeID             string                `json:"nodeId"`
+	ExpectedRevision   int64                 `json:"expectedRevision"`
+	MetadataCiphertext string                `json:"metadataCiphertext"` // base64
+	MetadataKeyVersion int                   `json:"metadataKeyVersion"`
+	MetadataKeyScopeID string                `json:"metadataKeyScopeId"`
+	FileVersions       []rekeyVersionRequest `json:"fileVersions"`
+}
+
+type rekeyRequest struct {
+	Items []rekeyItemRequest `json:"items"`
+}
+
+// rekeyNodes moves a batch of the caller's nodes into another key scope
+// with client-side re-encrypted metadata and rewrapped File DEKs (ADR-023).
+func (a *API) rekeyNodes(w http.ResponseWriter, r *http.Request) {
+	var req rekeyRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	items := make([]nodes.RekeyItem, 0, len(req.Items))
+	for _, item := range req.Items {
+		metadata, err := base64.StdEncoding.DecodeString(item.MetadataCiphertext)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "metadataCiphertext must be base64-encoded")
+			return
+		}
+		versions := make([]nodes.RekeyVersion, 0, len(item.FileVersions))
+		for _, version := range item.FileVersions {
+			wrapped, err := base64.StdEncoding.DecodeString(version.WrappedFileKey)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "wrappedFileKey must be base64-encoded")
+				return
+			}
+			versions = append(versions, nodes.RekeyVersion{ID: version.ID, WrappedFileKey: wrapped, KeyScopeID: version.KeyScopeID, KeyVersion: version.KeyVersion})
+		}
+		items = append(items, nodes.RekeyItem{
+			NodeID: item.NodeID, ExpectedRevision: item.ExpectedRevision, MetadataCiphertext: metadata,
+			MetadataKeyVersion: item.MetadataKeyVersion, MetadataKeyScopeID: item.MetadataKeyScopeID, Versions: versions,
+		})
+	}
+	updated, err := a.nodes.Rekey(r.Context(), nodes.RekeyInput{UserID: requestUserID(r), DeviceID: requestDeviceID(r), Items: items})
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	out := make([]nodeResponse, 0, len(updated))
+	for _, n := range updated {
+		out = append(out, toNodeResponse(n))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type deleteOrRestoreRequest struct {

@@ -57,6 +57,10 @@ func New(authService *auth.Service, provisioningService *provisioning.Service, n
 	mux.Handle("GET /api/v1/shares/incoming", api.authenticated(api.listIncomingShares))
 	mux.Handle("GET /api/v1/shares/outgoing", api.authenticated(api.listOutgoingShares))
 	mux.Handle("DELETE /api/v1/shares/{id}", api.authenticated(api.revokeShare))
+	mux.Handle("POST /api/v1/shares/{id}/envelopes", api.authenticated(api.addShareEnvelopes))
+	mux.Handle("GET /api/v1/folder-keys", api.authenticated(api.listFolderKeys))
+	mux.Handle("POST /api/v1/nodes/{id}/folder-keys", api.authenticated(api.createFolderKey))
+	mux.Handle("POST /api/v1/nodes/rekey", api.authenticated(api.rekeyNodes))
 	mux.Handle("GET /api/v1/devices", api.authenticated(api.listDevices))
 	mux.Handle("DELETE /api/v1/devices/{id}", api.authenticated(api.revokeDevice))
 	mux.Handle("POST /api/v1/devices/{id}/key-envelope", api.authenticated(api.uploadKeyEnvelope))
@@ -599,6 +603,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "share or recipient was not found")
 	case errors.Is(err, sharing.ErrForbidden):
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "share is not owned by this account")
+	case errors.Is(err, sharing.ErrKeyConflict):
+		writeError(w, http.StatusConflict, "REVISION_CONFLICT", "this folder key version already exists")
 	case errors.Is(err, sharing.ErrAlreadyShared):
 		writeError(w, http.StatusConflict, "REVISION_CONFLICT", "folder is already shared with this account")
 

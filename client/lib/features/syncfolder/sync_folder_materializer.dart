@@ -3,9 +3,9 @@
 // ignore_for_file: prefer_initializing_formals
 import 'dart:io';
 
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/metadata_cipher.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
@@ -96,22 +96,30 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     // Not _serverConnection.session directly — see FilesController's
     // _requireContext for why (mobile OSes suspend background timers).
     final transport.HomeBoxSession? session;
-    final SecretKey? vaultKey;
+    final OwnerKeyRing? keys;
     try {
       session = await _serverConnection.ensureFreshSession();
-      vaultKey = await _vaultKeyStore.loadVaultKey();
+      // Every key this account holds: its Vault Key and the keys of the
+      // folders it shares, whose content is encrypted with them (ADR-023).
+      keys = session == null
+          ? null
+          : await openOwnerKeyRing(
+              vaultKeyStore: _vaultKeyStore,
+              userId: session.user.id,
+              wrappedFolderKeys: _syncEngine.folderKeys.all(),
+            );
     } catch (_) {
       _running = false;
       rethrow;
     }
-    if (api == null || session == null || vaultKey == null) {
+    if (api == null || session == null || keys == null) {
       _running = false;
+      keys?.dispose();
       return;
     }
     _clearTransferProgress();
     _setStatus(SyncFolderStatus.materializing);
     try {
-      final vaultId = uuidStringToBytes(session.user.id);
       final accessToken = session.accessToken;
       final seenNodeIds = <String>{};
       final fileErrors = <String>[];
@@ -121,8 +129,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         relativePath: '',
         api: api,
         accessToken: accessToken,
-        vaultKey: vaultKey,
-        vaultId: vaultId,
+        keys: keys,
         seenNodeIds: seenNodeIds,
         fileErrors: fileErrors,
       );
@@ -136,6 +143,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       _errorMessage = describeError(e);
       _setStatus(SyncFolderStatus.error);
     } finally {
+      keys.dispose();
       _running = false;
       _clearTransferProgress();
     }
@@ -147,8 +155,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     required String relativePath,
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required SecretKey vaultKey,
-    required Uint8List vaultId,
+    required OwnerKeyRing keys,
     required Set<String> seenNodeIds,
     required List<String> fileErrors,
   }) async {
@@ -158,7 +165,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
       seenNodeIds.add(node.id);
       final SensitiveNodeMetadata metadata;
       try {
-        metadata = await _decryptMetadata(node, vaultKey, vaultId);
+        metadata = await _decryptMetadata(node, keys);
       } catch (_) {
         // Can't decrypt or parse this node's metadata (wrong/missing key
         // version, malformed envelope) - skip it, matching how
@@ -186,8 +193,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           relativePath: childRelativePath,
           api: api,
           accessToken: accessToken,
-          vaultKey: vaultKey,
-          vaultId: vaultId,
+          keys: keys,
           seenNodeIds: seenNodeIds,
           fileErrors: fileErrors,
         );
@@ -205,8 +211,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
           rootPath: rootPath,
           api: api,
           accessToken: accessToken,
-          vaultKey: vaultKey,
-          vaultId: vaultId,
+          keys: keys,
           fileErrors: fileErrors,
         );
       }
@@ -231,8 +236,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
     required String rootPath,
     required transport.HomeBoxApiClient api,
     required String accessToken,
-    required SecretKey vaultKey,
-    required Uint8List vaultId,
+    required OwnerKeyRing keys,
     required List<String> fileErrors,
   }) async {
     final targetPath = '$rootPath/$relativePath';
@@ -337,8 +341,7 @@ final class SyncFolderMaterializer extends ChangeNotifier {
         await downloadAndDecryptFileToPath(
           api: api,
           accessToken: accessToken,
-          vaultKey: vaultKey,
-          vaultId: vaultId,
+          keys: keys,
           nodeId: node.id,
           expectedVersionId: node.currentVersionId,
           destinationPath: source.path,
@@ -695,17 +698,20 @@ final class SyncFolderMaterializer extends ChangeNotifier {
 
   Future<SensitiveNodeMetadata> _decryptMetadata(
     LocalNode node,
-    SecretKey vaultKey,
-    Uint8List vaultId,
-  ) {
+    OwnerKeyRing keys,
+  ) async {
     final envelope = EncryptedMetadataEnvelope.decode(node.metadataCiphertext);
+    final key = await keys.key(
+      node.scopeOrOwner(keys.userId),
+      envelope.keyVersion,
+    );
     return _metadataCipher.decrypt(
       envelope: envelope,
-      metadataKey: vaultKey,
+      metadataKey: key.key,
       nodeType: node.isDirectory
           ? MetadataNodeType.directory
           : MetadataNodeType.file,
-      scopeId: vaultId,
+      scopeId: key.scopeIdBytes,
       nodeId: uuidStringToBytes(node.id),
     );
   }

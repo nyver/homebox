@@ -49,7 +49,7 @@ func uploadOverHTTP(t *testing.T, s testServer, token, fileID string, revision i
 		t.Fatalf("put chunk status=%d", resp.StatusCode)
 	}
 	resp, complete := s.do(t, http.MethodPost, "/api/v1/uploads/"+uploadID+"/complete", map[string]any{
-		"operationId": "a0000000-0000-4000-8000-" + blobID[24:], "keyScopeId": "a1000000-0000-4000-8000-000000000001",
+		"operationId": "a0000000-0000-4000-8000-" + blobID[24:], "keyScopeId": accountIDOf(t, s, token),
 		"keyVersion": 1, "expectedRevision": revision,
 	}, token)
 	if resp.StatusCode != http.StatusOK {
@@ -169,18 +169,12 @@ func TestShareRecipientLosesAccessToATrashedSubtree(t *testing.T) {
 	shared := createNodeOverHTTP(t, s, ownerToken, "e0000000-0000-4000-8000-000000000010", "e0000000-0000-4000-8000-000000000020", "DIRECTORY", "")
 	sub := createNodeOverHTTP(t, s, ownerToken, "e0000000-0000-4000-8000-000000000011", "e0000000-0000-4000-8000-000000000021", "DIRECTORY", shared["id"].(string))
 	file := createNodeOverHTTP(t, s, ownerToken, "e0000000-0000-4000-8000-000000000012", "e0000000-0000-4000-8000-000000000022", "FILE", sub["id"].(string))
-	resp, grant := s.do(t, http.MethodPost, "/api/v1/shares", map[string]any{
-		"operationId": "e0000000-0000-4000-8000-000000000030", "nodeId": shared["id"], "targetUserId": member.ID, "permission": "READ",
-		"envelopes": []map[string]any{{"targetDeviceId": recipientDevice, "keyVersion": 1, "ciphertext": base64.StdEncoding.EncodeToString([]byte("envelope"))}},
-	}, ownerToken)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create share status=%d body=%v", resp.StatusCode, grant)
-	}
+	shareFolderOverHTTP(t, s, ownerToken, shared["id"].(string), "e0000000-0000-4000-8000-000000000030", member.ID, recipientDevice, "READ")
 	fileID := file["id"].(string)
 	if resp, _ := s.get(t, "/api/v1/nodes/"+fileID, recipientToken); resp.StatusCode != http.StatusOK {
 		t.Fatalf("recipient read of shared descendant status=%d", resp.StatusCode)
 	}
-	resp, _ = s.do(t, http.MethodDelete, "/api/v1/nodes/"+sub["id"].(string), map[string]any{
+	resp, _ := s.do(t, http.MethodDelete, "/api/v1/nodes/"+sub["id"].(string), map[string]any{
 		"operationId": "e0000000-0000-4000-8000-000000000040", "expectedRevision": sub["revision"],
 	}, ownerToken)
 	if resp.StatusCode != http.StatusNoContent {

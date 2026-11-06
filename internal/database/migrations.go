@@ -23,6 +23,7 @@ var migrations = []migration{
 	{10, "recovery_bundles", migration0010RecoveryBundles},
 	{11, "file_version_retention_index", migration0011FileVersionRetentionIndex},
 	{12, "gc_and_lookup_indexes", migration0012GCAndLookupIndexes},
+	{13, "family_vault_folder_keys", migration0013FamilyVaultFolderKeys},
 }
 
 const migration0001InitialSchema = `
@@ -222,4 +223,36 @@ CREATE INDEX IF NOT EXISTS idx_file_versions_blob ON file_versions(blob_id);
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_target_node ON upload_sessions(target_node_id);
 CREATE INDEX IF NOT EXISTS idx_vault_envelopes_target_device
   ON vault_key_envelopes(target_device_id, created_at) WHERE revoked_at IS NULL;
+`
+
+// migration0013FamilyVaultFolderKeys adds what Family Vault sharing needs
+// beyond read-only grants (spec §28, ADR-023):
+//
+//   - nodes.metadata_key_scope_id records which key encrypts a node's
+//     metadata. NULL keeps the owner's personal Vault Key; otherwise it is the
+//     ID of a shared folder whose own Folder Key encrypts the whole subtree.
+//     It is a routing hint only: the AEAD context still binds every envelope
+//     to its scope, so a wrong value fails decryption instead of leaking.
+//   - folder_keys holds every version of a shared folder's key, wrapped by
+//     the owner's Vault Key so all of the owner's devices can open it.
+//     folder_id is deliberately not a foreign key: a node moved out of a
+//     shared folder keeps its encryption scope, so the key must outlive a
+//     purge of the folder itself for as long as anything still uses it.
+//   - share_device_envelopes gains the owner's account-identity signature,
+//     which lets a recipient reject an envelope the server forged.
+const migration0013FamilyVaultFolderKeys = `
+ALTER TABLE nodes ADD COLUMN metadata_key_scope_id TEXT;
+CREATE TABLE IF NOT EXISTS folder_keys (
+  folder_id TEXT NOT NULL, key_version INTEGER NOT NULL,
+  owner_user_id TEXT NOT NULL REFERENCES users(id), owner_envelope BLOB NOT NULL,
+  created_at TEXT NOT NULL, created_by_device_id TEXT NOT NULL REFERENCES devices(id),
+  PRIMARY KEY(folder_id, key_version)
+);
+CREATE INDEX IF NOT EXISTS idx_folder_keys_owner ON folder_keys(owner_user_id, folder_id);
+ALTER TABLE share_device_envelopes ADD COLUMN owner_identity_public_key BLOB;
+ALTER TABLE share_device_envelopes ADD COLUMN owner_signature BLOB;
+CREATE INDEX IF NOT EXISTS idx_shares_target_active ON shares(target_user_id, node_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_shares_node_active ON shares(node_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_nodes_metadata_scope ON nodes(metadata_key_scope_id) WHERE metadata_key_scope_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_file_versions_key_scope ON file_versions(key_scope_id);
 `

@@ -113,26 +113,42 @@ final class DeviceKeyAuthentication {
   final Uint8List publicKeySignature;
 }
 
+/// One folder-key version encrypted for one recipient device, signed by the
+/// owner's account identity so the recipient can tell it was not forged by
+/// the server (ADR-023). Envelopes from before signing have no signature.
 final class FamilyShareEnvelope {
   const FamilyShareEnvelope({
     required this.targetDeviceId,
     required this.keyVersion,
     required this.ciphertext,
+    this.ownerIdentityPublicKey,
+    this.ownerSignature,
   });
 
   final String targetDeviceId;
   final int keyVersion;
   final Uint8List ciphertext;
+  final Uint8List? ownerIdentityPublicKey;
+  final Uint8List? ownerSignature;
 
   Map<String, dynamic> toJson() => {
     'targetDeviceId': targetDeviceId,
     'keyVersion': keyVersion,
     'ciphertext': base64Encode(ciphertext),
+    if (ownerIdentityPublicKey != null)
+      'ownerIdentityPublicKey': base64Encode(ownerIdentityPublicKey!),
+    if (ownerSignature != null) 'ownerSignature': base64Encode(ownerSignature!),
   };
 }
 
-/// An opaque Family Vault READ grant. Its envelopes remain ciphertext until
-/// a future per-folder-key layer can safely open them on the recipient.
+/// Family Vault share permissions (spec §28).
+abstract final class SharePermission {
+  static const String read = 'READ';
+  static const String readWrite = 'READ_WRITE';
+}
+
+/// A Family Vault folder grant. The envelopes stay ciphertext until the
+/// recipient device opens them with its own private key.
 final class FamilyShare {
   const FamilyShare({
     required this.id,
@@ -142,6 +158,8 @@ final class FamilyShare {
     required this.permission,
     required this.createdAt,
     required this.envelopes,
+    this.ownerUsername = '',
+    this.targetUsername = '',
   });
 
   final String id;
@@ -151,6 +169,75 @@ final class FamilyShare {
   final String permission;
   final DateTime createdAt;
   final List<FamilyShareEnvelope> envelopes;
+  final String ownerUsername;
+  final String targetUsername;
+
+  bool get canWrite => permission == SharePermission.readWrite;
+}
+
+/// One version of a shared folder's key, wrapped by the owner's Vault Key.
+final class FolderKeyRecord {
+  const FolderKeyRecord({
+    required this.folderId,
+    required this.keyVersion,
+    required this.ownerEnvelope,
+  });
+
+  final String folderId;
+  final int keyVersion;
+  final Uint8List ownerEnvelope;
+}
+
+/// One file version's File DEK rewrapped under another key scope.
+final class RekeyFileVersion {
+  const RekeyFileVersion({
+    required this.id,
+    required this.wrappedFileKey,
+    required this.keyScopeId,
+    required this.keyVersion,
+  });
+
+  final String id;
+  final Uint8List wrappedFileKey;
+  final String keyScopeId;
+  final int keyVersion;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'wrappedFileKey': base64Encode(wrappedFileKey),
+    'keyScopeId': keyScopeId,
+    'keyVersion': keyVersion,
+  };
+}
+
+/// One node moved into another key scope by [HomeBoxApiClient.rekeyNodes].
+final class RekeyItem {
+  const RekeyItem({
+    required this.nodeId,
+    required this.expectedRevision,
+    required this.metadataCiphertext,
+    required this.metadataKeyVersion,
+    required this.metadataKeyScopeId,
+    this.fileVersions = const [],
+  });
+
+  final String nodeId;
+  final int expectedRevision;
+  final Uint8List metadataCiphertext;
+  final int metadataKeyVersion;
+  final String metadataKeyScopeId;
+  final List<RekeyFileVersion> fileVersions;
+
+  Map<String, dynamic> toJson() => {
+    'nodeId': nodeId,
+    'expectedRevision': expectedRevision,
+    'metadataCiphertext': base64Encode(metadataCiphertext),
+    'metadataKeyVersion': metadataKeyVersion,
+    'metadataKeyScopeId': metadataKeyScopeId,
+    'fileVersions': fileVersions
+        .map((version) => version.toJson())
+        .toList(growable: false),
+  };
 }
 
 final class HomeBoxSession {
@@ -225,6 +312,7 @@ final class NodeInfo {
     required this.createdAt,
     required this.updatedAt,
     this.deletedAt,
+    this.metadataKeyScopeId,
   });
 
   final String id;
@@ -232,6 +320,12 @@ final class NodeInfo {
   final String nodeType; // FILE | DIRECTORY
   final Uint8List metadataCiphertext;
   final int metadataKeyVersion;
+
+  /// The key scope of [metadataCiphertext]: the owner's account ID for its
+  /// personal Vault Key, or a shared folder's ID (ADR-023). Null only from
+  /// a server that predates Family Vault folder keys, which means the
+  /// owner's Vault Key.
+  final String? metadataKeyScopeId;
   final String? currentVersionId;
   final int revision;
   final DateTime createdAt;
@@ -455,11 +549,14 @@ final class HomeBoxApiClient {
 
   // --- Family Vault shares ---
 
-  Future<FamilyShare> createReadShare(
+  /// Shares an already keyed folder with [targetUserId] (spec §28).
+  /// [permission] is [SharePermission.read] or [SharePermission.readWrite].
+  Future<FamilyShare> createShare(
     String accessToken, {
     required String operationId,
     required String nodeId,
     required String targetUserId,
+    required String permission,
     required List<FamilyShareEnvelope> envelopes,
   }) async {
     final json = await _postJson(
@@ -469,13 +566,87 @@ final class HomeBoxApiClient {
         'operationId': operationId,
         'nodeId': nodeId,
         'targetUserId': targetUserId,
-        'permission': 'READ',
+        'permission': permission,
         'envelopes': envelopes
             .map((envelope) => envelope.toJson())
             .toList(growable: false),
       },
     );
     return _familyShareFromJson(json);
+  }
+
+  /// Delivers additional folder-key envelopes for an existing share: to a
+  /// recipient device approved later, or a rotated key version.
+  Future<FamilyShare> addShareEnvelopes(
+    String accessToken,
+    String shareId, {
+    required List<FamilyShareEnvelope> envelopes,
+  }) async {
+    final json = await _postJson(
+      '/api/v1/shares/$shareId/envelopes',
+      accessToken: accessToken,
+      body: {
+        'envelopes': envelopes
+            .map((envelope) => envelope.toJson())
+            .toList(growable: false),
+      },
+    );
+    return _familyShareFromJson(json);
+  }
+
+  /// Stores [keyVersion] of [folderId]'s key wrapped by the owner's Vault
+  /// Key. Version 1 turns the folder into its own key scope.
+  Future<void> createFolderKey(
+    String accessToken,
+    String folderId, {
+    required int keyVersion,
+    required Uint8List ownerEnvelope,
+  }) => _postJson(
+    '/api/v1/nodes/$folderId/folder-keys',
+    accessToken: accessToken,
+    body: {
+      'keyVersion': keyVersion,
+      'ownerEnvelope': base64Encode(ownerEnvelope),
+    },
+  );
+
+  Future<List<FolderKeyRecord>> listFolderKeys(String accessToken) async {
+    final body = await _send(
+      'GET',
+      '/api/v1/folder-keys',
+      accessToken: accessToken,
+    );
+    final decoded = jsonDecode(body) as List<dynamic>;
+    return decoded
+        .map((entry) {
+          final json = entry as Map<String, dynamic>;
+          return FolderKeyRecord(
+            folderId: json['folderId'] as String,
+            keyVersion: json['keyVersion'] as int,
+            ownerEnvelope: base64Decode(json['ownerEnvelope'] as String),
+          );
+        })
+        .toList(growable: false);
+  }
+
+  /// Moves existing nodes into another key scope with metadata and File
+  /// DEKs re-encrypted on this device (ADR-023). At most 200 per call.
+  Future<List<NodeInfo>> rekeyNodes(
+    String accessToken,
+    List<RekeyItem> items,
+  ) async {
+    final body = await _send(
+      'POST',
+      '/api/v1/nodes/rekey',
+      accessToken: accessToken,
+      body: {
+        'items': items.map((item) => item.toJson()).toList(growable: false),
+      },
+    );
+    final decoded = jsonDecode(body) as List<dynamic>;
+    return decoded
+        .map((entry) => _nodeFromJson(entry as Map<String, dynamic>))
+        .toList(growable: false);
   }
 
   Future<List<FamilyShare>> listIncomingShares(String accessToken) =>
@@ -590,6 +761,7 @@ final class HomeBoxApiClient {
     required String nodeType,
     required Uint8List metadataCiphertext,
     required int metadataKeyVersion,
+    String? metadataKeyScopeId,
   }) async {
     final json = await _postJson(
       '/api/v1/nodes',
@@ -601,6 +773,7 @@ final class HomeBoxApiClient {
         'nodeType': nodeType,
         'metadataCiphertext': base64Encode(metadataCiphertext),
         'metadataKeyVersion': metadataKeyVersion,
+        'metadataKeyScopeId': ?metadataKeyScopeId,
       },
     );
     return _nodeFromJson(json);
@@ -660,6 +833,7 @@ final class HomeBoxApiClient {
     required int expectedRevision,
     Uint8List? metadataCiphertext,
     int metadataKeyVersion = 1,
+    String? metadataKeyScopeId,
     bool moveParent = false,
     String? parentId,
   }) async {
@@ -674,6 +848,8 @@ final class HomeBoxApiClient {
           'metadataCiphertext': base64Encode(metadataCiphertext),
         if (metadataCiphertext != null)
           'metadataKeyVersion': metadataKeyVersion,
+        if (metadataCiphertext != null)
+          'metadataKeyScopeId': ?metadataKeyScopeId,
         'moveParent': moveParent,
         'parentId': parentId,
       },
@@ -915,6 +1091,7 @@ final class HomeBoxApiClient {
     nodeType: json['nodeType'] as String,
     metadataCiphertext: base64Decode(json['metadataCiphertext'] as String),
     metadataKeyVersion: json['metadataKeyVersion'] as int,
+    metadataKeyScopeId: json['metadataKeyScopeId'] as String?,
     currentVersionId: json['currentVersionId'] as String?,
     revision: json['revision'] as int,
     createdAt: DateTime.parse(json['createdAt'] as String),
@@ -939,10 +1116,18 @@ final class HomeBoxApiClient {
     final envelopes = (json['envelopes'] as List<dynamic>)
         .map((entry) {
           final envelope = entry as Map<String, dynamic>;
+          final identity = envelope['ownerIdentityPublicKey'] as String?;
+          final signature = envelope['ownerSignature'] as String?;
           return FamilyShareEnvelope(
             targetDeviceId: envelope['targetDeviceId'] as String,
             keyVersion: envelope['keyVersion'] as int,
             ciphertext: base64Decode(envelope['ciphertext'] as String),
+            ownerIdentityPublicKey: identity == null || identity.isEmpty
+                ? null
+                : base64Decode(identity),
+            ownerSignature: signature == null || signature.isEmpty
+                ? null
+                : base64Decode(signature),
           );
         })
         .toList(growable: false);
@@ -954,6 +1139,8 @@ final class HomeBoxApiClient {
       permission: json['permission'] as String,
       createdAt: DateTime.parse(json['createdAt'] as String),
       envelopes: envelopes,
+      ownerUsername: json['ownerUsername'] as String? ?? '',
+      targetUsername: json['targetUsername'] as String? ?? '',
     );
   }
 

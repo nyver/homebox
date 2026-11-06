@@ -349,3 +349,53 @@ func TestRunPrunesOldNonCurrentFileVersions(t *testing.T) {
 		}
 	}
 }
+
+// A node moved out of a shared folder keeps that folder's key scope, so
+// purging the folder must keep its key for as long as anything still uses
+// it, and only then remove it.
+func TestTrashPurgeKeepsFolderKeysStillInUse(t *testing.T) {
+	storage := t.TempDir()
+	db, err := database.Open(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ownerID, deviceID := uuid.NewString(), uuid.NewString()
+	old := "2026-01-01T00:00:00Z"
+	now := time.Date(2026, 1, 7, 0, 0, 0, 0, time.UTC)
+	mustExec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustExec(`INSERT INTO users (id,username,username_norm,password_hash,role,status,created_at,updated_at) VALUES (?,'o','o','h','USER','ACTIVE',?,?)`, ownerID, old, old)
+	mustExec(`INSERT INTO devices (id,user_id,name,platform,e2ee_public_key,e2ee_key_version,created_at,last_seen_at) VALUES (?,?,'d','OTHER',X'01',1,?,?)`, deviceID, ownerID, old, old)
+	usedFolder, unusedFolder, movedOut := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	for _, folder := range []string{usedFolder, unusedFolder} {
+		mustExec(`INSERT INTO nodes (id,owner_id,node_type,metadata_ciphertext,metadata_key_version,metadata_key_scope_id,revision,created_at,updated_at,deleted_at)
+			VALUES (?,?,'DIRECTORY',X'01',1,?,1,?,?,?)`, folder, ownerID, folder, old, old, old)
+		mustExec(`INSERT INTO folder_keys (folder_id,key_version,owner_user_id,owner_envelope,created_at,created_by_device_id) VALUES (?,1,?,X'01',?,?)`, folder, ownerID, old, deviceID)
+	}
+	mustExec(`INSERT INTO nodes (id,owner_id,node_type,metadata_ciphertext,metadata_key_version,metadata_key_scope_id,revision,created_at,updated_at)
+		VALUES (?,?,'FILE',X'01',1,?,1,?,?)`, movedOut, ownerID, usedFolder, old, old)
+
+	service, err := New(db, storage, testPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now }
+	if _, err := service.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var used, unused int
+	if err := db.QueryRow("SELECT COUNT(*) FROM folder_keys WHERE folder_id=?", usedFolder).Scan(&used); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM folder_keys WHERE folder_id=?", unusedFolder).Scan(&unused); err != nil {
+		t.Fatal(err)
+	}
+	if used != 1 || unused != 0 {
+		t.Fatalf("folder keys after purge: still used=%d (want 1), unused=%d (want 0)", used, unused)
+	}
+}

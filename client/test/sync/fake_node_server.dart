@@ -14,6 +14,19 @@ import '../transport/fixture_server.dart';
 final class FakeNodeServer {
   static const String userId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
+  /// A second family account ("member"), signed in with its own token, for
+  /// Family Vault tests. The fake does not enforce sharing permissions;
+  /// the Go server's tests do. It only relays what clients store.
+  static const String memberId = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+
+  /// Family Vault state: folder keys by folder, shares, and the member's
+  /// shareable devices (with certificates the test produces).
+  final Map<String, List<Map<String, dynamic>>> folderKeys = {};
+  final List<Map<String, dynamic>> shares = [];
+  List<Map<String, dynamic>> memberShareDevices = [];
+  String? memberDeviceId;
+  int rekeyRequestCount = 0;
+
   final Map<String, Map<String, dynamic>> _nodes = {};
   final List<Map<String, dynamic>> _changes = [];
   final Map<String, Map<String, dynamic>> _uploadSessions = {};
@@ -53,18 +66,39 @@ final class FakeNodeServer {
         await utf8.decoder.bind(request).join(),
       ) as Map<String, dynamic>;
       final deviceId = (body['device'] as Map<String, dynamic>)['id'] as String;
-      _registeredDeviceId = deviceId;
+      final isMember = body['username'] == 'member';
+      if (isMember) {
+        memberDeviceId = deviceId;
+      } else {
+        _registeredDeviceId = deviceId;
+      }
       _writeJson(request, 200, {
-        'user': {'id': userId, 'username': 'admin', 'role': 'ADMIN'},
+        'user': isMember
+            ? {'id': memberId, 'username': 'member', 'role': 'USER'}
+            : {'id': userId, 'username': 'admin', 'role': 'ADMIN'},
         'device': {'id': deviceId, 'platform': 'WINDOWS'},
-        'accessToken': 'access-token',
+        'accessToken': isMember ? 'member-token' : 'access-token',
         'accessTokenExpiresAt': _accessTokenExpiresAt(),
-        'refreshToken': 'refresh-token',
+        'refreshToken': isMember ? 'member-refresh' : 'refresh-token',
         'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
       });
       return;
     }
     if (method == 'POST' && path == '/api/v1/auth/refresh') {
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
+      if (body['refreshToken'] == 'member-refresh') {
+        _writeJson(request, 200, {
+          'user': {'id': memberId, 'username': 'member', 'role': 'USER'},
+          'device': {'id': memberDeviceId, 'platform': 'WINDOWS'},
+          'accessToken': 'member-token',
+          'accessTokenExpiresAt': _accessTokenExpiresAt(),
+          'refreshToken': 'member-refresh',
+          'refreshTokenExpiresAt': '2026-02-01T00:00:00Z',
+        });
+        return;
+      }
       // SyncEngine.ensureFreshSession() (via ServerConnectionController)
       // calls this whenever the access token looks expired or about to be;
       // a real value here (rather than nothing at all) keeps that check
@@ -91,6 +125,7 @@ final class FakeNodeServer {
       });
       return;
     }
+    if (await _handleFamilyVault(request, method, path)) return;
     if (method == 'POST' && path == '/api/v1/nodes') {
       final body = jsonDecode(
         await utf8.decoder.bind(request).join(),
@@ -102,6 +137,7 @@ final class FakeNodeServer {
         nodeType: body['nodeType'] as String,
         metadataCiphertext: body['metadataCiphertext'] as String,
         metadataKeyVersion: body['metadataKeyVersion'] as int,
+        metadataKeyScopeId: body['metadataKeyScopeId'] as String?,
         revision: _recordChange(id, 'CREATE'),
       );
       _nodes[id] = node;
@@ -184,6 +220,7 @@ final class FakeNodeServer {
       if (body['metadataCiphertext'] != null) {
         node['metadataCiphertext'] = body['metadataCiphertext'];
         node['metadataKeyVersion'] = body['metadataKeyVersion'];
+        node['metadataKeyScopeId'] = body['metadataKeyScopeId'] ?? userId;
       }
       if (body['moveParent'] == true) {
         node['parentId'] = body['parentId'];
@@ -284,14 +321,15 @@ final class FakeNodeServer {
         'blobId': session['blobId'],
         'e2eeHeader': session['e2eeHeader'],
         'wrappedFileKey': session['wrappedFileKey'],
-        'keyScopeId': 'scope',
-        'keyVersion': 1,
+        'keyScopeId': body['keyScopeId'] ?? 'scope',
+        'keyVersion': body['keyVersion'] ?? 1,
         'revision': newRevision,
         'chunkCount': session['chunkCount'],
       });
       node['currentVersionId'] = fileVersionId;
       node['metadataCiphertext'] = session['metadataCiphertext'];
       node['metadataKeyVersion'] = session['metadataKeyVersion'];
+      node['metadataKeyScopeId'] = body['keyScopeId'] ?? userId;
       node['revision'] = newRevision;
       node['updatedAt'] = DateTime.now().toUtc().toIso8601String();
       _writeJson(request, 200, {
@@ -383,6 +421,13 @@ final class FakeNodeServer {
     return node;
   }
 
+  /// The server's stored JSON of [nodeId], for assertions.
+  Map<String, dynamic>? nodeJson(String nodeId) => _nodes[nodeId];
+
+  /// The stored versions of [nodeId], newest first, for assertions.
+  List<Map<String, dynamic>> fileVersionsOf(String nodeId) =>
+      _fileVersions[nodeId] ?? const [];
+
   /// Flips a byte in [nodeId]'s stored ciphertext blob, simulating
   /// corruption or tampering — used to prove a caller skips re-downloading
   /// content it already has rather than to test the download path itself.
@@ -430,6 +475,7 @@ final class FakeNodeServer {
     required String nodeType,
     required String metadataCiphertext,
     required int metadataKeyVersion,
+    String? metadataKeyScopeId,
     required int revision,
   }) {
     return {
@@ -438,6 +484,7 @@ final class FakeNodeServer {
       'nodeType': nodeType,
       'metadataCiphertext': metadataCiphertext,
       'metadataKeyVersion': metadataKeyVersion,
+      'metadataKeyScopeId': metadataKeyScopeId ?? userId,
       'currentVersionId': null,
       'revision': revision,
       'createdAt': '2026-01-01T00:00:00Z',
@@ -455,6 +502,158 @@ final class FakeNodeServer {
       'createdAt': '2026-01-01T00:00:00Z',
     });
     return _revision;
+  }
+
+  /// Folder keys, rekey, and share endpoints (ADR-023). Returns false for
+  /// any other request.
+  Future<bool> _handleFamilyVault(
+    HttpRequest request,
+    String method,
+    String path,
+  ) async {
+    final isMember =
+        request.headers.value('authorization') == 'Bearer member-token';
+    Future<Map<String, dynamic>> body() async =>
+        jsonDecode(await utf8.decoder.bind(request).join())
+            as Map<String, dynamic>;
+    final segments = request.uri.pathSegments;
+    if (method == 'GET' && path == '/api/v1/folder-keys') {
+      _writeJson(request, 200, [for (final keys in folderKeys.values) ...keys]);
+      return true;
+    }
+    if (method == 'POST' && path.endsWith('/folder-keys')) {
+      final folderId = segments[segments.length - 2];
+      final input = await body();
+      folderKeys.putIfAbsent(folderId, () => []).add({
+        'folderId': folderId,
+        'keyVersion': input['keyVersion'],
+        'ownerEnvelope': input['ownerEnvelope'],
+        'createdAt': '2026-01-01T00:00:00Z',
+      });
+      _writeJson(request, 201, {});
+      return true;
+    }
+    if (method == 'POST' && path == '/api/v1/nodes/rekey') {
+      rekeyRequestCount++;
+      final items = (await body())['items'] as List<dynamic>;
+      for (final raw in items) {
+        final item = raw as Map<String, dynamic>;
+        if (_nodes[item['nodeId']]?['revision'] != item['expectedRevision']) {
+          _writeJson(request, 409, {
+            'error': {
+              'code': 'REVISION_CONFLICT',
+              'message': 'stale revision',
+              'requestId': 'req',
+            },
+          });
+          return true;
+        }
+      }
+      final updated = <Map<String, dynamic>>[];
+      for (final raw in items) {
+        final item = raw as Map<String, dynamic>;
+        final id = item['nodeId'] as String;
+        final node = _nodes[id]!;
+        node['metadataCiphertext'] = item['metadataCiphertext'];
+        node['metadataKeyVersion'] = item['metadataKeyVersion'];
+        node['metadataKeyScopeId'] = item['metadataKeyScopeId'];
+        for (final rawVersion in item['fileVersions'] as List<dynamic>) {
+          final version = rawVersion as Map<String, dynamic>;
+          final stored = _fileVersions[id]!.firstWhere(
+            (v) => v['id'] == version['id'],
+          );
+          stored['wrappedFileKey'] = version['wrappedFileKey'];
+          stored['keyScopeId'] = version['keyScopeId'];
+          stored['keyVersion'] = version['keyVersion'];
+        }
+        node['revision'] = _recordChange(id, 'UPDATE');
+        updated.add(node);
+      }
+      _writeJson(request, 200, updated);
+      return true;
+    }
+    if (method == 'GET' && path.endsWith('/share-devices')) {
+      if (memberShareDevices.isEmpty) {
+        _writeJson(request, 404, {
+          'error': {
+            'code': 'NOT_FOUND',
+            'message': 'no device',
+            'requestId': 'req',
+          },
+        });
+      } else {
+        _writeJson(request, 200, memberShareDevices);
+      }
+      return true;
+    }
+    if (method == 'POST' && path == '/api/v1/shares') {
+      final input = await body();
+      final share = <String, dynamic>{
+        'id': 'share-${shares.length + 1}',
+        'nodeId': input['nodeId'],
+        'ownerUserId': userId,
+        'ownerUsername': 'admin',
+        'targetUserId': input['targetUserId'],
+        'targetUsername': 'member',
+        'permission': input['permission'],
+        'createdAt': '2026-01-01T00:00:00Z',
+        'envelopes': [...input['envelopes'] as List<dynamic>],
+        'revoked': false,
+      };
+      shares.add(share);
+      _writeJson(request, 201, share);
+      return true;
+    }
+    if (method == 'POST' && path.endsWith('/envelopes')) {
+      final share = shares.firstWhere(
+        (s) => s['id'] == segments[segments.length - 2],
+      );
+      final envelopes = share['envelopes'] as List<dynamic>;
+      for (final raw in (await body())['envelopes'] as List<dynamic>) {
+        final envelope = raw as Map<String, dynamic>;
+        final exists = envelopes.any(
+          (e) =>
+              e['targetDeviceId'] == envelope['targetDeviceId'] &&
+              e['keyVersion'] == envelope['keyVersion'],
+        );
+        if (!exists) envelopes.add(envelope);
+      }
+      _writeJson(request, 200, share);
+      return true;
+    }
+    if (method == 'GET' && path == '/api/v1/shares/outgoing') {
+      _writeJson(request, 200, [
+        for (final share in shares)
+          if (share['revoked'] != true && !isMember) share,
+      ]);
+      return true;
+    }
+    if (method == 'GET' && path == '/api/v1/shares/incoming') {
+      _writeJson(request, 200, [
+        for (final share in shares)
+          if (share['revoked'] != true && isMember)
+            {
+              ...share,
+              'envelopes': [
+                for (final e in share['envelopes'] as List<dynamic>)
+                  if ((e as Map<String, dynamic>)['targetDeviceId'] ==
+                      memberDeviceId)
+                    e,
+              ],
+            },
+      ]);
+      return true;
+    }
+    if (method == 'DELETE' && path.startsWith('/api/v1/shares/')) {
+      final id = segments.last;
+      for (final share in shares) {
+        if (share['id'] == id) share['revoked'] = true;
+      }
+      request.response.statusCode = 204;
+      await request.response.close();
+      return true;
+    }
+    return false;
   }
 
   /// A real near-future value (rather than a fixed past timestamp) so

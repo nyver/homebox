@@ -6,9 +6,8 @@ import 'package:cryptography/cryptography.dart';
 
 import '../../core/e2ee/file_cipher.dart';
 import '../../core/e2ee/key_envelope.dart';
+import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/opaque_id.dart';
-import '../../core/e2ee/vault_key_store.dart'
-    show homeBoxPersonalVaultKeyVersion;
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/transport/network_errors.dart';
 
@@ -61,8 +60,7 @@ final class _DigestCollector implements Sink<Digest> {
 Future<Uint8List> downloadAndDecryptFile({
   required transport.HomeBoxApiClient api,
   required String accessToken,
-  required SecretKey vaultKey,
-  required Uint8List vaultId,
+  required KeyRing keys,
   required String nodeId,
   String? expectedVersionId,
   String? expectedPlaintextSha256,
@@ -79,11 +77,11 @@ Future<Uint8List> downloadAndDecryptFile({
   final version = _selectDownloadVersion(versions, expectedVersionId);
   final versionIdBytes = uuidStringToBytes(version.id);
 
-  final fileKey = await keyEnvelopeCipher.unwrapKey(
-    wrappingKey: vaultKey,
-    envelope: KeyEnvelope.decode(version.wrappedFileKey),
-    scopeId: vaultId,
-    subjectId: versionIdBytes,
+  final fileKey = await _unwrapFileKey(
+    keyEnvelopeCipher,
+    keys,
+    version,
+    versionIdBytes,
   );
   final header = E2eeFileHeader.decode(version.e2eeHeader);
 
@@ -170,8 +168,7 @@ Future<void> _pruneStalePartialDownloads(Directory directory) async {
 Future<void> downloadAndDecryptFileToPath({
   required transport.HomeBoxApiClient api,
   required String accessToken,
-  required SecretKey vaultKey,
-  required Uint8List vaultId,
+  required KeyRing keys,
   required String nodeId,
   String? expectedVersionId,
   required String destinationPath,
@@ -186,11 +183,11 @@ Future<void> downloadAndDecryptFileToPath({
   }
   final version = _selectDownloadVersion(versions, expectedVersionId);
   final versionIdBytes = uuidStringToBytes(version.id);
-  final fileKey = await keyEnvelopeCipher.unwrapKey(
-    wrappingKey: vaultKey,
-    envelope: KeyEnvelope.decode(version.wrappedFileKey),
-    scopeId: vaultId,
-    subjectId: versionIdBytes,
+  final fileKey = await _unwrapFileKey(
+    keyEnvelopeCipher,
+    keys,
+    version,
+    versionIdBytes,
   );
   final header = E2eeFileHeader.decode(version.e2eeHeader);
 
@@ -317,6 +314,69 @@ Future<void> downloadAndDecryptFileToPath({
   }
 }
 
+/// Unwraps a version's File DEK with the key of the scope it was wrapped
+/// in, which may be the owner's Vault Key or a shared folder's key.
+Future<SecretKey> _unwrapFileKey(
+  KeyEnvelopeCipher cipher,
+  KeyRing keys,
+  transport.FileVersionInfo version,
+  Uint8List versionIdBytes,
+) async {
+  final scoped = await keys.key(version.keyScopeId, version.keyVersion);
+  return cipher.unwrapKey(
+    wrappingKey: scoped.key,
+    envelope: KeyEnvelope.decode(version.wrappedFileKey),
+    scopeId: scoped.scopeIdBytes,
+    subjectId: versionIdBytes,
+  );
+}
+
+/// Wraps a new version's File DEK under [key]. The same key must encrypt
+/// the node's metadata, so one version never spans two scopes.
+Future<Uint8List> wrapFileKey({
+  KeyEnvelopeCipher? cipher,
+  required ScopedKey key,
+  required SecretKey fileKey,
+  required String fileVersionId,
+}) async {
+  final envelope = await (cipher ?? KeyEnvelopeCipher()).wrapKey(
+    wrappingKey: key.key,
+    keyToWrap: fileKey,
+    purpose: KeyEnvelopePurpose.fileKey,
+    keyVersion: key.version,
+    scopeId: key.scopeIdBytes,
+    subjectId: uuidStringToBytes(fileVersionId),
+  );
+  return envelope.encode();
+}
+
+/// Rewraps an existing version's File DEK from its current scope into
+/// [target], for moving content into a shared folder's key (ADR-023). The
+/// ciphertext blob never changes.
+Future<Uint8List> rewrapFileKey({
+  required KeyRing keys,
+  required transport.FileVersionInfo version,
+  required ScopedKey target,
+}) async {
+  final cipher = KeyEnvelopeCipher();
+  final fileKey = await _unwrapFileKey(
+    cipher,
+    keys,
+    version,
+    uuidStringToBytes(version.id),
+  );
+  try {
+    return await wrapFileKey(
+      cipher: cipher,
+      key: target,
+      fileKey: fileKey,
+      fileVersionId: version.id,
+    );
+  } finally {
+    fileKey.destroy();
+  }
+}
+
 transport.FileVersionInfo _selectDownloadVersion(
   List<transport.FileVersionInfo> versions,
   String? expectedVersionId,
@@ -355,12 +415,11 @@ Future<void> _replaceVerifiedFile(File temporary, File destination) async {
 /// silently overwriting it. Returns the node's state after the upload.
 /// Shared by [FilesController.uploadFile] (fresh node, its own first
 /// version) and `replaceFileContent` (a new version of an existing node).
+/// [key] must be the key [metadataCiphertext] was encrypted with.
 Future<transport.NodeInfo> uploadFileVersion({
   required transport.HomeBoxApiClient api,
   required String accessToken,
-  required SecretKey vaultKey,
-  required Uint8List vaultId,
-  required String keyScopeId,
+  required ScopedKey key,
   required String targetNodeId,
   required int expectedRevision,
   required Uint8List bytes,
@@ -397,13 +456,11 @@ Future<transport.NodeInfo> uploadFileVersion({
     onProgress?.call((i + 1) / (totalChunks * 2));
   }
 
-  final wrappedFileKey = await keyEnvelopeCipher.wrapKey(
-    wrappingKey: vaultKey,
-    keyToWrap: fileKey,
-    purpose: KeyEnvelopePurpose.fileKey,
-    keyVersion: homeBoxPersonalVaultKeyVersion,
-    scopeId: vaultId,
-    subjectId: fileVersionIdBytes,
+  final wrappedFileKey = await wrapFileKey(
+    cipher: keyEnvelopeCipher,
+    key: key,
+    fileKey: fileKey,
+    fileVersionId: fileVersionId,
   );
 
   final uploadSession = await api.createUpload(
@@ -414,9 +471,9 @@ Future<transport.NodeInfo> uploadFileVersion({
     expectedRevision: expectedRevision,
     chunkSize: homeBoxPlaintextChunkSize + homeBoxChunkMacLength,
     chunkCount: totalChunks,
-    metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+    metadataKeyVersion: key.version,
     metadataCiphertext: metadataCiphertext,
-    wrappedFileKey: wrappedFileKey.encode(),
+    wrappedFileKey: wrappedFileKey,
     e2eeHeader: header.encode(),
   );
 
@@ -429,8 +486,8 @@ Future<transport.NodeInfo> uploadFileVersion({
     accessToken,
     uploadSession.id,
     operationId: generateUuidV4(),
-    keyScopeId: keyScopeId,
-    keyVersion: homeBoxPersonalVaultKeyVersion,
+    keyScopeId: key.scopeId,
+    keyVersion: key.version,
     expectedRevision: expectedRevision,
   );
 
@@ -448,9 +505,7 @@ Future<transport.NodeInfo> uploadFileVersion({
 Future<transport.NodeInfo> uploadFilePathVersion({
   required transport.HomeBoxApiClient api,
   required String accessToken,
-  required SecretKey vaultKey,
-  required Uint8List vaultId,
-  required String keyScopeId,
+  required ScopedKey key,
   required String targetNodeId,
   required int expectedRevision,
   required File file,
@@ -472,13 +527,11 @@ Future<transport.NodeInfo> uploadFilePathVersion({
       : (plaintextLength / homeBoxPlaintextChunkSize).ceil();
   final fileKey = await fileCipher.newFileKey();
   final header = fileCipher.newHeader();
-  final wrappedFileKey = await keyEnvelopeCipher.wrapKey(
-    wrappingKey: vaultKey,
-    keyToWrap: fileKey,
-    purpose: KeyEnvelopePurpose.fileKey,
-    keyVersion: homeBoxPersonalVaultKeyVersion,
-    scopeId: vaultId,
-    subjectId: fileVersionIdBytes,
+  final wrappedFileKey = await wrapFileKey(
+    cipher: keyEnvelopeCipher,
+    key: key,
+    fileKey: fileKey,
+    fileVersionId: fileVersionId,
   );
   final uploadSession = await api.createUpload(
     accessToken,
@@ -488,9 +541,9 @@ Future<transport.NodeInfo> uploadFilePathVersion({
     expectedRevision: expectedRevision,
     chunkSize: homeBoxPlaintextChunkSize + homeBoxChunkMacLength,
     chunkCount: totalChunks,
-    metadataKeyVersion: homeBoxPersonalVaultKeyVersion,
+    metadataKeyVersion: key.version,
     metadataCiphertext: metadataCiphertext,
-    wrappedFileKey: wrappedFileKey.encode(),
+    wrappedFileKey: wrappedFileKey,
     e2eeHeader: header.encode(),
   );
 
@@ -552,8 +605,8 @@ Future<transport.NodeInfo> uploadFilePathVersion({
     accessToken,
     uploadSession.id,
     operationId: generateUuidV4(),
-    keyScopeId: keyScopeId,
-    keyVersion: homeBoxPersonalVaultKeyVersion,
+    keyScopeId: key.scopeId,
+    keyVersion: key.version,
     expectedRevision: expectedRevision,
   );
   return api.getNode(accessToken, targetNodeId);

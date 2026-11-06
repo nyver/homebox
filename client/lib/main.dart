@@ -28,6 +28,8 @@ import 'features/files/download_notification_controller.dart';
 import 'features/files/files_controller.dart';
 import 'features/files/image_thumbnail.dart';
 import 'features/server/server_connection_controller.dart';
+import 'features/sharing/family_vault_controller.dart';
+import 'features/sharing/shared_folder_browser.dart';
 import 'features/sync/outbox_conflict_resolver.dart';
 import 'features/sync/sync_conflict_log.dart';
 import 'features/sync/sync_engine.dart';
@@ -39,6 +41,7 @@ import 'features/vault/recovery_controller.dart';
 import 'features/vault/vault_setup_controller.dart';
 import 'core/transport/homebox_api_client.dart' as transport;
 
+part 'ui/family_section.dart';
 part 'ui/file_history.dart';
 part 'ui/files_section.dart';
 part 'ui/settings_section.dart';
@@ -122,7 +125,7 @@ class _HomeBoxAppState extends State<HomeBoxApp> {
   );
 }
 
-enum AppSection { files, sync, settings }
+enum AppSection { files, family, sync, settings }
 
 String _localized(
   BuildContext context, {
@@ -185,6 +188,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
   BiometricAuthenticator? _biometricAuthenticator;
   SyncEngine? _syncEngine;
   FilesController? _filesController;
+  FamilyVaultController? _familyVaultController;
   SyncFolderMaterializer? _syncFolderMaterializer;
   LocalFolderUploader? _localFolderUploader;
   String? _syncEngineFingerprint;
@@ -305,33 +309,47 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _rebuildingSyncEngine = true;
     try {
       final oldFiles = _filesController;
+      final oldFamilyVault = _familyVaultController;
       final oldEngine = _syncEngine;
       final oldMaterializer = _syncFolderMaterializer;
       final oldUploader = _localFolderUploader;
       if (mounted) {
         setState(() {
           _filesController = null;
+          _familyVaultController = null;
           _syncEngine = null;
           _syncFolderMaterializer = null;
           _localFolderUploader = null;
         });
       } else {
         _filesController = null;
+        _familyVaultController = null;
         _syncEngine = null;
         _syncFolderMaterializer = null;
         _localFolderUploader = null;
       }
       oldFiles?.dispose();
+      oldFamilyVault?.dispose();
       oldMaterializer?.dispose();
       oldUploader?.dispose();
       oldEngine?.dispose(); // also closes its LocalDatabase.
       _syncEngineFingerprint = fingerprint;
       if (fingerprint != null) {
         final localDatabase = await LocalDatabase.open(fingerprint);
-        final engine = SyncEngine(
+        late final SyncEngine engine;
+        engine = SyncEngine(
           serverConnection: _serverConnectionController,
           localDatabase: localDatabase,
-          conflictResolver: VaultOutboxConflictResolver(_vaultKeyStore),
+          conflictResolver: VaultOutboxConflictResolver(
+            _vaultKeyStore,
+            folderKeys: () => engine.folderKeys.all(),
+          ),
+        );
+        final familyVault = FamilyVaultController(
+          serverConnection: _serverConnectionController,
+          vaultKeyStore: _vaultKeyStore,
+          deviceIdentityStore: _deviceIdentityStore,
+          syncEngine: engine,
         );
         final files = FilesController(
           serverConnection: _serverConnectionController,
@@ -358,6 +376,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         );
         if (!mounted) {
           files.dispose();
+          familyVault.dispose();
           materializer.dispose();
           uploader.dispose();
           engine.dispose();
@@ -366,6 +385,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
         setState(() {
           _syncEngine = engine;
           _filesController = files;
+          _familyVaultController = familyVault;
           _syncFolderMaterializer = materializer;
           _localFolderUploader = uploader;
         });
@@ -694,6 +714,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
     _serverConnectionController.removeListener(_onServerConnectionChanged);
     _vaultSetupController.removeListener(_maybeRefreshFiles);
     _filesController?.dispose();
+    _familyVaultController?.dispose();
     _syncFolderMaterializer?.dispose();
     _localFolderUploader?.dispose();
     _downloadNotifications.dispose();
@@ -849,6 +870,7 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
       recoveryController: _recoveryController,
       onVaultProvisioned: _onVaultProvisioned,
       filesController: _filesController,
+      familyVaultController: _familyVaultController,
       syncEngine: _syncEngine,
       syncFolderMaterializer: _syncFolderMaterializer,
       localFolderUploader: _localFolderUploader,
@@ -905,6 +927,11 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
                 label: _localized(context, en: 'Files', ru: 'Файлы'),
               ),
               NavigationDestination(
+                icon: const Icon(Icons.family_restroom_outlined),
+                selectedIcon: const Icon(Icons.family_restroom),
+                label: _localized(context, en: 'Family', ru: 'Семья'),
+              ),
+              NavigationDestination(
                 icon: _SyncNavigationIcon(
                   conflicts: _syncEngine?.conflicts,
                   icon: Icons.sync_outlined,
@@ -944,6 +971,11 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage> {
                     icon: Icon(Icons.folder_outlined),
                     selectedIcon: Icon(Icons.folder),
                     label: Text(_localized(context, en: 'Files', ru: 'Файлы')),
+                  ),
+                  NavigationRailDestination(
+                    icon: const Icon(Icons.family_restroom_outlined),
+                    selectedIcon: const Icon(Icons.family_restroom),
+                    label: Text(_localized(context, en: 'Family', ru: 'Семья')),
                   ),
                   NavigationRailDestination(
                     icon: _SyncNavigationIcon(

@@ -12,7 +12,10 @@ enum KeyEnvelopePurpose {
   vaultKey(2),
   deviceProvisioning(3),
   recoveryKey(4),
-  familyShare(5);
+  familyShare(5),
+
+  /// A shared folder's key wrapped by its owner's personal Vault Key.
+  folderKey(6);
 
   const KeyEnvelopePurpose(this.code);
   final int code;

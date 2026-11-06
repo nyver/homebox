@@ -39,12 +39,15 @@ func TestReadGrantDeliversEnvelopeAndAuthorizesSharedSubtree(t *testing.T) {
 	}
 
 	service := New(db)
+	if _, err := service.CreateFolderKey(ctx, ownerID, ownerDeviceID, folderID, 1, []byte("owner-wrapped-folder-key")); err != nil {
+		t.Fatal(err)
+	}
 	operationID := uuid.NewString()
-	grant, err := service.CreateReadGrant(ctx, CreateInput{OwnerUserID: ownerID, OwnerDeviceID: ownerDeviceID, OperationID: operationID, NodeID: folderID, TargetUserID: recipientID, Permission: "READ", Envelopes: []DeviceEnvelope{{TargetDeviceID: recipientDeviceID, KeyVersion: 1, Ciphertext: []byte("recipient-encrypted-folder-key")}}})
+	grant, err := service.CreateGrant(ctx, CreateInput{OwnerUserID: ownerID, OwnerDeviceID: ownerDeviceID, OperationID: operationID, NodeID: folderID, TargetUserID: recipientID, Permission: "READ", Envelopes: []DeviceEnvelope{signed(recipientDeviceID, 1, "recipient-encrypted-folder-key")}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	retry, err := service.CreateReadGrant(ctx, CreateInput{OwnerUserID: ownerID, OwnerDeviceID: ownerDeviceID, OperationID: operationID, NodeID: folderID, TargetUserID: recipientID, Permission: "READ", Envelopes: []DeviceEnvelope{{TargetDeviceID: recipientDeviceID, KeyVersion: 1, Ciphertext: []byte("recipient-encrypted-folder-key")}}})
+	retry, err := service.CreateGrant(ctx, CreateInput{OwnerUserID: ownerID, OwnerDeviceID: ownerDeviceID, OperationID: operationID, NodeID: folderID, TargetUserID: recipientID, Permission: "READ", Envelopes: []DeviceEnvelope{signed(recipientDeviceID, 1, "recipient-encrypted-folder-key")}})
 	if err != nil || retry.ID != grant.ID {
 		t.Fatalf("idempotent grant=%#v err=%v", retry, err)
 	}
@@ -77,14 +80,29 @@ func TestReadGrantDeliversEnvelopeAndAuthorizesSharedSubtree(t *testing.T) {
 	}
 }
 
-func TestCreateReadGrantRejectsReadWriteUntilSharedMutationsExist(t *testing.T) {
+func signed(deviceID string, keyVersion int, ciphertext string) DeviceEnvelope {
+	return DeviceEnvelope{TargetDeviceID: deviceID, KeyVersion: keyVersion, Ciphertext: []byte(ciphertext),
+		OwnerIdentityPublicKey: make([]byte, ownerIdentityKeyLength), OwnerSignature: make([]byte, ownerSignatureLength)}
+}
+
+func TestCreateGrantValidatesPermissionAndSignatures(t *testing.T) {
 	db, err := database.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	service := New(db)
-	if _, err := service.CreateReadGrant(context.Background(), CreateInput{Permission: "READ_WRITE"}); err == nil {
-		t.Fatal("READ_WRITE share was accepted")
+	base := CreateInput{OwnerUserID: uuid.NewString(), OwnerDeviceID: uuid.NewString(), OperationID: uuid.NewString(), NodeID: uuid.NewString(), TargetUserID: uuid.NewString()}
+	invalidPermission := base
+	invalidPermission.Permission = "ADMIN"
+	invalidPermission.Envelopes = []DeviceEnvelope{signed(uuid.NewString(), 1, "k")}
+	if _, err := service.CreateGrant(context.Background(), invalidPermission); err == nil {
+		t.Fatal("an unknown permission was accepted")
+	}
+	unsigned := base
+	unsigned.Permission = "READ_WRITE"
+	unsigned.Envelopes = []DeviceEnvelope{{TargetDeviceID: uuid.NewString(), KeyVersion: 1, Ciphertext: []byte("k")}}
+	if _, err := service.CreateGrant(context.Background(), unsigned); err == nil {
+		t.Fatal("an envelope without the owner's signature was accepted")
 	}
 }

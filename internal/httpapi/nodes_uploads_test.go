@@ -69,7 +69,7 @@ func TestFullNodeUploadDownloadAndSyncFlow(t *testing.T) {
 	}
 
 	resp, completeBody := s.do(t, http.MethodPost, "/api/v1/uploads/"+uploadID+"/complete", map[string]any{
-		"operationId": "50000000-0000-0000-0000-000000000001", "keyScopeId": "60000000-0000-0000-0000-000000000001",
+		"operationId": "50000000-0000-0000-0000-000000000001", "keyScopeId": accountIDOf(t, s, token),
 		"keyVersion": 1, "expectedRevision": fileRevision,
 	}, token)
 	if resp.StatusCode != http.StatusOK {

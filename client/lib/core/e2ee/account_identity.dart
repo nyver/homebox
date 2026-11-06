@@ -174,7 +174,128 @@ final class AccountIdentity {
     return Uint8List.fromList(signed.bytes);
   }
 
+  /// Signs one Family Vault folder-key envelope so its recipient can tell
+  /// that this account, not the server, created it (ADR-023).
+  Future<Uint8List> signFamilyShareEnvelope({
+    required String folderId,
+    required String ownerAccountId,
+    required String recipientAccountId,
+    required String recipientDeviceId,
+    required int keyVersion,
+    required List<int> envelope,
+  }) async {
+    final statement = await familyShareEnvelopeStatement(
+      folderId: folderId,
+      ownerAccountId: ownerAccountId,
+      recipientAccountId: recipientAccountId,
+      recipientDeviceId: recipientDeviceId,
+      keyVersion: keyVersion,
+      envelope: envelope,
+    );
+    final signed = await _algorithm.sign(statement, keyPair: _keyPair);
+    return Uint8List.fromList(signed.bytes);
+  }
+
+  /// Checks [signature] over a folder-key envelope against the owner's
+  /// [ownerIdentityPublicKey], which the caller must already trust.
+  static Future<bool> verifyFamilyShareEnvelope({
+    required List<int> ownerIdentityPublicKey,
+    required List<int> signature,
+    required String folderId,
+    required String ownerAccountId,
+    required String recipientAccountId,
+    required String recipientDeviceId,
+    required int keyVersion,
+    required List<int> envelope,
+    Ed25519? algorithm,
+  }) async {
+    if (ownerIdentityPublicKey.length != 32 || signature.length != 64) {
+      return false;
+    }
+    final statement = await familyShareEnvelopeStatement(
+      folderId: folderId,
+      ownerAccountId: ownerAccountId,
+      recipientAccountId: recipientAccountId,
+      recipientDeviceId: recipientDeviceId,
+      keyVersion: keyVersion,
+      envelope: envelope,
+    );
+    return (algorithm ?? Ed25519()).verify(
+      statement,
+      signature: Signature(
+        signature,
+        publicKey: SimplePublicKey(
+          ownerIdentityPublicKey,
+          type: KeyPairType.ed25519,
+        ),
+      ),
+    );
+  }
+
   void destroy() => _keyPair.destroy();
+}
+
+/// Checks that [certificate] was issued by another account's identity
+/// [identityPublicKey] for exactly this device key. Used to trust a family
+/// member's devices once that member's identity has been verified.
+Future<bool> verifyDeviceCertificate({
+  required List<int> identityPublicKey,
+  required DeviceKeyCertificate certificate,
+  required String accountId,
+  required String deviceId,
+  required List<int> devicePublicKey,
+  Ed25519? algorithm,
+}) async {
+  if (certificate.signatureVersion != homeBoxDeviceKeySignatureVersion ||
+      identityPublicKey.length != 32 ||
+      certificate.signature.length != 64 ||
+      !_constantTimeEquals(
+        certificate.accountIdentityPublicKey,
+        identityPublicKey,
+      )) {
+    return false;
+  }
+  final statement = deviceKeyStatement(
+    accountId: accountId,
+    deviceId: deviceId,
+    deviceKeyVersion: certificate.deviceKeyVersion,
+    devicePublicKey: devicePublicKey,
+  );
+  return (algorithm ?? Ed25519()).verify(
+    statement,
+    signature: Signature(
+      certificate.signature,
+      publicKey: SimplePublicKey(identityPublicKey, type: KeyPairType.ed25519),
+    ),
+  );
+}
+
+/// Canonical bytes signed for a Family Vault folder-key envelope: the
+/// folder, both accounts, the recipient device, the key version, and the
+/// envelope's SHA-256, so a signature cannot be moved to another context.
+Future<Uint8List> familyShareEnvelopeStatement({
+  required String folderId,
+  required String ownerAccountId,
+  required String recipientAccountId,
+  required String recipientDeviceId,
+  required int keyVersion,
+  required List<int> envelope,
+}) async {
+  if (keyVersion < 1 || keyVersion > 0xffffffff || envelope.isEmpty) {
+    throw ArgumentError('Invalid family share envelope statement.');
+  }
+  final digest = await Sha256().hash(envelope);
+  final result = Uint8List(5 + 2 + 16 * 4 + 4 + 32);
+  result.setAll(0, const [0x48, 0x42, 0x58, 0x46, 0x53]); // HBXFS
+  final data = ByteData.sublistView(result);
+  data.setUint16(5, 1, Endian.big);
+  result.setAll(7, uuidStringToBytes(folderId));
+  result.setAll(23, uuidStringToBytes(ownerAccountId));
+  result.setAll(39, uuidStringToBytes(recipientAccountId));
+  result.setAll(55, uuidStringToBytes(recipientDeviceId));
+  data.setUint32(71, keyVersion, Endian.big);
+  result.setAll(75, digest.bytes);
+  return result;
 }
 
 /// Canonical bytes signed for a recovery bundle upload; mirrors the server's

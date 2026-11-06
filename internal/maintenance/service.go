@@ -175,6 +175,12 @@ func (s *Service) cleanupExpiredTrash(ctx context.Context, now time.Time) (int, 
 			name string
 			sql  string
 		}{
+			// A folder key is removed only once nothing outside the purged
+			// subtree is still encrypted under it: a node moved out of a
+			// shared folder keeps that folder's key scope.
+			{"folder keys", trashSubtreeCTE + `DELETE FROM folder_keys WHERE folder_id IN (SELECT id FROM subtree)
+				AND NOT EXISTS(SELECT 1 FROM nodes n WHERE n.metadata_key_scope_id=folder_keys.folder_id AND n.id NOT IN (SELECT id FROM subtree))
+				AND NOT EXISTS(SELECT 1 FROM file_versions f WHERE f.key_scope_id=folder_keys.folder_id AND f.node_id NOT IN (SELECT id FROM subtree))`},
 			{"share device envelopes", trashSubtreeCTE + `DELETE FROM share_device_envelopes
 				WHERE share_id IN (SELECT id FROM shares WHERE node_id IN (SELECT id FROM subtree))`},
 			{"shares", trashSubtreeCTE + "DELETE FROM shares WHERE node_id IN (SELECT id FROM subtree)"},

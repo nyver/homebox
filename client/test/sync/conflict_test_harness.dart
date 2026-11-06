@@ -1,3 +1,5 @@
+import '../support/test_key_ring.dart';
+
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -158,9 +160,7 @@ final class ConflictHarness {
     await uploadFileVersion(
       api: api,
       accessToken: _accessToken,
-      vaultKey: vaultKey,
-      vaultId: _vaultId,
-      keyScopeId: FakeNodeServer.userId,
+      key: vaultScopedKey(vaultKey, FakeNodeServer.userId),
       targetNodeId: nodeId,
       expectedRevision: node.revision,
       bytes: bytes,
@@ -219,8 +219,10 @@ final class ConflictHarness {
     await downloadAndDecryptFile(
       api: serverConnection.api!,
       accessToken: _accessToken,
-      vaultKey: (await vaultKeyStore.loadVaultKey())!,
-      vaultId: _vaultId,
+      keys: vaultOnlyKeyRing(
+        (await vaultKeyStore.loadVaultKey())!,
+        FakeNodeServer.userId,
+      ),
       nodeId: nodeId,
     ),
   );

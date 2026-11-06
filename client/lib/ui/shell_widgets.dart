@@ -390,6 +390,7 @@ class _SectionContent extends StatelessWidget {
     required this.recoveryController,
     required this.onVaultProvisioned,
     required this.filesController,
+    required this.familyVaultController,
     required this.syncEngine,
     required this.syncFolderMaterializer,
     required this.localFolderUploader,
@@ -418,6 +419,7 @@ class _SectionContent extends StatelessWidget {
   final RecoveryController recoveryController;
   final Future<void> Function() onVaultProvisioned;
   final FilesController? filesController;
+  final FamilyVaultController? familyVaultController;
   final SyncEngine? syncEngine;
   final SyncFolderMaterializer? syncFolderMaterializer;
   final LocalFolderUploader? localFolderUploader;
@@ -438,6 +440,7 @@ class _SectionContent extends StatelessWidget {
   Widget build(BuildContext context) => switch (section) {
     AppSection.files => _FilesSection(
       controller: filesController,
+      familyVault: familyVaultController,
       onCapturePhoto: onCapturePhoto,
       androidFileSaver: androidFileSaver,
       androidFileSharer: androidFileSharer,
@@ -445,6 +448,10 @@ class _SectionContent extends StatelessWidget {
       androidSyncFolder: androidSyncFolder,
       onPullToRefresh: onPullToRefresh,
       onDownloadCompleted: onDownloadCompleted,
+    ),
+    AppSection.family => _FamilySection(
+      controller: familyVaultController,
+      androidFileSaver: androidFileSaver,
     ),
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,
