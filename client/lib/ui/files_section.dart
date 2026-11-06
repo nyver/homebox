@@ -942,6 +942,57 @@ final class _FilesSectionState extends State<_FilesSection> {
     }
   }
 
+  /// Confirms, then moves every selected file and folder to the trash.
+  Future<void> _deleteSelected(BuildContext context) async {
+    final controller = widget.controller;
+    if (controller == null) return;
+    final selected = controller.selectedEntries;
+    if (selected.isEmpty) return;
+    final folders = selected.where((entry) => entry.isDirectory).length;
+    final files = selected.length - folders;
+    final summary = [
+      if (files > 0) files == 1 ? '1 file' : '$files files',
+      if (folders > 0)
+        folders == 1
+            ? '1 folder with its contents'
+            : '$folders folders with their contents',
+    ].join(' and ');
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          selected.length == 1
+              ? 'Move "${selected.single.name}" to trash?'
+              : 'Move ${selected.length} items to trash?',
+        ),
+        content: Text(
+          '$summary will be moved to the trash. You can restore them from Trash.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Move to trash'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final deleted = await controller.deleteNodes(selected);
+    if (!context.mounted) return;
+    final message = deleted == selected.length
+        ? (deleted == 1
+              ? 'Moved 1 item to the trash.'
+              : 'Moved $deleted items to the trash.')
+        : 'Moved $deleted of ${selected.length} items to the trash. '
+              '${controller.errorMessage ?? ''}';
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message.trim())));
+  }
+
   Future<void> _uploadDroppedFiles(List<String> paths) async {
     final controller = widget.controller;
     if (controller == null) return;
@@ -1019,8 +1070,20 @@ final class _FilesSectionState extends State<_FilesSection> {
               final sharedFolder =
                   entry.isDirectory &&
                   (familyVault?.isShared(entry.node.id) ?? false);
+              final selecting = controller.selectionMode;
+              final selected = controller.isSelected(entry);
               return ListTile(
-                leading: sharedFolder
+                selected: selecting && selected,
+                leading: selecting
+                    ? SizedBox.square(
+                        dimension: _fileListLeadingSize,
+                        child: Checkbox(
+                          value: selected,
+                          onChanged: (_) => controller.toggleSelection(entry),
+                          semanticLabel: 'Select ${entry.name}',
+                        ),
+                      )
+                    : sharedFolder
                     ? _sharedFolderListIcon
                     : entry.isDirectory
                     ? _folderListIcon
@@ -1049,208 +1112,255 @@ final class _FilesSectionState extends State<_FilesSection> {
                 subtitle: entry.isDirectory
                     ? null
                     : Text(_fileEntrySubtitle(entry, controller.entriesAsOf)),
-                onTap: entry.isDirectory
+                onTap: selecting
+                    ? () => controller.toggleSelection(entry)
+                    : entry.isDirectory
                     ? () => controller.openFolder(entry)
                     : () => _openOrDownloadFile(context, entry),
-                trailing: PopupMenuButton<String>(
-                  tooltip: 'More actions',
-                  onSelected: (value) => switch (value) {
-                    'save_as' => _downloadFile(context, entry),
-                    'open_file_location' => _openFileLocation(context, entry),
-                    'share' => _shareFile(context, entry),
-                    'replace' => _replaceContent(context, entry),
-                    'versions' => _showVersionHistory(context, entry),
-                    'rename' => _renameEntry(context, entry),
-                    'resolve_conflict' => _markConflictResolved(context, entry),
-                    'delete' => _deleteEntry(context, entry),
-                    'family_share' => _showShareFolderDialog(
-                      context,
-                      widget.familyVault!,
-                      folderId: entry.node.id,
-                      folderName: entry.name,
-                    ),
-                    _ => null,
-                  },
-                  // Built only when the menu opens: whether a folder can be
-                  // shared walks its subtree, too costly for every row.
-                  itemBuilder: (context) => [
-                    if (entry.isDirectory &&
-                        familyVault != null &&
-                        familyVault.canShare(entry.node))
-                      PopupMenuItem(
-                        value: 'family_share',
-                        child: Text(
-                          _localized(
+                // A long press starts selecting, as in other file managers.
+                onLongPress: () => controller.toggleSelection(entry),
+                trailing: selecting
+                    ? null
+                    : PopupMenuButton<String>(
+                        tooltip: 'More actions',
+                        onSelected: (value) => switch (value) {
+                          'save_as' => _downloadFile(context, entry),
+                          'open_file_location' => _openFileLocation(
                             context,
-                            en: 'Share with family…',
-                            ru: 'Поделиться с семьёй…',
+                            entry,
                           ),
-                        ),
-                      ),
-                    if (!entry.isDirectory && widget.androidFileSharer != null)
-                      PopupMenuItem(
-                        value: 'share',
-                        child: Text(
-                          _localized(context, en: 'Share', ru: 'Поделиться'),
-                        ),
-                      ),
-                    if (!entry.isDirectory)
-                      const PopupMenuItem(
-                        value: 'save_as',
-                        child: Text('Save as…'),
-                      ),
-                    if (canOpenFileLocation)
-                      PopupMenuItem(
-                        value: 'open_file_location',
-                        child: Text(
-                          _localized(
+                          'share' => _shareFile(context, entry),
+                          'replace' => _replaceContent(context, entry),
+                          'versions' => _showVersionHistory(context, entry),
+                          'rename' => _renameEntry(context, entry),
+                          'resolve_conflict' => _markConflictResolved(
                             context,
-                            en: 'Open file location',
-                            ru: 'Открыть расположение',
+                            entry,
                           ),
-                        ),
-                      ),
-                    if (!entry.isDirectory)
-                      const PopupMenuItem(
-                        value: 'replace',
-                        child: Text('Replace content…'),
-                      ),
-                    if (!entry.isDirectory)
-                      PopupMenuItem(
-                        value: 'versions',
-                        child: Text(
-                          _localized(
+                          'delete' => _deleteEntry(context, entry),
+                          'family_share' => _showShareFolderDialog(
                             context,
-                            en: 'Version history…',
-                            ru: 'История версий…',
+                            widget.familyVault!,
+                            folderId: entry.node.id,
+                            folderName: entry.name,
                           ),
-                        ),
-                      ),
-                    if (entry.isConflictCopy)
-                      PopupMenuItem(
-                        value: 'resolve_conflict',
-                        child: Text(
-                          _localized(
-                            context,
-                            en: 'Mark conflict resolved',
-                            ru: 'Отметить конфликт решённым',
+                          _ => null,
+                        },
+                        // Built only when the menu opens: whether a folder can be
+                        // shared walks its subtree, too costly for every row.
+                        itemBuilder: (context) => [
+                          if (entry.isDirectory &&
+                              familyVault != null &&
+                              familyVault.canShare(entry.node))
+                            PopupMenuItem(
+                              value: 'family_share',
+                              child: Text(
+                                _localized(
+                                  context,
+                                  en: 'Share with family…',
+                                  ru: 'Поделиться с семьёй…',
+                                ),
+                              ),
+                            ),
+                          if (!entry.isDirectory &&
+                              widget.androidFileSharer != null)
+                            PopupMenuItem(
+                              value: 'share',
+                              child: Text(
+                                _localized(
+                                  context,
+                                  en: 'Share',
+                                  ru: 'Поделиться',
+                                ),
+                              ),
+                            ),
+                          if (!entry.isDirectory)
+                            const PopupMenuItem(
+                              value: 'save_as',
+                              child: Text('Save as…'),
+                            ),
+                          if (canOpenFileLocation)
+                            PopupMenuItem(
+                              value: 'open_file_location',
+                              child: Text(
+                                _localized(
+                                  context,
+                                  en: 'Open file location',
+                                  ru: 'Открыть расположение',
+                                ),
+                              ),
+                            ),
+                          if (!entry.isDirectory)
+                            const PopupMenuItem(
+                              value: 'replace',
+                              child: Text('Replace content…'),
+                            ),
+                          if (!entry.isDirectory)
+                            PopupMenuItem(
+                              value: 'versions',
+                              child: Text(
+                                _localized(
+                                  context,
+                                  en: 'Version history…',
+                                  ru: 'История версий…',
+                                ),
+                              ),
+                            ),
+                          if (entry.isConflictCopy)
+                            PopupMenuItem(
+                              value: 'resolve_conflict',
+                              child: Text(
+                                _localized(
+                                  context,
+                                  en: 'Mark conflict resolved',
+                                  ru: 'Отметить конфликт решённым',
+                                ),
+                              ),
+                            ),
+                          const PopupMenuItem(
+                            value: 'rename',
+                            child: Text('Rename'),
                           ),
-                        ),
+                          const PopupMenuItem(
+                            value: 'delete',
+                            child: Text('Move to trash'),
+                          ),
+                        ],
                       ),
-                    const PopupMenuItem(value: 'rename', child: Text('Rename')),
-                    const PopupMenuItem(
-                      value: 'delete',
-                      child: Text('Move to trash'),
-                    ),
-                  ],
-                ),
               );
             },
           );
         }
-        return _PageFrame(
-          title: _localized(context, en: 'Files', ru: 'Файлы'),
-          subtitle: controller.breadcrumbNames.isEmpty
-              ? _localized(context, en: 'Root', ru: 'Корень')
-              : controller.breadcrumbNames.join(' / '),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                alignment: WrapAlignment.end,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  PopupMenuButton<FileListSort>(
-                    tooltip: 'Sort files',
-                    icon: const Icon(Icons.sort),
-                    onSelected: controller.setSort,
-                    itemBuilder: (context) => FileListSort.values
-                        .map(
-                          (sort) => CheckedPopupMenuItem<FileListSort>(
-                            value: sort,
-                            checked: sort == controller.sort,
-                            child: Text(_fileSortLabel(sort)),
+        // Android's back gesture leaves selection mode instead of the app.
+        return PopScope(
+          canPop: !controller.selectionMode,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) controller.clearSelection();
+          },
+          child: _PageFrame(
+            title: _localized(context, en: 'Files', ru: 'Файлы'),
+            subtitle: controller.breadcrumbNames.isEmpty
+                ? _localized(context, en: 'Root', ru: 'Корень')
+                : controller.breadcrumbNames.join(' / '),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (controller.selectionMode)
+                  _SelectionBar(
+                    controller: controller,
+                    onDelete: () => _deleteSelected(context),
+                  )
+                else
+                  Wrap(
+                    alignment: WrapAlignment.end,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      if (controller.entries.isNotEmpty)
+                        IconButton(
+                          onPressed: controller.startSelection,
+                          icon: const Icon(Icons.checklist),
+                          tooltip: _localized(
+                            context,
+                            en: 'Select',
+                            ru: 'Выбрать',
                           ),
-                        )
-                        .toList(growable: false),
-                  ),
-                  IconButton(
-                    onPressed: () => _openTrash(context),
-                    icon: const Icon(Icons.delete_outline),
-                    tooltip: _localized(context, en: 'Trash', ru: 'Корзина'),
-                  ),
-                  if (controller.canGoUp)
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          onPressed: controller.goUp,
-                          icon: const Icon(Icons.arrow_upward),
-                          tooltip: 'Up one level',
                         ),
+                      PopupMenuButton<FileListSort>(
+                        tooltip: 'Sort files',
+                        icon: const Icon(Icons.sort),
+                        onSelected: controller.setSort,
+                        itemBuilder: (context) => FileListSort.values
+                            .map(
+                              (sort) => CheckedPopupMenuItem<FileListSort>(
+                                value: sort,
+                                checked: sort == controller.sort,
+                                child: Text(_fileSortLabel(sort)),
+                              ),
+                            )
+                            .toList(growable: false),
+                      ),
+                      IconButton(
+                        onPressed: () => _openTrash(context),
+                        icon: const Icon(Icons.delete_outline),
+                        tooltip: _localized(
+                          context,
+                          en: 'Trash',
+                          ru: 'Корзина',
+                        ),
+                      ),
+                      if (controller.canGoUp)
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              onPressed: controller.goUp,
+                              icon: const Icon(Icons.arrow_upward),
+                              tooltip: 'Up one level',
+                            ),
+                            IconButton(
+                              onPressed: controller.goToRoot,
+                              icon: const Icon(Icons.home_outlined),
+                              tooltip: 'Root',
+                            ),
+                          ],
+                        ),
+                      if (defaultTargetPlatform == TargetPlatform.android) ...[
                         IconButton(
-                          onPressed: controller.goToRoot,
-                          icon: const Icon(Icons.home_outlined),
-                          tooltip: 'Root',
+                          onPressed: () => _createFolder(context),
+                          icon: const Icon(Icons.create_new_folder_outlined),
+                          tooltip: 'New folder',
+                        ),
+                        if (widget.onCapturePhoto != null)
+                          IconButton(
+                            onPressed: widget.onCapturePhoto,
+                            icon: const Icon(Icons.photo_camera_outlined),
+                            tooltip: 'Camera',
+                          ),
+                        IconButton(
+                          onPressed: () => _uploadFiles(context),
+                          icon: const Icon(Icons.upload_outlined),
+                          tooltip: 'Upload files',
+                        ),
+                      ] else ...[
+                        OutlinedButton.icon(
+                          onPressed: () => _createFolder(context),
+                          icon: const Icon(Icons.create_new_folder_outlined),
+                          label: const Text('New folder'),
+                        ),
+                        if (widget.onCapturePhoto != null)
+                          FilledButton.tonalIcon(
+                            onPressed: widget.onCapturePhoto,
+                            icon: const Icon(Icons.photo_camera_outlined),
+                            label: const Text('Camera'),
+                          ),
+                        FilledButton.icon(
+                          onPressed: () => _uploadFiles(context),
+                          icon: const Icon(Icons.upload_outlined),
+                          label: const Text('Upload files'),
                         ),
                       ],
-                    ),
-                  if (defaultTargetPlatform == TargetPlatform.android) ...[
-                    IconButton(
-                      onPressed: () => _createFolder(context),
-                      icon: const Icon(Icons.create_new_folder_outlined),
-                      tooltip: 'New folder',
-                    ),
-                    if (widget.onCapturePhoto != null)
-                      IconButton(
-                        onPressed: widget.onCapturePhoto,
-                        icon: const Icon(Icons.photo_camera_outlined),
-                        tooltip: 'Camera',
-                      ),
-                    IconButton(
-                      onPressed: () => _uploadFiles(context),
-                      icon: const Icon(Icons.upload_outlined),
-                      tooltip: 'Upload files',
-                    ),
-                  ] else ...[
-                    OutlinedButton.icon(
-                      onPressed: () => _createFolder(context),
-                      icon: const Icon(Icons.create_new_folder_outlined),
-                      label: const Text('New folder'),
-                    ),
-                    if (widget.onCapturePhoto != null)
-                      FilledButton.tonalIcon(
-                        onPressed: widget.onCapturePhoto,
-                        icon: const Icon(Icons.photo_camera_outlined),
-                        label: const Text('Camera'),
-                      ),
-                    FilledButton.icon(
-                      onPressed: () => _uploadFiles(context),
-                      icon: const Icon(Icons.upload_outlined),
-                      label: const Text('Upload files'),
-                    ),
-                  ],
+                    ],
+                  ),
+                if (defaultTargetPlatform == TargetPlatform.windows) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Drag files into this window to encrypt and upload them to this folder.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
                 ],
-              ),
-              if (defaultTargetPlatform == TargetPlatform.windows) ...[
-                const SizedBox(height: 8),
-                Text(
-                  'Drag files into this window to encrypt and upload them to this folder.',
-                  style: Theme.of(context).textTheme.bodySmall,
+                const SizedBox(height: 12),
+                Expanded(
+                  child: widget.onPullToRefresh == null
+                      ? body
+                      : RefreshIndicator(
+                          onRefresh: widget.onPullToRefresh!,
+                          child: body,
+                        ),
                 ),
               ],
-              const SizedBox(height: 12),
-              Expanded(
-                child: widget.onPullToRefresh == null
-                    ? body
-                    : RefreshIndicator(
-                        onRefresh: widget.onPullToRefresh!,
-                        child: body,
-                      ),
-              ),
-            ],
+            ),
           ),
         );
       },
@@ -1278,4 +1388,46 @@ final class _FilesMessageState extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// Replaces the Files toolbar while entries are being selected.
+final class _SelectionBar extends StatelessWidget {
+  const _SelectionBar({required this.controller, required this.onDelete});
+
+  final FilesController controller;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final count = controller.selectedCount;
+    final total = controller.entries.length;
+    return Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        Checkbox(
+          tristate: true,
+          value: count == 0 ? false : (count == total ? true : null),
+          onChanged: (_) => controller.toggleSelectAll(),
+          semanticLabel: 'Select all',
+        ),
+        Text(
+          _localized(context, en: '$count selected', ru: 'Выбрано: $count'),
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        FilledButton.icon(
+          onPressed: count == 0 ? null : onDelete,
+          icon: const Icon(Icons.delete_outline),
+          label: Text(
+            _localized(context, en: 'Move to trash', ru: 'В корзину'),
+          ),
+        ),
+        TextButton(
+          onPressed: controller.clearSelection,
+          child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
+        ),
+      ],
+    );
+  }
 }

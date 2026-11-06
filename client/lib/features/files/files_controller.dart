@@ -232,6 +232,68 @@ final class FilesController extends ChangeNotifier {
   FileTransferDirection? get transferDirection => _transferDirection;
   FileListSort get sort => _sort;
   bool get canGoUp => _path.isNotEmpty;
+
+  // --- multi-selection (bulk actions on the open folder) ---
+
+  final Set<String> _selectedIds = {};
+  bool _selectionMode = false;
+
+  /// True while the Files page shows checkboxes for bulk actions. It can be
+  /// on with nothing selected yet, after the user chose "Select".
+  bool get selectionMode => _selectionMode;
+
+  /// The selected entries of the open folder, in display order.
+  List<FileEntry> get selectedEntries => [
+    for (final entry in _entries)
+      if (_selectedIds.contains(entry.node.id)) entry,
+  ];
+
+  int get selectedCount => _selectedIds.length;
+
+  bool isSelected(FileEntry entry) => _selectedIds.contains(entry.node.id);
+
+  /// Turns selection mode on without selecting anything.
+  void startSelection() {
+    if (_selectionMode) return;
+    _selectionMode = true;
+    notifyListeners();
+  }
+
+  /// Selects or deselects [entry], turning selection mode on as needed.
+  void toggleSelection(FileEntry entry) {
+    _selectionMode = true;
+    if (!_selectedIds.remove(entry.node.id)) _selectedIds.add(entry.node.id);
+    notifyListeners();
+  }
+
+  /// Selects every entry of the open folder, or clears the selection when
+  /// everything already is selected.
+  void toggleSelectAll() {
+    _selectionMode = true;
+    if (_entries.isNotEmpty && _selectedIds.length == _entries.length) {
+      _selectedIds.clear();
+    } else {
+      _selectedIds
+        ..clear()
+        ..addAll(_entries.map((entry) => entry.node.id));
+    }
+    notifyListeners();
+  }
+
+  /// Leaves selection mode and forgets the selection.
+  void clearSelection() {
+    if (!_selectionMode && _selectedIds.isEmpty) return;
+    _selectionMode = false;
+    _selectedIds.clear();
+    notifyListeners();
+  }
+
+  /// A selection belongs to one folder; navigating away drops it.
+  void _resetSelectionForNavigation() {
+    _selectionMode = false;
+    _selectedIds.clear();
+  }
+
   List<String> get breadcrumbNames =>
       _path.map((e) => e.name).toList(growable: false);
 
@@ -400,6 +462,8 @@ final class FilesController extends ChangeNotifier {
         }
         decrypted.sort(_compareEntries);
         _entries = decrypted;
+        // Drop selected entries that disappeared, e.g. deleted elsewhere.
+        _selectedIds.retainAll(decrypted.map((entry) => entry.node.id));
         _entriesAsOf = DateTime.now().toUtc();
         _setStatus(FilesStatus.ready);
       } catch (e) {
@@ -416,17 +480,20 @@ final class FilesController extends ChangeNotifier {
 
   void openFolder(FileEntry entry) {
     if (!entry.isDirectory) return;
+    _resetSelectionForNavigation();
     _path.add(_Breadcrumb(entry.node.id, entry.name));
     unawaited(refresh());
   }
 
   void goToBreadcrumb(int index) {
+    _resetSelectionForNavigation();
     _path.removeRange(index + 1, _path.length);
     unawaited(refresh());
   }
 
   void goToRoot() {
     if (_path.isEmpty) return;
+    _resetSelectionForNavigation();
     _path.clear();
     unawaited(refresh());
   }
@@ -434,6 +501,7 @@ final class FilesController extends ChangeNotifier {
   /// Navigates to the parent of the currently open folder.
   void goUp() {
     if (_path.isEmpty) return;
+    _resetSelectionForNavigation();
     _path.removeLast();
     unawaited(refresh());
   }
@@ -629,36 +697,81 @@ final class FilesController extends ChangeNotifier {
 
   /// Soft-deletes [entry] (spec §27.2): marked deleted locally right away,
   /// with the actual server call queued the same as any other mutation.
-  Future<bool> deleteNode(FileEntry entry) async {
+  Future<bool> deleteNode(FileEntry entry) async =>
+      (await deleteNodes([entry])) == 1;
+
+  /// Moves every entry in [entries] to Trash at once (spec §27.2), the same
+  /// local-first way as [deleteNode]: each is hidden immediately and its
+  /// delete queued in the durable outbox, so this also works offline and
+  /// one sync pass pushes them all. A folder takes its whole subtree along,
+  /// so an entry inside another selected folder is not deleted separately;
+  /// restoring the folder later brings it back with it.
+  ///
+  /// Returns how many entries were moved to Trash; on a partial failure
+  /// [errorMessage] explains the first problem. The selection is cleared.
+  Future<int> deleteNodes(List<FileEntry> entries) async {
+    if (entries.isEmpty) return 0;
     final ctx = await _requireContext();
-    if (ctx == null) return false;
-    ctx.dispose(); // Only the session check is needed; Trash needs no key.
-    try {
-      final now = DateTime.now().toUtc();
-      _syncEngine.nodeCache.upsert(
-        entry.node.copyWith(updatedAt: now, deletedAt: now),
-      );
-      _syncEngine.pendingOperations.enqueue(
-        PendingOperation(
-          id: generateUuidV4(),
-          operationId: generateUuidV4(),
-          type: PendingOperationType.deleteNode,
-          nodeId: entry.node.id,
-          payload: const {},
-          baseRevision: entry.node.revision,
-          createdAt: now,
-          retryCount: 0,
-          status: PendingOperationStatus.pending,
-        ),
-      );
-      unawaited(_syncEngine.runOnce());
-      await refresh();
-      return true;
-    } catch (e) {
-      _errorMessage = describeError(e);
+    if (ctx == null) {
       notifyListeners();
-      return false;
+      return 0;
     }
+    ctx.dispose(); // Only the session check is needed; Trash needs no key.
+    final selectedIds = {for (final entry in entries) entry.node.id};
+    var deleted = 0;
+    Object? firstError;
+    final now = DateTime.now().toUtc();
+    for (final (index, entry) in entries.indexed) {
+      if (_hasSelectedAncestor(entry.node, selectedIds)) continue;
+      try {
+        // The cached node, not the listing's copy: a sync pass may have
+        // advanced its revision since the folder was listed.
+        final node = _syncEngine.nodeCache.getById(entry.node.id) ?? entry.node;
+        if (node.isDeleted) {
+          deleted++; // Already in Trash, e.g. from another device.
+          continue;
+        }
+        _syncEngine.nodeCache.upsert(
+          node.copyWith(updatedAt: now, deletedAt: now),
+        );
+        _syncEngine.pendingOperations.enqueue(
+          PendingOperation(
+            id: generateUuidV4(),
+            operationId: generateUuidV4(),
+            type: PendingOperationType.deleteNode,
+            nodeId: node.id,
+            payload: const {},
+            baseRevision: node.revision,
+            // Strictly increasing, so the outbox keeps the selection order.
+            createdAt: now.add(Duration(microseconds: index)),
+            retryCount: 0,
+            status: PendingOperationStatus.pending,
+          ),
+        );
+        deleted++;
+      } catch (e) {
+        firstError ??= e;
+      }
+    }
+    _selectionMode = false;
+    _selectedIds.clear();
+    if (firstError != null) _errorMessage = describeError(firstError);
+    if (deleted > 0) unawaited(_syncEngine.runOnce());
+    await refresh();
+    return deleted;
+  }
+
+  /// Whether a folder above [node] is part of the same bulk delete.
+  bool _hasSelectedAncestor(LocalNode node, Set<String> selectedIds) {
+    final visited = <String>{};
+    for (
+      var id = node.parentId;
+      id != null && visited.add(id);
+      id = _syncEngine.nodeCache.getById(id)?.parentId
+    ) {
+      if (selectedIds.contains(id)) return true;
+    }
+    return false;
   }
 
   void _enqueueUpdate(
