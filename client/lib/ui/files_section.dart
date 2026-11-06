@@ -483,9 +483,13 @@ final class _FilesSection extends StatefulWidget {
     required this.onRefresh,
     required this.onOpenSettings,
     required this.onDownloadCompleted,
+    required this.onOpenSharedFolder,
   });
 
   final FilesController? controller;
+
+  /// Opens a folder shared with this account in the Family section.
+  final void Function(IncomingShareView view) onOpenSharedFolder;
 
   /// Family Vault sharing; null until a server and its local data are open.
   final FamilyVaultController? familyVault;
@@ -513,10 +517,164 @@ final class _FilesSectionState extends State<_FilesSection> {
   final FocusNode _focusNode = FocusNode(debugLabel: 'files');
   bool _refreshing = false;
 
+  /// Keys of the visible folder rows, to find the folder under a file drag.
+  final Map<String, GlobalKey> _folderKeys = {};
+
+  /// Set while files are dragged over the window.
+  bool _dragging = false;
+
+  /// The folder row the dragged files would go into, if any.
+  String? _dropFolderId;
+
+  Offset _toLogical(Offset physical) =>
+      physical / View.of(context).devicePixelRatio;
+
+  void _onDragHover(Offset physical) {
+    if (!mounted || widget.controller == null) return;
+    final folderId = _folderAt(_toLogical(physical))?.node.id;
+    if (_dragging && folderId == _dropFolderId) return;
+    setState(() {
+      _dragging = true;
+      _dropFolderId = folderId;
+    });
+  }
+
+  void _onDragExit() {
+    if (!mounted || !_dragging) return;
+    setState(() {
+      _dragging = false;
+      _dropFolderId = null;
+    });
+  }
+
+  /// The listed folder whose row contains the global [position].
+  FileEntry? _folderAt(Offset position) {
+    final controller = widget.controller;
+    if (controller == null || controller.selectionMode) return null;
+    for (final entry in controller.entries) {
+      if (!entry.isDirectory) continue;
+      final box =
+          _folderKeys[entry.node.id]?.currentContext?.findRenderObject()
+              as RenderBox?;
+      if (box == null || !box.attached) continue;
+      final rect = box.localToGlobal(Offset.zero) & box.size;
+      if (rect.contains(position)) return entry;
+    }
+    return null;
+  }
+
+  /// Marks a folder row as a drop target and highlights it while files are
+  /// dragged over it.
+  Widget _asDropTarget(FileEntry entry, Widget tile) {
+    if (!entry.isDirectory || defaultTargetPlatform != TargetPlatform.windows) {
+      return tile;
+    }
+    final highlighted = _dragging && _dropFolderId == entry.node.id;
+    final scheme = Theme.of(context).colorScheme;
+    return KeyedSubtree(
+      key: _folderKeys.putIfAbsent(entry.node.id, GlobalKey.new),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        decoration: BoxDecoration(
+          color: highlighted ? scheme.primaryContainer : null,
+          border: Border.all(
+            color: highlighted ? scheme.primary : Colors.transparent,
+            width: 2,
+          ),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: tile,
+      ),
+    );
+  }
+
+  /// Uploads files dropped onto [folder] without opening it. A name that is
+  /// already taken there gets the next free "name (n).ext": the folder is
+  /// not open, so replacing an existing file is left to an explicit upload.
+  Future<void> _uploadIntoFolder(FileEntry folder, List<String> paths) async {
+    final controller = widget.controller;
+    if (controller == null) return;
+    final relativePath = [...controller.breadcrumbNames, folder.name].join('/');
+    final taken = await controller.childNames(folder.node.id);
+    final names = <String, String>{};
+    var renamed = 0;
+    for (final path in paths) {
+      final name = basenameOfLocalPath(path);
+      final unique = uniqueSiblingName(name, taken);
+      taken.add(unique);
+      if (unique != name) {
+        names[path] = unique;
+        renamed++;
+      }
+    }
+    final result = await controller.uploadFilesInto(
+      paths,
+      folder.node.id,
+      fileNames: names,
+    );
+    for (final path in result.successfulPaths) {
+      await _copyUploadedFileToSyncFolder(
+        path,
+        relativePath,
+        names[path] ?? basenameOfLocalPath(path),
+      );
+    }
+    if (!mounted) return;
+    String files(int n) => _countOf(
+      context,
+      n,
+      enOne: 'file',
+      enMany: 'files',
+      ruOne: 'файл',
+      ruFew: 'файла',
+      ruMany: 'файлов',
+    );
+    var message = result.failed == 0
+        ? _localized(
+            context,
+            en: 'Encrypted and uploaded ${files(result.succeeded)} to "${folder.name}".',
+            ru: 'Зашифровано и загружено в «${folder.name}»: ${files(result.succeeded)}.',
+          )
+        : _localized(
+            context,
+            en: 'Uploaded ${files(result.succeeded)} to "${folder.name}"; ${files(result.failed)} could not be uploaded. ${controller.errorMessage ?? ''}',
+            ru: 'Загружено в «${folder.name}»: ${files(result.succeeded)}; не удалось: ${files(result.failed)}. ${controller.errorMessage ?? ''}',
+          );
+    if (renamed > 0) {
+      message += _localized(
+        context,
+        en: ' ${files(renamed)} got a new name because the folder already had that name.',
+        ru: ' ${files(renamed)} получили новое имя, потому что такое уже было в папке.',
+      );
+    }
+    _snack(context, message);
+  }
+
+  /// The Family Vault controller whose shares this page already asked for,
+  /// so "Shared with me" is loaded once per server, not on every rebuild.
+  FamilyVaultController? _familyLoaded;
+
+  void _loadSharedWithMe(FilesController controller) {
+    final familyVault = widget.familyVault;
+    if (familyVault == null ||
+        identical(familyVault, _familyLoaded) ||
+        controller.status != FilesStatus.ready) {
+      return;
+    }
+    _familyLoaded = familyVault;
+    unawaited(familyVault.refresh());
+  }
+
   @override
   void initState() {
     super.initState();
-    unawaited(WindowsFileDrop.listen(_uploadDroppedFiles));
+    unawaited(
+      WindowsFileDrop.listen(
+        onFilesDropped: _uploadDroppedFiles,
+        onHover: _onDragHover,
+        onExit: _onDragExit,
+      ),
+    );
   }
 
   @override
@@ -1447,10 +1605,15 @@ final class _FilesSectionState extends State<_FilesSection> {
     }
   }
 
-  Future<void> _uploadDroppedFiles(List<String> paths) async {
+  Future<void> _uploadDroppedFiles(List<String> paths, Offset? position) async {
     final controller = widget.controller;
-    if (controller == null) return;
-    await _uploadPathsWithOverwritePrompt(context, paths);
+    if (controller == null || !mounted) return;
+    final folder = position == null ? null : _folderAt(_toLogical(position));
+    if (folder != null) {
+      await _uploadIntoFolder(folder, paths);
+    } else {
+      await _uploadPathsWithOverwritePrompt(context, paths);
+    }
   }
 
   /// The actions of one row's menu, shared by its "⋮" button and the
@@ -1765,6 +1928,17 @@ final class _FilesSectionState extends State<_FilesSection> {
       // "Share with family" action follow share changes immediately.
       animation: Listenable.merge([controller, ?widget.familyVault]),
       builder: (context, _) {
+        // Forget drop-target keys of folders no longer listed.
+        final listedIds = {for (final e in controller.entries) e.node.id};
+        _folderKeys.removeWhere((id, _) => !listedIds.contains(id));
+        if (controller.status == FilesStatus.ready &&
+            widget.familyVault != null &&
+            !identical(widget.familyVault, _familyLoaded)) {
+          // After the frame: refresh() notifies listeners right away.
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _loadSharedWithMe(controller);
+          });
+        }
         // Whichever message/spinner widget a non-list state below renders,
         // it has no Scrollable of its own, so pull-to-refresh (below) would
         // have nothing to detect the drag gesture against — wrapping it in
@@ -1901,6 +2075,13 @@ final class _FilesSectionState extends State<_FilesSection> {
                 )
               else
                 _buildToolbar(context, controller, android: android),
+              if (!controller.canGoUp &&
+                  !controller.selectionMode &&
+                  widget.familyVault != null)
+                _SharedWithMeStrip(
+                  familyVault: widget.familyVault!,
+                  onOpen: widget.onOpenSharedFolder,
+                ),
               const SizedBox(height: 12),
               Expanded(
                 child: widget.onPullToRefresh == null
@@ -1969,6 +2150,34 @@ final class _FilesSectionState extends State<_FilesSection> {
                             ),
                           ],
                         )
+                      : _dragging
+                      ? Stack(
+                          children: [
+                            Positioned.fill(child: page),
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: _DropOverlay(
+                                  folderName: _dropFolderId == null
+                                      ? (controller
+                                                .breadcrumbNames
+                                                .lastOrNull ??
+                                            _localized(
+                                              context,
+                                              en: 'Root',
+                                              ru: 'Корень',
+                                            ))
+                                      : controller.entries
+                                            .where(
+                                              (e) => e.node.id == _dropFolderId,
+                                            )
+                                            .firstOrNull
+                                            ?.name,
+                                  intoSubfolder: _dropFolderId != null,
+                                ),
+                              ),
+                            ),
+                          ],
+                        )
                       : page,
                 ),
               ),
@@ -2012,6 +2221,15 @@ final class _FilesSectionState extends State<_FilesSection> {
   /// One item of the grid view: a large thumbnail or icon with its name,
   /// and the same tap, long-press and context-menu behavior as a list row.
   Widget _buildEntryGridTile(
+    BuildContext context,
+    FilesController controller,
+    FileEntry entry,
+  ) => _asDropTarget(
+    entry,
+    _buildEntryGridTileContent(context, controller, entry),
+  );
+
+  Widget _buildEntryGridTileContent(
     BuildContext context,
     FilesController controller,
     FileEntry entry,
@@ -2148,6 +2366,12 @@ final class _FilesSectionState extends State<_FilesSection> {
   }
 
   Widget _buildEntryTile(
+    BuildContext context,
+    FilesController controller,
+    FileEntry entry,
+  ) => _asDropTarget(entry, _buildEntryTileContent(context, controller, entry));
+
+  Widget _buildEntryTileContent(
     BuildContext context,
     FilesController controller,
     FileEntry entry,
@@ -2384,6 +2608,120 @@ final class _FilesSectionState extends State<_FilesSection> {
         ),
         Wrap(children: tools),
       ],
+    );
+  }
+}
+
+/// Folders shared with this account, at the top of the Files root, so they
+/// are found where files are rather than only under Family.
+final class _SharedWithMeStrip extends StatelessWidget {
+  const _SharedWithMeStrip({required this.familyVault, required this.onOpen});
+
+  final FamilyVaultController familyVault;
+  final void Function(IncomingShareView view) onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final shares = familyVault.incoming;
+    if (shares.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _localized(context, en: 'Shared with me', ru: 'Доступно мне'),
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final view in shares)
+                ActionChip(
+                  avatar: Icon(
+                    view.state == IncomingShareState.ready
+                        ? Icons.folder_shared
+                        : Icons.gpp_maybe_outlined,
+                    size: 18,
+                  ),
+                  label: Text(
+                    '${view.folderName ?? _localized(context, en: 'Shared folder', ru: 'Общая папка')}'
+                    '${view.share.ownerUsername.isEmpty ? '' : ' · ${view.share.ownerUsername}'}',
+                  ),
+                  tooltip: view.state == IncomingShareState.ready
+                      ? _localized(context, en: 'Open', ru: 'Открыть')
+                      : _localized(
+                          context,
+                          en: 'Needs verification in Family',
+                          ru: 'Нужна проверка в разделе «Семья»',
+                        ),
+                  onPressed: () => onOpen(view),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shown over the Files page while files are dragged over the window: a
+/// frame and a label saying where a drop would upload them.
+final class _DropOverlay extends StatelessWidget {
+  const _DropOverlay({required this.folderName, required this.intoSubfolder});
+
+  final String? folderName;
+  final bool intoSubfolder;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final name = folderName ?? '';
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: scheme.primary.withValues(alpha: 0.06),
+        border: Border.all(color: scheme.primary, width: 3),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Material(
+            color: scheme.primary,
+            borderRadius: BorderRadius.circular(24),
+            elevation: 4,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.upload_outlined, color: scheme.onPrimary),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      intoSubfolder
+                          ? _localized(
+                              context,
+                              en: 'Drop to encrypt and upload into "$name"',
+                              ru: 'Отпустите, чтобы зашифровать и загрузить в «$name»',
+                            )
+                          : _localized(
+                              context,
+                              en: 'Drop to encrypt and upload to "$name"',
+                              ru: 'Отпустите, чтобы зашифровать и загрузить в «$name»',
+                            ),
+                      style: TextStyle(color: scheme.onPrimary),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

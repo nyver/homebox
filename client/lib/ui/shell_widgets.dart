@@ -688,6 +688,9 @@ class _SectionContent extends StatelessWidget {
     required this.onRefresh,
     required this.onOpenSettings,
     required this.onDownloadCompleted,
+    required this.onOpenSharedFolder,
+    required this.shareToOpen,
+    required this.onShareOpened,
   });
 
   final AppSection section;
@@ -725,6 +728,11 @@ class _SectionContent extends StatelessWidget {
   final VoidCallback onOpenSettings;
   final void Function({required String fileName, required String location})
   onDownloadCompleted;
+  final void Function(IncomingShareView view) onOpenSharedFolder;
+
+  /// A shared folder the Family section should open as soon as it shows.
+  final IncomingShareView? shareToOpen;
+  final VoidCallback onShareOpened;
 
   @override
   Widget build(BuildContext context) => switch (section) {
@@ -752,6 +760,7 @@ class _SectionContent extends StatelessWidget {
         onRefresh: onRefresh,
         onOpenSettings: onOpenSettings,
         onDownloadCompleted: onDownloadCompleted,
+        onOpenSharedFolder: onOpenSharedFolder,
       ),
     ),
     AppSection.family => _FamilySection(
@@ -759,6 +768,8 @@ class _SectionContent extends StatelessWidget {
       androidFileSaver: androidFileSaver,
       androidFileSharer: androidFileSharer,
       onOpenSettings: onOpenSettings,
+      shareToOpen: shareToOpen,
+      onShareOpened: onShareOpened,
     ),
     AppSection.sync => _SyncSection(
       syncFolder: syncFolder,

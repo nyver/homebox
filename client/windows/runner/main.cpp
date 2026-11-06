@@ -1,6 +1,7 @@
 #include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
+#include <ole2.h>
 
 #include "flutter_window.h"
 #include "single_instance.h"
@@ -30,9 +31,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     CreateAndAttachConsole();
   }
 
-  // Initialize COM, so that it is available for use in the library and/or
-  // plugins.
-  ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  // Initialize COM for the library and plugins. OleInitialize (a
+  // single-threaded apartment plus OLE) is needed for drag-and-drop
+  // registration (RegisterDragDrop).
+  ::OleInitialize(nullptr);
 
   flutter::DartProject project(L"data");
 
@@ -45,7 +47,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
   if (!window.Create(L"HomeBox", origin, size)) {
-    ::CoUninitialize();
+    ::OleUninitialize();
     ::CloseHandle(single_instance);
     return EXIT_FAILURE;
   }
@@ -57,7 +59,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     ::DispatchMessage(&msg);
   }
 
-  ::CoUninitialize();
+  ::OleUninitialize();
   ::CloseHandle(single_instance);
   return EXIT_SUCCESS;
 }

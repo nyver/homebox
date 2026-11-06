@@ -8,6 +8,8 @@ final class _FamilySection extends StatefulWidget {
     required this.androidFileSaver,
     required this.androidFileSharer,
     required this.onOpenSettings,
+    this.shareToOpen,
+    this.onShareOpened,
   });
 
   final FamilyVaultController? controller;
@@ -17,6 +19,11 @@ final class _FamilySection extends StatefulWidget {
   /// Shows Settings, where the server connection and vault are set up.
   final VoidCallback onOpenSettings;
 
+  /// A shared folder picked elsewhere (Files → Shared with me) to open now;
+  /// [onShareOpened] is called once it has been taken.
+  final IncomingShareView? shareToOpen;
+  final VoidCallback? onShareOpened;
+
   @override
   State<_FamilySection> createState() => _FamilySectionState();
 }
@@ -24,10 +31,14 @@ final class _FamilySection extends StatefulWidget {
 final class _FamilySectionState extends State<_FamilySection> {
   SharedFolderBrowser? _browser;
 
+  /// The last share taken from [_FamilySection.shareToOpen].
+  IncomingShareView? _takenShare;
+
   @override
   void initState() {
     super.initState();
     unawaited(widget.controller?.refresh());
+    _takeShareToOpen();
   }
 
   @override
@@ -37,6 +48,21 @@ final class _FamilySectionState extends State<_FamilySection> {
       _closeBrowser();
       unawaited(widget.controller?.refresh());
     }
+    _takeShareToOpen();
+  }
+
+  /// Opens a share chosen in Files. One that still needs verification is
+  /// left to its tile here, which offers Verify.
+  void _takeShareToOpen() {
+    final view = widget.shareToOpen;
+    if (view == null || identical(view, _takenShare)) return;
+    _takenShare = view;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.onShareOpened?.call();
+      if (mounted && view.state == IncomingShareState.ready) {
+        unawaited(_open(view));
+      }
+    });
   }
 
   @override

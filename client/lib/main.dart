@@ -1135,6 +1135,14 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     if (_section != section) setState(() => _section = section);
   }
 
+  /// A shared folder chosen in Files, opened by the Family section.
+  IncomingShareView? _shareToOpen;
+
+  void _openSharedFolder(IncomingShareView view) => setState(() {
+    _shareToOpen = view;
+    _section = AppSection.family;
+  });
+
   Future<void> _selectSyncFolder() async {
     setState(() => _selectingFolder = true);
     try {
@@ -1337,6 +1345,9 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
           : null,
       onRefresh: _refreshFromServer,
       onOpenSettings: () => _showSection(AppSection.settings),
+      onOpenSharedFolder: _openSharedFolder,
+      shareToOpen: _shareToOpen,
+      onShareOpened: () => _shareToOpen = null,
       onDownloadCompleted: _showDownloadCompletionNotification,
     );
     if (!wideLayout) {

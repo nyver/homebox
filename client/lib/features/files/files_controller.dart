@@ -1025,7 +1025,35 @@ final class FilesController extends ChangeNotifier {
       // Captured before waiting in the queue. A user may navigate while
       // earlier transfers or a large drop are uploading, but that must not
       // move these files elsewhere.
-      _uploadInto(localPaths, _currentParentId, fileNames);
+      uploadFilesInto(localPaths, _currentParentId, fileNames: fileNames);
+
+  /// Like [uploadFiles], into the folder [parentId] (null: the root)
+  /// instead of the open one, e.g. for files dropped onto a folder row.
+  Future<FileUploadBatchResult> uploadFilesInto(
+    List<String> localPaths,
+    String? parentId, {
+    Map<String, String> fileNames = const {},
+  }) => _uploadInto(localPaths, parentId, fileNames);
+
+  /// The decrypted names directly inside [folderId], to avoid name clashes
+  /// when uploading there without opening it.
+  Future<Set<String>> childNames(String folderId) async {
+    final names = <String>{};
+    final ctx = await _requireContext();
+    if (ctx == null) return names;
+    try {
+      for (final node in _syncEngine.nodeCache.listChildren(folderId)) {
+        try {
+          names.add((await _decryptMetadata(node, ctx)).fileName);
+        } catch (_) {
+          // Skipped like in refresh(): see its comment.
+        }
+      }
+      return names;
+    } finally {
+      ctx.dispose();
+    }
+  }
 
   Future<FileUploadBatchResult> _uploadInto(
     List<String> localPaths,

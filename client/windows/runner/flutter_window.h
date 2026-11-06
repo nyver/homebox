@@ -2,6 +2,7 @@
 #define RUNNER_FLUTTER_WINDOW_H_
 
 #include <flutter/dart_project.h>
+#include <flutter/encodable_value.h>
 #include <flutter/flutter_view_controller.h>
 #include <flutter/method_channel.h>
 #include <shellapi.h>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <string>
 
+#include "drop_target.h"
 #include "win32_window.h"
 
 // A window that does nothing but host a Flutter view.
@@ -38,6 +40,9 @@ class FlutterWindow : public Win32Window {
   bool OpenFileLocation(const std::wstring& file_path);
   void ConfigurePlatformChannel();
   void HandleFileDrop(HDROP drop);
+  void RegisterFileDropTarget();
+  void RevokeFileDropTarget();
+  void SendDroppedFiles(flutter::EncodableList paths, int x, int y);
   bool IsAutostartEnabled() const;
   bool SetAutostartEnabled(bool enabled) const;
 
@@ -58,6 +63,10 @@ class FlutterWindow : public Win32Window {
   // Sent by Explorer when the taskbar is recreated (e.g. after a crash),
   // which drops every notification-area icon.
   UINT taskbar_created_message_ = 0;
+  // The OLE drop target on the Flutter view, or null when the older
+  // WM_DROPFILES path is used because registration failed.
+  DropTarget* drop_target_ = nullptr;
+  HWND drop_target_window_ = nullptr;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

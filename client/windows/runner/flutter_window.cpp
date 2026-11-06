@@ -119,7 +119,7 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   ConfigurePlatformChannel();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
-  DragAcceptFiles(GetHandle(), TRUE);
+  RegisterFileDropTarget();
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -139,7 +139,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
-  DragAcceptFiles(GetHandle(), FALSE);
+  RevokeFileDropTarget();
   RemoveTrayIcon();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -249,10 +249,75 @@ void FlutterWindow::HandleFileDrop(HDROP drop) {
     if (!utf8_path.empty()) paths.emplace_back(utf8_path);
   }
   DragFinish(drop);
+  // WM_DROPFILES carries no useful position: drop into the open folder.
+  SendDroppedFiles(std::move(paths), -1, -1);
+}
+
+void FlutterWindow::SendDroppedFiles(flutter::EncodableList paths, int x,
+                                     int y) {
   if (paths.empty() || !platform_channel_) return;
+  flutter::EncodableMap args{
+      {flutter::EncodableValue("paths"),
+       flutter::EncodableValue(std::move(paths))},
+      {flutter::EncodableValue("x"), flutter::EncodableValue(x)},
+      {flutter::EncodableValue("y"), flutter::EncodableValue(y)},
+  };
   platform_channel_->InvokeMethod(
       "filesDropped",
-      std::make_unique<flutter::EncodableValue>(std::move(paths)));
+      std::make_unique<flutter::EncodableValue>(std::move(args)));
+}
+
+void FlutterWindow::RegisterFileDropTarget() {
+  HWND view = flutter_controller_->view()->GetNativeWindow();
+  DropTarget::Callbacks callbacks;
+  callbacks.on_hover = [this](int x, int y) {
+    if (!platform_channel_) return;
+    platform_channel_->InvokeMethod(
+        "fileDragHover",
+        std::make_unique<flutter::EncodableValue>(flutter::EncodableMap{
+            {flutter::EncodableValue("x"), flutter::EncodableValue(x)},
+            {flutter::EncodableValue("y"), flutter::EncodableValue(y)},
+        }));
+  };
+  callbacks.on_leave = [this]() {
+    if (platform_channel_) platform_channel_->InvokeMethod("fileDragExit", nullptr);
+  };
+  callbacks.on_drop = [this](std::vector<std::wstring> paths, int x, int y) {
+    flutter::EncodableList encoded;
+    for (const std::wstring& path : paths) {
+      const std::string utf8_path = Utf8FromWide(path);
+      if (!utf8_path.empty()) encoded.emplace_back(utf8_path);
+    }
+    if (encoded.empty()) {
+      if (platform_channel_) {
+        platform_channel_->InvokeMethod("fileDragExit", nullptr);
+      }
+      return;
+    }
+    SendDroppedFiles(std::move(encoded), x, y);
+  };
+  auto* target = new DropTarget(view, std::move(callbacks));
+  if (RegisterDragDrop(view, target) == S_OK) {
+    // RegisterDragDrop holds its own reference; this one is released on
+    // revocation.
+    drop_target_ = target;
+    drop_target_window_ = view;
+    return;
+  }
+  target->Release();
+  // Fall back to plain drops without hover feedback.
+  DragAcceptFiles(GetHandle(), TRUE);
+}
+
+void FlutterWindow::RevokeFileDropTarget() {
+  if (drop_target_ == nullptr) {
+    DragAcceptFiles(GetHandle(), FALSE);
+    return;
+  }
+  RevokeDragDrop(drop_target_window_);
+  drop_target_->Release();
+  drop_target_ = nullptr;
+  drop_target_window_ = nullptr;
 }
 
 bool FlutterWindow::AddTrayIcon() {
