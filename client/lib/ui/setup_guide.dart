@@ -359,7 +359,27 @@ final class _UnlockChoices extends StatelessWidget {
               ? null
               : Padding(
                   padding: const EdgeInsets.only(top: 8),
-                  child: _FingerprintText(fingerprint),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _FingerprintText(fingerprint),
+                      TextButton.icon(
+                        onPressed: () => _showDevicePairingQr(
+                          context,
+                          deviceSetup: deviceSetup,
+                          server: server,
+                        ),
+                        icon: const Icon(Icons.qr_code_2),
+                        label: Text(
+                          _localized(
+                            context,
+                            en: 'Show as QR code',
+                            ru: 'Показать QR-кодом',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
           action: FilledButton.tonal(
             key: const ValueKey('setup-check-approval'),

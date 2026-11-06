@@ -401,6 +401,66 @@ String devicePairingPayload({
   return 'homebox://pair-device?v=1&id=$deviceId&kv=$keyVersion&key=$encodedKey';
 }
 
+/// A device's pairing record read back from [devicePairingPayload].
+final class DevicePairingRecord {
+  const DevicePairingRecord({
+    required this.deviceId,
+    required this.keyVersion,
+    required this.publicKey,
+  });
+
+  final String deviceId;
+  final int keyVersion;
+  final Uint8List publicKey;
+
+  /// Whether this record names exactly [deviceId] with [devicePublicKey],
+  /// i.e. the scanned device is the one about to be approved.
+  bool matches({
+    required String deviceId,
+    required List<int> devicePublicKey,
+  }) =>
+      this.deviceId == deviceId.toLowerCase() &&
+      _constantTimeEquals(publicKey, devicePublicKey);
+
+  /// Parses a pairing QR payload; null for anything else or malformed data.
+  static DevicePairingRecord? tryParse(String raw) {
+    final text = raw.trim();
+    if (!text.startsWith('homebox://pair-device?')) return null;
+    final Uri uri;
+    try {
+      uri = Uri.parse(text);
+    } on FormatException {
+      return null;
+    }
+    final params = uri.queryParameters;
+    final deviceId = params['id']?.toLowerCase();
+    final keyVersion = int.tryParse(params['kv'] ?? '');
+    final key = params['key'];
+    if (params['v'] != '1' ||
+        deviceId == null ||
+        keyVersion == null ||
+        keyVersion < 1 ||
+        key == null) {
+      return null;
+    }
+    try {
+      uuidStringToBytes(deviceId);
+      final padded = key.padRight((key.length + 3) ~/ 4 * 4, '=');
+      final publicKey = Uint8List.fromList(base64Url.decode(padded));
+      if (publicKey.length != 32) return null;
+      return DevicePairingRecord(
+        deviceId: deviceId,
+        keyVersion: keyVersion,
+        publicKey: publicKey,
+      );
+    } on FormatException {
+      return null;
+    } on ArgumentError {
+      return null;
+    }
+  }
+}
+
 bool _constantTimeEquals(List<int> left, List<int> right) {
   if (left.length != right.length) return false;
   var difference = 0;

@@ -852,7 +852,11 @@ final class _FilesSectionState extends State<_FilesSection> {
     // path component. Keeping the original name helps recipient apps infer
     // the extension in addition to the MIME type supplied separately.
     final sharedFile = File('${shareDirectory.path}/${entry.name}');
-    final downloaded = await controller.downloadFile(entry, sharedFile.path);
+    final downloaded = await controller.downloadFile(
+      entry,
+      sharedFile.path,
+      retryable: false,
+    );
     if (!downloaded) {
       await shareDirectory.delete(recursive: true);
       if (context.mounted) {
@@ -1009,7 +1013,8 @@ final class _FilesSectionState extends State<_FilesSection> {
     final tempDir = await getTemporaryDirectory();
     final tempFile = File('${tempDir.path}/download_${entry.node.id}');
     final downloaded =
-        await (downloadTo ?? (path) => controller.downloadFile(entry, path))(
+        await (downloadTo ??
+            (path) => controller.downloadFile(entry, path, retryable: false))(
           tempFile.path,
         );
     if (!downloaded) {
@@ -1126,8 +1131,12 @@ final class _FilesSectionState extends State<_FilesSection> {
         controller,
         saver,
         entry,
-        downloadTo: (path) =>
-            controller.downloadFileVersion(entry, version, path),
+        downloadTo: (path) => controller.downloadFileVersion(
+          entry,
+          version,
+          path,
+          retryable: false,
+        ),
       );
       return;
     }
@@ -1409,6 +1418,8 @@ final class _FilesSectionState extends State<_FilesSection> {
         entries,
         directory: directory,
         zipPath: zipPath,
+        // Android saves a temporary ZIP through the system dialog.
+        retryable: widget.androidFileSaver == null,
       ),
       errorMessage: () => controller.errorMessage,
       androidFileSaver: widget.androidFileSaver,

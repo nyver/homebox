@@ -46,7 +46,10 @@ class _SettingsSection extends StatelessWidget {
             ru: 'Устройства и шифрование',
           ),
         ),
-        _DeviceIdentityCard(controller: deviceSetupController),
+        _DeviceIdentityCard(
+          controller: deviceSetupController,
+          serverConnectionController: serverConnectionController,
+        ),
         _DeviceProvisioningCard(
           controller: deviceProvisioningController,
           deviceSetupController: deviceSetupController,
@@ -395,6 +398,51 @@ final class _DeviceProvisioningCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 _FingerprintText(targetFingerprint),
+                if (_canScanQr) ...[
+                  const SizedBox(height: 8),
+                  TextButton.icon(
+                    onPressed: () async {
+                      final raw = await _scanQrCode(context);
+                      if (raw == null || !context.mounted) return;
+                      final record = DevicePairingRecord.tryParse(raw);
+                      final matches =
+                          record != null &&
+                          record.matches(
+                            deviceId: target.id,
+                            devicePublicKey: target.publicKey,
+                          );
+                      if (matches) {
+                        setDialogState(() => fingerprintVerified = true);
+                        return;
+                      }
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            record == null
+                                ? _localized(
+                                    context,
+                                    en: 'That is not a HomeBox device QR code.',
+                                    ru: 'Это не QR-код устройства HomeBox.',
+                                  )
+                                : _localized(
+                                    context,
+                                    en: 'The scanned code belongs to a different device or key. Do not approve this device.',
+                                    ru: 'Отсканированный код относится к другому устройству или ключу. Не подтверждайте это устройство.',
+                                  ),
+                          ),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.qr_code_scanner),
+                    label: Text(
+                      _localized(
+                        context,
+                        en: 'Scan the QR code on ${target.name}',
+                        ru: 'Отсканировать QR-код на ${target.name}',
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 CheckboxListTile(
                   contentPadding: EdgeInsets.zero,
@@ -959,9 +1007,13 @@ final class _AutostartCardState extends State<_AutostartCard> {
 }
 
 final class _DeviceIdentityCard extends StatelessWidget {
-  const _DeviceIdentityCard({required this.controller});
+  const _DeviceIdentityCard({
+    required this.controller,
+    required this.serverConnectionController,
+  });
 
   final DeviceSetupController controller;
+  final ServerConnectionController serverConnectionController;
 
   Future<void> _confirmPreparation(BuildContext context) async {
     final confirmed = await showDialog<bool>(
@@ -1020,7 +1072,7 @@ final class _DeviceIdentityCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: controller,
+    animation: Listenable.merge([controller, serverConnectionController]),
     builder: (context, _) {
       final fingerprint = controller.publicKeyFingerprint;
       final subtitle = switch (controller.status) {
@@ -1063,16 +1115,35 @@ final class _DeviceIdentityCard extends StatelessWidget {
             _localized(context, en: 'Prepare device', ru: 'Подготовить'),
           ),
         ),
-        DeviceSetupStatus.ready => IconButton(
-          tooltip: _localized(
-            context,
-            en: 'Copy public-key fingerprint',
-            ru: 'Скопировать отпечаток',
-          ),
-          onPressed: fingerprint == null
-              ? null
-              : () => _copyFingerprint(context, fingerprint),
-          icon: const Icon(Icons.copy_outlined),
+        DeviceSetupStatus.ready => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (serverConnectionController.session != null)
+              IconButton(
+                tooltip: _localized(
+                  context,
+                  en: 'Show pairing QR code',
+                  ru: 'Показать QR-код для привязки',
+                ),
+                onPressed: () => _showDevicePairingQr(
+                  context,
+                  deviceSetup: controller,
+                  server: serverConnectionController,
+                ),
+                icon: const Icon(Icons.qr_code_2),
+              ),
+            IconButton(
+              tooltip: _localized(
+                context,
+                en: 'Copy public-key fingerprint',
+                ru: 'Скопировать отпечаток',
+              ),
+              onPressed: fingerprint == null
+                  ? null
+                  : () => _copyFingerprint(context, fingerprint),
+              icon: const Icon(Icons.copy_outlined),
+            ),
+          ],
         ),
         DeviceSetupStatus.failed => TextButton(
           onPressed: controller.initialize,

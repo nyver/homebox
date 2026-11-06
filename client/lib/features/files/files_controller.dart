@@ -61,7 +61,16 @@ enum FileSyncState {
 /// How the Files page lays out the open folder.
 enum FileViewMode { list, grid }
 
-enum TransferState { queued, running, succeeded, failed }
+enum TransferState { queued, running, succeeded, failed, cancelled }
+
+/// Thrown from a transfer's progress callback once the user cancelled it,
+/// which unwinds the upload or download through its normal cleanup.
+final class TransferCancelledException implements Exception {
+  const TransferCancelledException();
+
+  @override
+  String toString() => UserText.of(en: 'Cancelled.', ru: 'Отменено.');
+}
 
 /// One upload or download as shown in the Transfers panel.
 final class TransferRecord {
@@ -76,6 +85,11 @@ final class TransferRecord {
   TransferState _state = TransferState.queued;
   String? _error;
   DateTime? _finishedAt;
+  bool _cancelRequested = false;
+
+  /// Runs the same transfer again; null when it cannot be repeated (for
+  /// example a download into a temporary file for sharing).
+  Future<void> Function()? _retry;
 
   TransferState get state => _state;
 
@@ -83,7 +97,16 @@ final class TransferRecord {
   String? get error => _error;
   DateTime? get finishedAt => _finishedAt;
   bool get finished =>
-      _state == TransferState.succeeded || _state == TransferState.failed;
+      _state == TransferState.succeeded ||
+      _state == TransferState.failed ||
+      _state == TransferState.cancelled;
+
+  /// Whether Cancel still applies (queued or running, not yet cancelled).
+  bool get cancellable => !finished && !_cancelRequested;
+
+  bool get canRetry =>
+      _retry != null &&
+      (_state == TransferState.failed || _state == TransferState.cancelled);
 }
 
 /// The picker and desktop file APIs only provide a path, so preserve the
@@ -998,7 +1021,17 @@ final class FilesController extends ChangeNotifier {
   Future<FileUploadBatchResult> uploadFiles(
     List<String> localPaths, {
     Map<String, String> fileNames = const {},
-  }) async {
+  }) =>
+      // Captured before waiting in the queue. A user may navigate while
+      // earlier transfers or a large drop are uploading, but that must not
+      // move these files elsewhere.
+      _uploadInto(localPaths, _currentParentId, fileNames);
+
+  Future<FileUploadBatchResult> _uploadInto(
+    List<String> localPaths,
+    String? targetParentId,
+    Map<String, String> fileNames,
+  ) async {
     final uniquePaths = <String>[];
     final seen = <String>{};
     for (final path in localPaths) {
@@ -1007,10 +1040,6 @@ final class FilesController extends ChangeNotifier {
     if (uniquePaths.isEmpty) {
       return const FileUploadBatchResult(succeeded: 0, failed: 0);
     }
-    // Capture this before waiting in the queue. A user may navigate while
-    // earlier transfers or a large drop are uploading, but that must not
-    // move these files elsewhere.
-    final targetParentId = _currentParentId;
     final first = uniquePaths.first;
     return _runTransfer(
       FileTransferDirection.upload,
@@ -1022,6 +1051,17 @@ final class FilesController extends ChangeNotifier {
           ? fileNames[first] ?? basenameOfLocalPath(first)
           : _countLabel(uniquePaths.length, files: true),
       succeeded: (result) => result.failed == 0,
+      whenCancelled: () =>
+          FileUploadBatchResult(succeeded: 0, failed: uniquePaths.length),
+      // Only what did not make it, into the same folder as before.
+      retry: (result) {
+        final done = result.successfulPaths.toSet();
+        final remaining = [
+          for (final path in uniquePaths)
+            if (!done.contains(path)) path,
+        ];
+        return () => _uploadInto(remaining, targetParentId, fileNames);
+      },
     );
   }
 
@@ -1039,6 +1079,12 @@ final class FilesController extends ChangeNotifier {
     }
     try {
       for (var index = 0; index < uniquePaths.length; index++) {
+        if (_activeTransferCancelled) {
+          // The rest of a cancelled batch is not started.
+          failed += uniquePaths.length - index;
+          _errorMessage = const TransferCancelledException().toString();
+          break;
+        }
         try {
           await _uploadFileToParent(
             localPath: uniquePaths[index],
@@ -1113,6 +1159,8 @@ final class FilesController extends ChangeNotifier {
     Future<T> Function() body, {
     required String label,
     required bool Function(T result) succeeded,
+    required T Function() whenCancelled,
+    Future<void> Function()? Function(T result)? retry,
   }) async {
     final record = TransferRecord._(_nextTransferId++, label, direction);
     _transfers.add(record);
@@ -1126,23 +1174,71 @@ final class FilesController extends ChangeNotifier {
     } finally {
       _queuedTransfers--;
     }
+    if (record._cancelRequested) {
+      // Cancelled while queued: nothing was started.
+      _errorMessage = const TransferCancelledException().toString();
+      final result = whenCancelled();
+      record._retry = retry?.call(result);
+      _finishTransfer(record, TransferState.cancelled);
+      if (!_disposed) notifyListeners();
+      done.complete();
+      return result;
+    }
     record._state = TransferState.running;
+    _activeTransfer = record;
     _setBusy(true, direction: direction);
     var ok = false;
     try {
       final result = await body();
       ok = succeeded(result);
+      if (!ok) record._retry = retry?.call(result);
       return result;
     } finally {
-      record
-        .._state = ok ? TransferState.succeeded : TransferState.failed
-        .._error = ok ? null : _errorMessage
-        .._finishedAt = DateTime.now().toUtc();
-      _trimFinishedTransfers();
+      _activeTransfer = null;
+      _finishTransfer(
+        record,
+        ok
+            ? TransferState.succeeded
+            : record._cancelRequested
+            ? TransferState.cancelled
+            : TransferState.failed,
+      );
       _setBusy(false);
       done.complete();
     }
   }
+
+  void _finishTransfer(TransferRecord record, TransferState state) {
+    record
+      .._state = state
+      .._error = state == TransferState.failed ? _errorMessage : null
+      .._finishedAt = DateTime.now().toUtc();
+    _trimFinishedTransfers();
+  }
+
+  /// The transfer currently running, whose cancellation [_setProgress]
+  /// enforces.
+  TransferRecord? _activeTransfer;
+
+  /// Stops [record]: a queued one never starts, a running one stops at its
+  /// next progress step (within one 4 MiB chunk) and cleans up after itself.
+  void cancelTransfer(TransferRecord record) {
+    if (!record.cancellable) return;
+    record._cancelRequested = true;
+    if (!_disposed) notifyListeners();
+  }
+
+  /// Starts [record] again as a new transfer; the old entry is replaced.
+  Future<void> retryTransfer(TransferRecord record) async {
+    final retry = record._retry;
+    if (retry == null || !record.canRetry) return;
+    _transfers.remove(record);
+    if (!_disposed) notifyListeners();
+    await retry();
+  }
+
+  bool get _activeTransferCancelled =>
+      _activeTransfer?._cancelRequested ?? false;
 
   void _trimFinishedTransfers() {
     var finished = _transfers.where((record) => record.finished).length;
@@ -1221,19 +1317,48 @@ final class FilesController extends ChangeNotifier {
     );
     _upsertFromServer(createdNode);
 
-    final updatedNode = await uploadFilePathVersion(
-      api: ctx.api,
-      accessToken: ctx.accessToken,
-      key: key,
-      targetNodeId: nodeId,
-      expectedRevision: createdNode.revision,
-      file: file,
-      plaintextLength: plaintextLength,
-      expectedPlaintextSha256: plaintextHash,
-      metadataCiphertext: metadataCiphertext,
-      onProgress: onProgress,
-    );
+    final transport.NodeInfo updatedNode;
+    try {
+      updatedNode = await uploadFilePathVersion(
+        api: ctx.api,
+        accessToken: ctx.accessToken,
+        key: key,
+        targetNodeId: nodeId,
+        expectedRevision: createdNode.revision,
+        file: file,
+        plaintextLength: plaintextLength,
+        expectedPlaintextSha256: plaintextHash,
+        metadataCiphertext: metadataCiphertext,
+        onProgress: onProgress,
+      );
+    } on TransferCancelledException {
+      // The user stopped it: remove the node created for it, so no empty
+      // file is left behind (in the folder or in Trash).
+      await _discardNewNode(ctx, createdNode);
+      rethrow;
+    }
     _upsertFromServer(updatedNode);
+  }
+
+  /// Best-effort removal of a just-created node whose content was never
+  /// uploaded. If the server cannot be reached, the empty node stays and
+  /// can be deleted by hand like any other item.
+  Future<void> _discardNewNode(
+    _UploadContext ctx,
+    transport.NodeInfo node,
+  ) async {
+    try {
+      await ctx.api.deleteNode(
+        ctx.accessToken,
+        node.id,
+        operationId: generateUuidV4(),
+        expectedRevision: node.revision,
+      );
+      await ctx.api.purgeTrashEntry(ctx.accessToken, node.id);
+      _forgetSubtree(node.id);
+    } catch (_) {
+      // See the doc comment.
+    }
   }
 
   /// Uploads [localPath] as a new version of an already-existing file
@@ -1255,6 +1380,9 @@ final class FilesController extends ChangeNotifier {
       () => _replaceFileContent(entry, localPath),
       label: entry.name,
       succeeded: (ok) => ok,
+      whenCancelled: () => false,
+      retry: (_) =>
+          () => replaceFileContent(entry, localPath),
     );
   }
 
@@ -1331,13 +1459,24 @@ final class FilesController extends ChangeNotifier {
   /// each (any authentication failure aborts before anything is written),
   /// and verifies the plaintext SHA-256 recorded in the encrypted metadata
   /// before the file is saved.
-  Future<bool> downloadFile(FileEntry entry, String destinationPath) =>
-      _runTransfer(
-        FileTransferDirection.download,
-        () => _downloadFile(entry, destinationPath),
-        label: entry.name,
-        succeeded: (ok) => ok,
-      );
+  ///
+  /// [retryable] is false for a temporary copy handed to another app, which
+  /// is pointless to repeat from the Transfers panel.
+  Future<bool> downloadFile(
+    FileEntry entry,
+    String destinationPath, {
+    bool retryable = true,
+  }) => _runTransfer(
+    FileTransferDirection.download,
+    () => _downloadFile(entry, destinationPath),
+    label: entry.name,
+    succeeded: (ok) => ok,
+    whenCancelled: () => false,
+    retry: retryable
+        ? (_) =>
+              () => downloadFile(entry, destinationPath)
+        : null,
+  );
 
   Future<bool> _downloadFile(FileEntry entry, String destinationPath) async {
     _UploadContext? ctx;
@@ -1556,8 +1695,9 @@ final class FilesController extends ChangeNotifier {
   Future<bool> downloadFileVersion(
     FileEntry entry,
     FileVersionEntry version,
-    String destinationPath,
-  ) => _runTransfer(
+    String destinationPath, {
+    bool retryable = true,
+  }) => _runTransfer(
     FileTransferDirection.download,
     () async {
       try {
@@ -1572,6 +1712,11 @@ final class FilesController extends ChangeNotifier {
     },
     label: entry.name,
     succeeded: (ok) => ok,
+    whenCancelled: () => false,
+    retry: retryable
+        ? (_) =>
+              () => downloadFileVersion(entry, version, destinationPath)
+        : null,
   );
 
   /// Makes [version] the current content of [entry] again by uploading its
@@ -1583,6 +1728,9 @@ final class FilesController extends ChangeNotifier {
       FileTransferDirection.upload,
       label: entry.name,
       succeeded: (ok) => ok,
+      whenCancelled: () => false,
+      retry: (_) =>
+          () => restoreFileVersion(entry, version),
       () async {
         Directory? workDirectory;
         try {
@@ -2151,6 +2299,7 @@ final class FilesController extends ChangeNotifier {
     List<FileEntry> entries, {
     String? directory,
     String? zipPath,
+    bool retryable = true,
   }) {
     assert((directory == null) != (zipPath == null));
     return _runTransfer(
@@ -2158,6 +2307,15 @@ final class FilesController extends ChangeNotifier {
       label: entries.length == 1
           ? entries.single.name
           : _countLabel(entries.length, files: false),
+      whenCancelled: () => null,
+      retry: retryable
+          ? (_) =>
+                () => downloadEntries(
+                  entries,
+                  directory: directory,
+                  zipPath: zipPath,
+                )
+          : null,
       succeeded: (written) => written != null,
       () async {
         final ctx = await _requireContext();
@@ -2387,7 +2545,10 @@ final class FilesController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  /// Every transfer reports progress through here, so this is also where a
+  /// cancelled transfer is stopped (see [cancelTransfer]).
   void _setProgress(double value) {
+    if (_activeTransferCancelled) throw const TransferCancelledException();
     _progress = value;
     if (!_disposed) notifyListeners();
   }

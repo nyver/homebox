@@ -12,10 +12,14 @@ final class DeviceSetupController extends ChangeNotifier {
 
   DeviceSetupStatus _status = DeviceSetupStatus.checking;
   String? _publicKeyFingerprint;
+  Uint8List? _publicKey;
   bool _disposed = false;
 
   DeviceSetupStatus get status => _status;
   String? get publicKeyFingerprint => _publicKeyFingerprint;
+
+  /// This device's X25519 public key (not secret), for the pairing QR code.
+  Uint8List? get publicKey => _publicKey;
 
   Future<void> initialize() async {
     if (_status == DeviceSetupStatus.creating) return;
@@ -25,15 +29,18 @@ final class DeviceSetupController extends ChangeNotifier {
       identity = await _identityStore.load();
       if (identity == null) {
         _publicKeyFingerprint = null;
+        _publicKey = null;
         _setStatus(DeviceSetupStatus.missing);
         return;
       }
       _publicKeyFingerprint = await devicePublicKeyFingerprint(
         identity.publicKey.bytes,
       );
+      _publicKey = Uint8List.fromList(identity.publicKey.bytes);
       _setStatus(DeviceSetupStatus.ready);
     } on Exception {
       _publicKeyFingerprint = null;
+      _publicKey = null;
       _setStatus(DeviceSetupStatus.failed);
     } finally {
       identity?.destroy();
@@ -53,9 +60,11 @@ final class DeviceSetupController extends ChangeNotifier {
       _publicKeyFingerprint = await devicePublicKeyFingerprint(
         identity.publicKey.bytes,
       );
+      _publicKey = Uint8List.fromList(identity.publicKey.bytes);
       _setStatus(DeviceSetupStatus.ready);
     } on Exception {
       _publicKeyFingerprint = null;
+      _publicKey = null;
       _setStatus(DeviceSetupStatus.failed);
     } finally {
       identity?.destroy();

@@ -6,11 +6,13 @@ final class _FamilySection extends StatefulWidget {
   const _FamilySection({
     required this.controller,
     required this.androidFileSaver,
+    required this.androidFileSharer,
     required this.onOpenSettings,
   });
 
   final FamilyVaultController? controller;
   final AndroidFileSaver? androidFileSaver;
+  final AndroidFileSharer? androidFileSharer;
 
   /// Shows Settings, where the server connection and vault are set up.
   final VoidCallback onOpenSettings;
@@ -135,7 +137,10 @@ final class _FamilySectionState extends State<_FamilySection> {
                   message: controller.noticeMessage!,
                   onDismiss: controller.clearMessages,
                 ),
-              _IdentityCard(controller: controller),
+              _IdentityCard(
+                controller: controller,
+                androidFileSharer: widget.androidFileSharer,
+              ),
               const SizedBox(height: 24),
               _SectionHeading(
                 _localized(context, en: 'Shared with me', ru: 'Доступно мне'),
@@ -224,9 +229,12 @@ final class _FamilyBanner extends StatelessWidget {
 /// This account's ID (what a family member enters to share with it) and
 /// identity fingerprint (what both sides compare out of band).
 final class _IdentityCard extends StatelessWidget {
-  const _IdentityCard({required this.controller});
+  const _IdentityCard({required this.controller, this.androidFileSharer});
 
   final FamilyVaultController controller;
+
+  /// Shares the account ID as text on Android; null elsewhere.
+  final AndroidFileSharer? androidFileSharer;
 
   @override
   Widget build(BuildContext context) {
@@ -273,11 +281,106 @@ final class _IdentityCard extends StatelessWidget {
               value: fingerprint,
               fingerprint: true,
             ),
+            if (accountId != null && fingerprint != null) ...[
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () => _showQrCodeDialog(
+                      context,
+                      title: _localized(
+                        context,
+                        en: 'Your family QR code',
+                        ru: 'Ваш семейный QR-код',
+                      ),
+                      explanation: _localized(
+                        context,
+                        en: 'When a family member shares a folder with you, let them scan this code in HomeBox. It fills in your account ID and checks the fingerprint for both of you.',
+                        ru: 'Когда член семьи будет делиться с вами папкой, дайте ему отсканировать этот код в HomeBox. Код подставит ваш ID и проверит отпечаток.',
+                      ),
+                      payload: FamilyInvite(
+                        accountId: accountId,
+                        fingerprint: fingerprint,
+                      ).encode(),
+                      caption: _FingerprintText(fingerprint),
+                    ),
+                    icon: const Icon(Icons.qr_code_2),
+                    label: Text(
+                      _localized(
+                        context,
+                        en: 'Show QR code',
+                        ru: 'Показать QR-код',
+                      ),
+                    ),
+                  ),
+                  if (androidFileSharer != null)
+                    OutlinedButton.icon(
+                      onPressed: () => unawaited(
+                        androidFileSharer!.shareText(
+                          _localized(
+                            context,
+                            en: 'My HomeBox account ID: $accountId',
+                            ru: 'Мой ID аккаунта HomeBox: $accountId',
+                          ),
+                          subject: _localized(
+                            context,
+                            en: 'HomeBox account ID',
+                            ru: 'ID аккаунта HomeBox',
+                          ),
+                        ),
+                      ),
+                      icon: const Icon(Icons.share_outlined),
+                      label: Text(
+                        _localized(
+                          context,
+                          en: 'Share ID',
+                          ru: 'Поделиться ID',
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
     );
   }
+}
+
+/// Scans a family member's QR code and tells whether it carries
+/// [fingerprint]. Shows why when it does not.
+Future<bool> _scanAndMatchFamilyFingerprint(
+  BuildContext context,
+  String fingerprint,
+) async {
+  final raw = await _scanQrCode(context);
+  if (raw == null || !context.mounted) return false;
+  final invite = FamilyInvite.tryParse(raw);
+  final matches =
+      invite != null && fingerprintsMatch(invite.fingerprint, fingerprint);
+  if (!matches) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          invite == null
+              ? _localized(
+                  context,
+                  en: 'That is not a HomeBox family QR code.',
+                  ru: 'Это не семейный QR-код HomeBox.',
+                )
+              : _localized(
+                  context,
+                  en: 'The scanned fingerprint does not match. Do not trust this account until the fingerprints match.',
+                  ru: 'Отсканированный отпечаток не совпадает. Не доверяйте этому аккаунту, пока отпечатки не совпадут.',
+                ),
+        ),
+      ),
+    );
+  }
+  return matches;
 }
 
 final class _CopyableValue extends StatelessWidget {
@@ -605,6 +708,28 @@ Future<bool> _confirmFingerprint(
             Text(explanation),
             const SizedBox(height: 12),
             _FingerprintText(fingerprint),
+            if (_canScanQr) ...[
+              const SizedBox(height: 8),
+              TextButton.icon(
+                onPressed: () async {
+                  if (await _scanAndMatchFamilyFingerprint(
+                        context,
+                        fingerprint,
+                      ) &&
+                      context.mounted) {
+                    Navigator.pop(context, true);
+                  }
+                },
+                icon: const Icon(Icons.qr_code_scanner),
+                label: Text(
+                  _localized(
+                    context,
+                    en: 'Scan their QR code instead',
+                    ru: 'Отсканировать их QR-код',
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             CheckboxListTile(
               contentPadding: EdgeInsets.zero,
@@ -651,6 +776,9 @@ Future<void> _showShareFolderDialog(
   RecipientCandidate? candidate;
   var compared = false;
   var looking = false;
+  // From a scanned family QR code: checked against what the server returns.
+  String? scannedFingerprint;
+  var verifiedByQr = false;
   await showDialog<void>(
     context: context,
     builder: (dialogContext) => AnimatedBuilder(
@@ -668,7 +796,53 @@ Future<void> _showShareFolderDialog(
               looking = false;
               candidate = found;
               compared = found?.alreadyTrusted ?? false;
+              final scanned = scannedFingerprint;
+              verifiedByQr =
+                  found != null &&
+                  scanned != null &&
+                  fingerprintsMatch(scanned, found.fingerprint);
+              if (verifiedByQr) compared = true;
             });
+            final scanned = scannedFingerprint;
+            if (found != null &&
+                scanned != null &&
+                !verifiedByQr &&
+                context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    _localized(
+                      context,
+                      en: 'The scanned fingerprint does not match this account. Do not share until the fingerprints match.',
+                      ru: 'Отсканированный отпечаток не совпадает с этим аккаунтом. Не делитесь, пока отпечатки не совпадут.',
+                    ),
+                  ),
+                ),
+              );
+            }
+          }
+
+          Future<void> scan() async {
+            final raw = await _scanQrCode(context);
+            if (raw == null || !context.mounted) return;
+            final invite = FamilyInvite.tryParse(raw);
+            if (invite == null) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    _localized(
+                      context,
+                      en: 'That is not a HomeBox family QR code.',
+                      ru: 'Это не семейный QR-код HomeBox.',
+                    ),
+                  ),
+                ),
+              );
+              return;
+            }
+            accountController.text = invite.accountId;
+            scannedFingerprint = invite.fingerprint;
+            await find();
           }
 
           Future<void> share() async {
@@ -761,8 +935,25 @@ Future<void> _showShareFolderDialog(
                           ru: 'Он указан в разделе «Семья → Ваш семейный идентификатор».',
                         ),
                       ),
+                      // A typed ID no longer comes from the scanned code.
+                      onChanged: (_) => scannedFingerprint = null,
                       onSubmitted: (_) => find(),
                     ),
+                    if (_canScanQr && candidate == null)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: working ? null : () => unawaited(scan()),
+                          icon: const Icon(Icons.qr_code_scanner),
+                          label: Text(
+                            _localized(
+                              context,
+                              en: 'Scan their QR code',
+                              ru: 'Отсканировать их QR-код',
+                            ),
+                          ),
+                        ),
+                      ),
                     const SizedBox(height: 12),
                     SegmentedButton<String>(
                       segments: [
@@ -807,6 +998,29 @@ Future<void> _showShareFolderDialog(
                       ),
                       const SizedBox(height: 8),
                       _FingerprintText(candidate!.fingerprint),
+                      if (verifiedByQr)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.verified_outlined,
+                                size: 18,
+                                color: _successColor(context),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  _localized(
+                                    context,
+                                    en: 'Verified by the scanned QR code.',
+                                    ru: 'Проверено по отсканированному QR-коду.',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       CheckboxListTile(
                         contentPadding: EdgeInsets.zero,
                         value: compared,

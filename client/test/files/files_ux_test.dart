@@ -208,4 +208,43 @@ void main() {
     files.clearFinishedTransfers();
     expect(files.transfers, isEmpty);
   });
+
+  test('a queued transfer can be cancelled and retried later', () async {
+    final (_, files) = await _setUp();
+    final first = files.uploadFile(await _localFile('first.txt'));
+    final second = files.uploadFile(await _localFile('second.txt'));
+    final queued = files.transfers.first;
+    expect(queued.label, 'second.txt');
+    expect(queued.state, TransferState.queued);
+
+    files.cancelTransfer(queued);
+    expect(await first, isTrue);
+    expect(await second, isFalse);
+    expect(queued.state, TransferState.cancelled);
+    expect(_names(files.entries), ['first.txt']);
+
+    expect(queued.canRetry, isTrue);
+    await files.retryTransfer(queued);
+    expect(_names(files.entries)..sort(), ['first.txt', 'second.txt']);
+    expect(files.transfers.first.state, TransferState.succeeded);
+    expect(files.transfers, isNot(contains(queued)));
+  });
+
+  test('a cancelled upload leaves no empty file behind', () async {
+    final (engine, files) = await _setUp();
+    final upload = files.uploadFile(await _localFile('big.bin'));
+    final record = files.transfers.first;
+    while (record.state != TransferState.running) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    files.cancelTransfer(record);
+
+    expect(await upload, isFalse);
+    expect(record.state, TransferState.cancelled);
+    expect(record.error, isNull);
+    await engine.runOnce();
+    await files.refresh();
+    expect(files.entries, isEmpty);
+    expect(await files.trashEntries(), isEmpty);
+  });
 }

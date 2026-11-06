@@ -26,6 +26,10 @@ abstract interface class AndroidFileSharer {
     required String suggestedName,
     String? mimeType,
   });
+
+  /// Opens the Android share sheet for plain [text], such as an account ID
+  /// to send to a family member.
+  Future<void> shareText(String text, {String? subject});
 }
 
 final class MethodChannelAndroidFileSharer implements AndroidFileSharer {
@@ -57,4 +61,8 @@ final class MethodChannelAndroidFileSharer implements AndroidFileSharer {
         'mimeType': mimeType ?? 'application/octet-stream',
       }) ??
       false;
+
+  @override
+  Future<void> shareText(String text, {String? subject}) => _channel
+      .invokeMethod<void>('shareText', {'text': text, 'subject': ?subject});
 }

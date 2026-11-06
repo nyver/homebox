@@ -532,9 +532,17 @@ final class _TransferTile extends StatelessWidget {
         const Icon(Icons.schedule),
         _localized(context, en: 'Waiting', ru: 'В очереди'),
       ),
+      TransferState.running when !record.cancellable => (
+        Icon(upload ? Icons.arrow_upward : Icons.arrow_downward),
+        _localized(context, en: 'Cancelling…', ru: 'Отмена…'),
+      ),
       TransferState.running => (
         Icon(upload ? Icons.arrow_upward : Icons.arrow_downward),
         '${_transferProgressPercent(controller)}%',
+      ),
+      TransferState.cancelled => (
+        Icon(Icons.cancel_outlined, color: scheme.onSurfaceVariant),
+        _localized(context, en: 'Cancelled', ru: 'Отменено'),
       ),
       TransferState.succeeded => (
         Icon(Icons.check_circle_outline, color: _successColor(context)),
@@ -568,6 +576,19 @@ final class _TransferTile extends StatelessWidget {
           ],
         ],
       ),
+      trailing: record.cancellable
+          ? IconButton(
+              onPressed: () => controller.cancelTransfer(record),
+              icon: const Icon(Icons.close),
+              tooltip: _localized(context, en: 'Cancel', ru: 'Отменить'),
+            )
+          : record.canRetry
+          ? IconButton(
+              onPressed: () => unawaited(controller.retryTransfer(record)),
+              icon: const Icon(Icons.refresh),
+              tooltip: _localized(context, en: 'Retry', ru: 'Повторить'),
+            )
+          : null,
     );
   }
 }
@@ -736,6 +757,7 @@ class _SectionContent extends StatelessWidget {
     AppSection.family => _FamilySection(
       controller: familyVaultController,
       androidFileSaver: androidFileSaver,
+      androidFileSharer: androidFileSharer,
       onOpenSettings: onOpenSettings,
     ),
     AppSection.sync => _SyncSection(

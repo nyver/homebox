@@ -86,6 +86,28 @@ class MainActivity : FlutterFragmentActivity() {
             }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, fileShareChannel)
             .setMethodCallHandler { call, result ->
+                if (call.method == "shareText") {
+                    // Plain text only (e.g. an account ID); no file access is granted.
+                    val text = call.argument<String>("text")
+                    if (text.isNullOrEmpty()) {
+                        result.error("invalid_arguments", "text is required.", null)
+                        return@setMethodCallHandler
+                    }
+                    try {
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, text)
+                            call.argument<String>("subject")?.let {
+                                putExtra(Intent.EXTRA_SUBJECT, it)
+                            }
+                        }
+                        startActivity(Intent.createChooser(shareIntent, null))
+                        result.success(null)
+                    } catch (e: Exception) {
+                        result.error("share_failed", e.message, null)
+                    }
+                    return@setMethodCallHandler
+                }
                 if (call.method != "shareFile" && call.method != "openFile") {
                     result.notImplemented()
                     return@setMethodCallHandler
