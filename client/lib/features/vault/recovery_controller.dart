@@ -10,6 +10,7 @@ import '../../core/e2ee/vault_key_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/util/user_facing_error.dart';
 import '../server/server_connection_controller.dart';
+import '../../core/localization/user_text.dart';
 
 enum RecoveryBackupStatus {
   /// Not signed in, or this device has no unlocked vault yet.
@@ -115,7 +116,12 @@ final class RecoveryController extends ChangeNotifier {
       final api = _serverConnection.api;
       final session = await _serverConnection.ensureFreshSession();
       if (api == null || session == null) {
-        throw StateError('Sign in before creating a Recovery Secret.');
+        throw StateError(
+          UserText.of(
+            en: 'Sign in before creating a Recovery Secret.',
+            ru: 'Войдите, прежде чем создавать Recovery Secret.',
+          ),
+        );
       }
       prepared = await _vaultKeyStore.prepareNewRecoverySecret(
         userId: session.user.id,
@@ -150,20 +156,34 @@ final class RecoveryController extends ChangeNotifier {
       final api = _serverConnection.api;
       final session = await _serverConnection.ensureFreshSession();
       if (api == null || session == null) {
-        throw StateError('Sign in to the account you want to recover first.');
+        throw StateError(
+          UserText.of(
+            en: 'Sign in to the account you want to recover first.',
+            ru: 'Сначала войдите в аккаунт, который нужно восстановить.',
+          ),
+        );
       }
       try {
         recoverySecret = RecoverySecret.parse(recoverySecretText.trim());
       } on FormatException {
-        throw const FormatException(
-          'This is not a HomeBox Recovery Secret. It starts with HBXR1-.',
+        throw FormatException(
+          UserText.of(
+            en: 'This is not a HomeBox Recovery Secret. It starts with HBXR1-.',
+            ru: 'Это не Recovery Secret HomeBox. Он начинается с HBXR1-.',
+          ),
         );
       }
       final stored = await api.getRecoveryBundle(session.accessToken);
       if (stored == null) {
         throw StateError(
-          'The server has no recovery data for this account. Approve this '
-          'device from another trusted device instead.',
+          UserText.of(
+            en:
+                'The server has no recovery data for this account. Approve this '
+                'device from another trusted device instead.',
+            ru:
+                'На сервере нет данных для восстановления этого аккаунта. '
+                'Подтвердите устройство с другого доверенного устройства.',
+          ),
         );
       }
       try {
@@ -174,8 +194,12 @@ final class RecoveryController extends ChangeNotifier {
         );
       } on SecretBoxAuthenticationError {
         throw StateError(
-          'This Recovery Secret does not belong to this account, or it was '
-          'replaced by a newer one.',
+          UserText.of(
+            en:
+                'This Recovery Secret does not belong to this account, or it was '
+                'replaced by a newer one.',
+            ru: 'Этот Recovery Secret не относится к аккаунту или был заменён более новым.',
+          ),
         );
       }
       _updatedAt = stored.updatedAt;
@@ -199,7 +223,12 @@ final class RecoveryController extends ChangeNotifier {
   ) async {
     final vaultKey = await _vaultKeyStore.loadVaultKey();
     if (vaultKey == null) {
-      throw StateError('This device does not have an unlocked vault key.');
+      throw StateError(
+        UserText.of(
+          en: 'This device does not have an unlocked vault key.',
+          ru: 'На этом устройстве нет разблокированного ключа хранилища.',
+        ),
+      );
     }
     AccountIdentity? identity;
     try {

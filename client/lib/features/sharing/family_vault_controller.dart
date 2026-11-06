@@ -20,6 +20,7 @@ import '../sync/sync_engine.dart';
 import 'key_scopes.dart';
 import 'shared_folder_browser.dart';
 import 'shared_scope_reconciler.dart';
+import '../../core/localization/user_text.dart';
 
 /// How far an incoming share is from being usable on this device.
 enum IncomingShareState {
@@ -223,14 +224,24 @@ final class FamilyVaultController extends ChangeNotifier {
     if (!RegExp(
       r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     ).hasMatch(trimmed)) {
-      _fail('Enter the account ID the family member copied from HomeBox.');
+      _fail(
+        UserText.of(
+          en: 'Enter the account ID the family member copied from HomeBox.',
+          ru: 'Введите ID аккаунта, который член семьи скопировал в HomeBox.',
+        ),
+      );
       return null;
     }
     final ctx = await _context();
     if (ctx == null) return null;
     try {
       if (trimmed == ctx.userId) {
-        _fail('A folder cannot be shared with your own account.');
+        _fail(
+          UserText.of(
+            en: 'A folder cannot be shared with your own account.',
+            ru: 'Нельзя поделиться папкой с собственным аккаунтом.',
+          ),
+        );
         return null;
       }
       final devices = await ctx.api.listShareableDevices(
@@ -240,23 +251,40 @@ final class FamilyVaultController extends ChangeNotifier {
       final identity = _commonIdentity(devices);
       if (identity == null) {
         _fail(
-          'This account has no approved device with a verifiable key yet. '
-          'Ask the family member to open HomeBox and finish setting up '
-          'their vault first.',
+          UserText.of(
+            en:
+                'This account has no approved device with a verifiable key yet. '
+                'Ask the family member to open HomeBox and finish setting up '
+                'their vault first.',
+            ru:
+                'У этого аккаунта пока нет подтверждённого устройства с проверяемым ключом. '
+                'Попросите члена семьи открыть HomeBox и завершить настройку хранилища.',
+          ),
         );
         return null;
       }
       final pinned = _syncEngine.trustedAccounts.identityOf(trimmed);
       if (pinned != null && !_sameBytes(pinned, identity)) {
         _fail(
-          'The identity of this account changed since you verified it. '
-          'Do not share until you have compared the fingerprint again.',
+          UserText.of(
+            en:
+                'The identity of this account changed since you verified it. '
+                'Do not share until you have compared the fingerprint again.',
+            ru:
+                'Ключ этого аккаунта изменился с момента проверки. '
+                'Не делитесь папкой, пока снова не сверите отпечаток.',
+          ),
         );
         return null;
       }
       final verified = await _certifiedDevices(trimmed, identity, devices);
       if (verified.isEmpty) {
-        _fail('None of this account\'s devices has a valid certificate.');
+        _fail(
+          UserText.of(
+            en: 'None of this account\'s devices has a valid certificate.',
+            ru: 'Ни у одного устройства этого аккаунта нет действительного сертификата.',
+          ),
+        );
         return null;
       }
       return RecipientCandidate(
@@ -285,7 +313,12 @@ final class FamilyVaultController extends ChangeNotifier {
   }) async {
     final ctx = await _context();
     if (ctx == null) return false;
-    _setBusy('Preparing the folder for sharing…');
+    _setBusy(
+      UserText.of(
+        en: 'Preparing the folder for sharing…',
+        ru: 'Подготовка папки к совместному доступу…',
+      ),
+    );
     try {
       _syncEngine.trustedAccounts.pin(
         candidate.accountId,
@@ -298,7 +331,12 @@ final class FamilyVaultController extends ChangeNotifier {
       // Bring the local tree up to date first so nothing recently added
       // elsewhere stays encrypted with the personal Vault Key.
       await _syncEngine.runOnce();
-      _setBusy('Encrypting the folder with its own key…');
+      _setBusy(
+        UserText.of(
+          en: 'Encrypting the folder with its own key…',
+          ru: 'Шифрование папки её собственным ключом…',
+        ),
+      );
       final prepared = await _reconciler.reconcile(
         api: ctx.api,
         accessToken: ctx.accessToken,
@@ -310,7 +348,12 @@ final class FamilyVaultController extends ChangeNotifier {
           : '${prepared.skipped} item(s) in this folder could not be '
                 'prepared for sharing yet. HomeBox retries after the next '
                 'sync; until then only you can open them.';
-      _setBusy('Sending the folder key to the family member…');
+      _setBusy(
+        UserText.of(
+          en: 'Sending the folder key to the family member…',
+          ru: 'Передача ключа папки члену семьи…',
+        ),
+      );
       final envelopes = await _envelopesFor(
         ctx,
         folderId: folderId,
@@ -352,7 +395,9 @@ final class FamilyVaultController extends ChangeNotifier {
   Future<bool> revoke(OutgoingShareView view) async {
     final ctx = await _context();
     if (ctx == null) return false;
-    _setBusy('Rotating the folder key…');
+    _setBusy(
+      UserText.of(en: 'Rotating the folder key…', ru: 'Смена ключа папки…'),
+    );
     try {
       final folderId = view.share.nodeId;
       await _refreshFolderKeys(ctx);
@@ -368,13 +413,19 @@ final class FamilyVaultController extends ChangeNotifier {
           unverified.add(share.targetUsername);
         }
       }
-      _setBusy('Removing access…');
+      _setBusy(UserText.of(en: 'Removing access…', ru: 'Закрытие доступа…'));
       await ctx.api.revokeShare(ctx.accessToken, view.share.id);
       await _reloadOutgoing(ctx);
       _noticeMessage = unverified.isEmpty
           ? null
-          : 'Verify ${unverified.join(', ')} on this device to give them the '
-                'new folder key; until then they cannot add or read new content.';
+          : UserText.of(
+              en:
+                  'Verify ${unverified.join(', ')} on this device to give them the '
+                  'new folder key; until then they cannot add or read new content.',
+              ru:
+                  'Проверьте ${unverified.join(', ')} на этом устройстве, чтобы передать '
+                  'новый ключ папки; до этого им недоступно новое содержимое.',
+            );
       _errorMessage = null;
       return true;
     } catch (e) {
@@ -395,7 +446,12 @@ final class FamilyVaultController extends ChangeNotifier {
   }) async {
     final ctx = await _context();
     if (ctx == null) return false;
-    _setBusy('Sending the folder key to new devices…');
+    _setBusy(
+      UserText.of(
+        en: 'Sending the folder key to new devices…',
+        ru: 'Передача ключа папки новым устройствам…',
+      ),
+    );
     try {
       if (candidate != null) {
         _syncEngine.trustedAccounts.pin(
@@ -404,7 +460,12 @@ final class FamilyVaultController extends ChangeNotifier {
         );
       }
       if (!await _deliverMissingKeys(ctx, view.share)) {
-        _fail('Verify this family member first.');
+        _fail(
+          UserText.of(
+            en: 'Verify this family member first.',
+            ru: 'Сначала проверьте этого члена семьи.',
+          ),
+        );
         return false;
       }
       await _reloadOutgoing(ctx);
@@ -438,7 +499,12 @@ final class FamilyVaultController extends ChangeNotifier {
     try {
       final keys = await _openIncomingKeys(ctx.userId, ctx.deviceId, view);
       if (keys == null) {
-        _fail('This shared folder cannot be opened on this device.');
+        _fail(
+          UserText.of(
+            en: 'This shared folder cannot be opened on this device.',
+            ru: 'Эту общую папку нельзя открыть на этом устройстве.',
+          ),
+        );
         return null;
       }
       return SharedFolderBrowser(
@@ -975,7 +1041,12 @@ final class FamilyVaultController extends ChangeNotifier {
     if (api == null || session == null || keys == null) {
       keys?.dispose();
       if (!quiet) {
-        _fail('Connect to a server, sign in, and set up the vault first.');
+        _fail(
+          UserText.of(
+            en: 'Connect to a server, sign in, and set up the vault first.',
+            ru: 'Сначала подключитесь к серверу, войдите и настройте хранилище.',
+          ),
+        );
       }
       return null;
     }

@@ -733,7 +733,16 @@ final class _FilesSectionState extends State<_FilesSection> {
       );
     } else if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(controller.errorMessage ?? 'Download failed.')),
+        SnackBar(
+          content: Text(
+            controller.errorMessage ??
+                _localized(
+                  context,
+                  en: 'Download failed.',
+                  ru: 'Не удалось скачать.',
+                ),
+          ),
+        ),
       );
     }
   }
@@ -746,7 +755,11 @@ final class _FilesSectionState extends State<_FilesSection> {
       final sharedFile = await _prepareTempFileForHandoff(
         context,
         entry,
-        'Could not prepare the file for sharing.',
+        _localized(
+          context,
+          en: 'Could not prepare the file for sharing.',
+          ru: 'Не удалось подготовить файл для отправки.',
+        ),
       );
       if (sharedFile == null) return;
       try {
@@ -762,7 +775,15 @@ final class _FilesSectionState extends State<_FilesSection> {
     } catch (_) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not open the share sheet.')),
+          SnackBar(
+            content: Text(
+              _localized(
+                context,
+                en: 'Could not open the share sheet.',
+                ru: 'Не удалось открыть меню «Поделиться».',
+              ),
+            ),
+          ),
         );
       }
     }
@@ -883,7 +904,11 @@ final class _FilesSectionState extends State<_FilesSection> {
       final tempFile = await _prepareTempFileForHandoff(
         context,
         entry,
-        'Could not open the file.',
+        _localized(
+          context,
+          en: 'Could not open the file.',
+          ru: 'Не удалось открыть файл.',
+        ),
       );
       if (tempFile == null) return;
       try {
@@ -952,7 +977,14 @@ final class _FilesSectionState extends State<_FilesSection> {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(controller.errorMessage ?? 'Download failed.'),
+            content: Text(
+              controller.errorMessage ??
+                  _localized(
+                    context,
+                    en: 'Download failed.',
+                    ru: 'Не удалось скачать.',
+                  ),
+            ),
           ),
         );
       }
@@ -974,8 +1006,14 @@ final class _FilesSectionState extends State<_FilesSection> {
       // out of storage), distinct from a decrypt/download failure above.
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not save to the selected location.'),
+          SnackBar(
+            content: Text(
+              _localized(
+                context,
+                en: 'Could not save to the selected location.',
+                ru: 'Не удалось сохранить в выбранное место.',
+              ),
+            ),
           ),
         );
       }
@@ -994,7 +1032,12 @@ final class _FilesSectionState extends State<_FilesSection> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            controller.errorMessage ?? 'Could not replace the file.',
+            controller.errorMessage ??
+                _localized(
+                  context,
+                  en: 'Could not replace the file.',
+                  ru: 'Не удалось заменить файл.',
+                ),
           ),
         ),
       );
@@ -1063,7 +1106,16 @@ final class _FilesSectionState extends State<_FilesSection> {
       );
     } else if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(controller.errorMessage ?? 'Download failed.')),
+        SnackBar(
+          content: Text(
+            controller.errorMessage ??
+                _localized(
+                  context,
+                  en: 'Download failed.',
+                  ru: 'Не удалось скачать.',
+                ),
+          ),
+        ),
       );
     }
   }
@@ -1615,7 +1667,11 @@ final class _FilesSectionState extends State<_FilesSection> {
     if (controller == null) {
       return _FilesMessageState(
         icon: Icons.cloud_off_outlined,
-        message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+        message: _localized(
+          context,
+          en: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+          ru: 'Подключитесь к серверу, войдите и настройте хранилище в настройках, чтобы увидеть файлы.',
+        ),
         action: FilledButton.icon(
           onPressed: widget.onOpenSettings,
           icon: const Icon(Icons.settings_outlined),
@@ -1647,7 +1703,11 @@ final class _FilesSectionState extends State<_FilesSection> {
           body = scrollableMessage(
             _FilesMessageState(
               icon: Icons.cloud_off_outlined,
-              message: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+              message: _localized(
+                context,
+                en: 'Connect to a server, sign in, and set up the vault in Settings to see your files.',
+                ru: 'Подключитесь к серверу, войдите и настройте хранилище в настройках, чтобы увидеть файлы.',
+              ),
               action: FilledButton.icon(
                 onPressed: widget.onOpenSettings,
                 icon: const Icon(Icons.settings_outlined),

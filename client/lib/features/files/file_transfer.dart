@@ -10,6 +10,7 @@ import '../../core/e2ee/key_ring.dart';
 import '../../core/e2ee/opaque_id.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../../core/transport/network_errors.dart';
+import '../../core/localization/user_text.dart';
 
 const int homeBoxMaxPlaintextFileSize = 500 * 1024 * 1024;
 
@@ -72,7 +73,12 @@ Future<Uint8List> downloadAndDecryptFile({
 
   final versions = await api.listFileVersions(accessToken, nodeId);
   if (versions.isEmpty) {
-    throw StateError('This file has no uploaded content yet.');
+    throw StateError(
+      UserText.of(
+        en: 'This file has no uploaded content yet.',
+        ru: 'У этого файла ещё нет загруженного содержимого.',
+      ),
+    );
   }
   final version = _selectDownloadVersion(versions, expectedVersionId);
   final versionIdBytes = uuidStringToBytes(version.id);
@@ -179,7 +185,12 @@ Future<void> downloadAndDecryptFileToPath({
   final keyEnvelopeCipher = KeyEnvelopeCipher();
   final versions = await api.listFileVersions(accessToken, nodeId);
   if (versions.isEmpty) {
-    throw StateError('This file has no uploaded content yet.');
+    throw StateError(
+      UserText.of(
+        en: 'This file has no uploaded content yet.',
+        ru: 'У этого файла ещё нет загруженного содержимого.',
+      ),
+    );
   }
   final version = _selectDownloadVersion(versions, expectedVersionId);
   final versionIdBytes = uuidStringToBytes(version.id);
@@ -385,7 +396,12 @@ transport.FileVersionInfo _selectDownloadVersion(
   for (final version in versions) {
     if (version.id == expectedVersionId) return version;
   }
-  throw StateError('The selected file version is no longer available.');
+  throw StateError(
+    UserText.of(
+      en: 'The selected file version is no longer available.',
+      ru: 'Выбранная версия файла больше недоступна.',
+    ),
+  );
 }
 
 Future<void> _replaceVerifiedFile(File temporary, File destination) async {
@@ -515,7 +531,12 @@ Future<transport.NodeInfo> uploadFilePathVersion({
   void Function(double progress)? onProgress,
 }) async {
   if (plaintextLength < 0 || plaintextLength > homeBoxMaxPlaintextFileSize) {
-    throw const FormatException('HomeBox files are limited to 500 MiB.');
+    throw FormatException(
+      UserText.of(
+        en: 'HomeBox files are limited to 500 MiB.',
+        ru: 'Размер файла в HomeBox ограничен 500 МиБ.',
+      ),
+    );
   }
   final fileCipher = E2eeFileCipher();
   final keyEnvelopeCipher = KeyEnvelopeCipher();

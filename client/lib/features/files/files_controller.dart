@@ -33,6 +33,7 @@ import '../sync/sync_engine.dart';
 import 'bulk_download.dart';
 import 'file_transfer.dart';
 import '../../core/util/user_facing_error.dart';
+import '../../core/localization/user_text.dart';
 
 enum FilesStatus { idle, loading, ready, failed }
 
@@ -983,13 +984,21 @@ final class FilesController extends ChangeNotifier {
   }) async {
     final file = File(localPath);
     if (!await file.exists()) {
-      throw const FormatException(
-        'The selected item is no longer a readable file.',
+      throw FormatException(
+        UserText.of(
+          en: 'The selected item is no longer a readable file.',
+          ru: 'Выбранный элемент больше не является доступным файлом.',
+        ),
       );
     }
     final plaintextLength = await file.length();
     if (plaintextLength > homeBoxMaxPlaintextFileSize) {
-      throw const FormatException('HomeBox files are limited to 500 MiB.');
+      throw FormatException(
+        UserText.of(
+          en: 'HomeBox files are limited to 500 MiB.',
+          ru: 'Размер файла в HomeBox ограничен 500 МиБ.',
+        ),
+      );
     }
     fileName ??= basenameOfLocalPath(localPath);
     final plaintextHash = await plaintextFileSha256(file);
@@ -1070,7 +1079,12 @@ final class FilesController extends ChangeNotifier {
       final file = File(localPath);
       final plaintextLength = await file.length();
       if (plaintextLength > homeBoxMaxPlaintextFileSize) {
-        throw const FormatException('HomeBox files are limited to 500 MiB.');
+        throw FormatException(
+          UserText.of(
+            en: 'HomeBox files are limited to 500 MiB.',
+            ru: 'Размер файла в HomeBox ограничен 500 МиБ.',
+          ),
+        );
       }
       final plaintextHash = await plaintextFileSha256(file);
       final key = await ctx.keyForExisting(entry.node);
@@ -1429,7 +1443,13 @@ final class FilesController extends ChangeNotifier {
   ) async {
     final ctx = await _requireContext();
     if (ctx == null) {
-      throw StateError(_errorMessage ?? 'Sign in and unlock the vault first.');
+      throw StateError(
+        _errorMessage ??
+            UserText.of(
+              en: 'Sign in and unlock the vault first.',
+              ru: 'Сначала войдите и разблокируйте хранилище.',
+            ),
+      );
     }
     try {
       await _downloadVersionWith(
@@ -1558,7 +1578,10 @@ final class FilesController extends ChangeNotifier {
       return;
     }
     throw StateError(
-      'A shared folder cannot be moved into another shared folder.',
+      UserText.of(
+        en: 'A shared folder cannot be moved into another shared folder.',
+        ru: 'Общую папку нельзя переместить в другую общую папку.',
+      ),
     );
   }
 
@@ -1571,8 +1594,10 @@ final class FilesController extends ChangeNotifier {
     final session = await _serverConnection.ensureFreshSession();
     final keys = session == null ? null : await _openKeys(session.user.id);
     if (api == null || session == null || keys == null) {
-      _errorMessage =
-          'Connect to a server, sign in, and set up the vault first.';
+      _errorMessage = UserText.of(
+        en: 'Connect to a server, sign in, and set up the vault first.',
+        ru: 'Сначала подключитесь к серверу, войдите и настройте хранилище.',
+      );
       return null;
     }
     return _UploadContext(
@@ -1595,7 +1620,10 @@ final class FilesController extends ChangeNotifier {
     final api = _serverConnection.api;
     final session = await _serverConnection.ensureFreshSession();
     if (api == null || session == null) {
-      _errorMessage = 'Connect to the server to change favorites.';
+      _errorMessage = UserText.of(
+        en: 'Connect to the server to change favorites.',
+        ru: 'Чтобы изменить избранное, подключитесь к серверу.',
+      );
       notifyListeners();
       return 0;
     }
@@ -1853,12 +1881,18 @@ final class FilesController extends ChangeNotifier {
         if (node.isDeleted || node.parentId == targetParentId) continue;
         if (targetParentId != null &&
             _isSelfOrDescendant(targetParentId, node.id)) {
-          problem ??= '"${entry.name}" cannot be moved into itself.';
+          problem ??= UserText.of(
+            en: '"${entry.name}" cannot be moved into itself.',
+            ru: '«${entry.name}» нельзя переместить в само себя.',
+          );
           continue;
         }
         final key = PortableName.comparisonKey(entry.name);
         if (taken.contains(key)) {
-          problem ??= '"${entry.name}" already exists in the destination.';
+          problem ??= UserText.of(
+            en: '"${entry.name}" already exists in the destination.',
+            ru: '«${entry.name}» уже есть в папке назначения.',
+          );
           continue;
         }
         try {
@@ -2031,7 +2065,10 @@ final class FilesController extends ChangeNotifier {
     final api = _serverConnection.api;
     final session = await _serverConnection.ensureFreshSession();
     if (api == null || session == null) {
-      _errorMessage = 'Connect to the server to delete items permanently.';
+      _errorMessage = UserText.of(
+        en: 'Connect to the server to delete items permanently.',
+        ru: 'Чтобы удалить навсегда, подключитесь к серверу.',
+      );
       notifyListeners();
       return 0;
     }

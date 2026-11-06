@@ -75,12 +75,7 @@ void main() {
     files.clearSelection();
     files.toggleSelection(named('d.txt'));
     files.extendSelectionTo(named('a.txt'));
-    expect(_names(files.selectedEntries), [
-      'a.txt',
-      'b.txt',
-      'c.txt',
-      'd.txt',
-    ]);
+    expect(_names(files.selectedEntries), ['a.txt', 'b.txt', 'c.txt', 'd.txt']);
     expect(files.selectionMode, isTrue);
   });
 

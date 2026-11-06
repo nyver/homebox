@@ -21,6 +21,7 @@ import '../sync/conflict_naming.dart';
 import '../sync/sync_engine.dart';
 import 'conflict_copies.dart';
 import '../../core/util/user_facing_error.dart';
+import '../../core/localization/user_text.dart';
 
 enum LocalUploadStatus { idle, scanning, resyncing, error }
 
@@ -562,7 +563,10 @@ final class LocalFolderUploader extends ChangeNotifier {
     _resyncRequiresRecovery = false;
     final root = Directory(rootPath);
     if (!await root.exists()) {
-      _errorMessage = 'The selected local sync folder no longer exists.';
+      _errorMessage = UserText.of(
+        en: 'The selected local sync folder no longer exists.',
+        ru: 'Выбранная локальная папка синхронизации больше не существует.',
+      );
       _setStatus(LocalUploadStatus.error);
       return false;
     }
@@ -570,15 +574,19 @@ final class LocalFolderUploader extends ChangeNotifier {
     final session = await _serverConnection.ensureFreshSession();
     final keys = session == null ? null : await _openKeys(session.user.id);
     if (api == null || session == null || keys == null) {
-      _errorMessage =
-          'Connect to the server and unlock the E2EE vault before resyncing.';
+      _errorMessage = UserText.of(
+        en: 'Connect to the server and unlock the E2EE vault before resyncing.',
+        ru: 'Перед пересозданием подключитесь к серверу и разблокируйте хранилище.',
+      );
       _setStatus(LocalUploadStatus.error);
       return false;
     }
     if (_syncEngine.pendingOperations.hasUnfinishedOperations) {
       keys.dispose();
-      _errorMessage =
-          'Pending server changes must finish before the Vault can be rebuilt.';
+      _errorMessage = UserText.of(
+        en: 'Pending server changes must finish before the Vault can be rebuilt.',
+        ru: 'Дождитесь отправки ожидающих изменений, прежде чем пересоздавать хранилище.',
+      );
       _setStatus(LocalUploadStatus.error);
       return false;
     }
@@ -604,7 +612,10 @@ final class LocalFolderUploader extends ChangeNotifier {
         if (roots.isEmpty) break;
         if (clearPasses == 10) {
           throw StateError(
-            'The server Vault kept changing while Resync was clearing it.',
+            UserText.of(
+              en: 'The server Vault kept changing while Resync was clearing it.',
+              ru: 'Хранилище на сервере менялось, пока шла его очистка.',
+            ),
           );
         }
         clearPasses++;
@@ -659,7 +670,12 @@ final class LocalFolderUploader extends ChangeNotifier {
     );
     if (!await dir.exists()) {
       if (strict) {
-        throw StateError('The local folder changed while Resync was running.');
+        throw StateError(
+          UserText.of(
+            en: 'The local folder changed while Resync was running.',
+            ru: 'Локальная папка изменилась во время пересоздания.',
+          ),
+        );
       }
       return; // the whole folder is gone locally; out of scope for this slice.
     }
@@ -813,7 +829,12 @@ final class LocalFolderUploader extends ChangeNotifier {
       final plaintextLength = stat.size;
       if (plaintextLength > homeBoxMaxPlaintextFileSize) {
         if (strict) {
-          throw StateError('$name exceeds the HomeBox file size limit.');
+          throw StateError(
+            UserText.of(
+              en: '$name exceeds the HomeBox file size limit.',
+              ru: '$name превышает допустимый в HomeBox размер файла.',
+            ),
+          );
         }
         return;
       }
@@ -954,7 +975,12 @@ final class LocalFolderUploader extends ChangeNotifier {
       final plaintextLength = stat.size;
       if (plaintextLength > homeBoxMaxPlaintextFileSize) {
         if (strict) {
-          throw StateError('$name exceeds the HomeBox file size limit.');
+          throw StateError(
+            UserText.of(
+              en: '$name exceeds the HomeBox file size limit.',
+              ru: '$name превышает допустимый в HomeBox размер файла.',
+            ),
+          );
         }
         return null;
       }

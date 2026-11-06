@@ -141,9 +141,15 @@ final class _FamilySectionState extends State<_FamilySection> {
                 _localized(context, en: 'Shared with me', ru: 'Доступно мне'),
               ),
               if (controller.incoming.isEmpty)
-                const ListTile(
+                ListTile(
                   leading: Icon(Icons.folder_off_outlined),
-                  title: Text('Nothing has been shared with you yet.'),
+                  title: Text(
+                    _localized(
+                      context,
+                      en: 'Nothing has been shared with you yet.',
+                      ru: 'С вами пока ничем не поделились.',
+                    ),
+                  ),
                 ),
               for (final view in controller.incoming)
                 _IncomingShareTile(
@@ -156,10 +162,14 @@ final class _FamilySectionState extends State<_FamilySection> {
                 _localized(context, en: 'Shared by me', ru: 'Я делюсь'),
               ),
               if (controller.outgoing.isEmpty)
-                const ListTile(
+                ListTile(
                   leading: Icon(Icons.folder_shared_outlined),
                   title: Text(
-                    'To share a folder, open its menu in Files and choose "Share with family…".',
+                    _localized(
+                      context,
+                      en: 'To share a folder, open its menu in Files and choose "Share with family…".',
+                      ru: 'Чтобы поделиться папкой, откройте её меню в «Файлах» и выберите «Поделиться с семьёй…».',
+                    ),
                   ),
                 ),
               for (final view in controller.outgoing)
@@ -203,7 +213,7 @@ final class _FamilyBanner extends StatelessWidget {
       leading: Icon(icon, color: color),
       title: Text(message),
       trailing: IconButton(
-        tooltip: 'Dismiss',
+        tooltip: _localized(context, en: 'Dismiss', ru: 'Скрыть'),
         icon: const Icon(Icons.close),
         onPressed: onDismiss,
       ),
@@ -237,14 +247,31 @@ final class _IdentityCard extends StatelessWidget {
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Give your account ID to the family member who wants to share a folder with you. '
-              'Before either of you trusts the other, compare the fingerprints in person or over a call.',
+            Text(
+              _localized(
+                context,
+                en:
+                    'Give your account ID to the family member who wants to share a folder with you. '
+                    'Before either of you trusts the other, compare the fingerprints in person or over a call.',
+                ru:
+                    'Передайте ID аккаунта члену семьи, который хочет поделиться с вами папкой. '
+                    'Прежде чем доверять друг другу, сверьте отпечатки лично или по телефону.',
+              ),
             ),
             const SizedBox(height: 12),
-            _CopyableValue(label: 'Account ID', value: accountId),
+            _CopyableValue(
+              label: _localized(context, en: 'Account ID', ru: 'ID аккаунта'),
+              value: accountId,
+            ),
             const SizedBox(height: 8),
-            _CopyableValue(label: 'Account fingerprint', value: fingerprint),
+            _CopyableValue(
+              label: _localized(
+                context,
+                en: 'Account fingerprint',
+                ru: 'Отпечаток аккаунта',
+              ),
+              value: fingerprint,
+            ),
           ],
         ),
       ),
@@ -277,16 +304,28 @@ final class _CopyableValue extends StatelessWidget {
           ),
         ),
         IconButton(
-          tooltip: 'Copy $label',
+          tooltip: _localized(
+            context,
+            en: 'Copy $label',
+            ru: 'Копировать: $label',
+          ),
           icon: const Icon(Icons.copy_outlined),
           onPressed: text == null
               ? null
               : () async {
                   await Clipboard.setData(ClipboardData(text: text));
                   if (context.mounted) {
-                    ScaffoldMessenger.of(
-                      context,
-                    ).showSnackBar(SnackBar(content: Text('$label copied.')));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          _localized(
+                            context,
+                            en: '$label copied.',
+                            ru: '$label: скопировано.',
+                          ),
+                        ),
+                      ),
+                    );
                   }
                 },
         ),
@@ -314,46 +353,74 @@ final class _IncomingShareTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final owner = view.share.ownerUsername.isEmpty
-        ? 'a family member'
+        ? _localized(context, en: 'a family member', ru: 'член семьи')
         : view.share.ownerUsername;
     final permission = _permissionLabel(context, view.share.permission);
     final (icon, subtitle, action) = switch (view.state) {
       IncomingShareState.ready => (
         Icons.folder_shared,
-        'From $owner • $permission',
+        _localized(
+          context,
+          en: 'From $owner • $permission',
+          ru: 'От $owner • $permission',
+        ),
         null,
       ),
       IncomingShareState.unverified => (
         Icons.gpp_maybe_outlined,
-        'From $owner • Verify the owner\'s fingerprint before opening it.',
+        _localized(
+          context,
+          en: 'From $owner • Verify the owner\'s fingerprint before opening it.',
+          ru: 'От $owner • Сверьте отпечаток владельца, прежде чем открывать.',
+        ),
         TextButton(
           onPressed: () => _verifyOwner(context),
-          child: const Text('Verify'),
+          child: Text(_localized(context, en: 'Verify', ru: 'Проверить')),
         ),
       ),
       IncomingShareState.identityChanged => (
         Icons.gpp_bad_outlined,
-        'From $owner • The owner\'s identity changed. Do not open this folder until you have compared fingerprints again.',
+        _localized(
+          context,
+          en: 'From $owner • The owner\'s identity changed. Do not open this folder until you have compared fingerprints again.',
+          ru: 'От $owner • Ключ владельца изменился. Не открывайте папку, пока снова не сверите отпечатки.',
+        ),
         TextButton(
           onPressed: () => _verifyOwner(context),
-          child: const Text('Compare again'),
+          child: Text(
+            _localized(context, en: 'Compare again', ru: 'Сверить снова'),
+          ),
         ),
       ),
       IncomingShareState.waitingForKey => (
         Icons.hourglass_empty,
-        'From $owner • Waiting for $owner to give this device access. '
-            'It happens the next time $owner opens HomeBox.',
+        _localized(
+          context,
+          en:
+              'From $owner • Waiting for $owner to give this device access. '
+              'It happens the next time $owner opens HomeBox.',
+          ru:
+              'От $owner • Ожидается, что $owner даст доступ этому устройству. '
+              'Это произойдёт, когда $owner в следующий раз откроет HomeBox.',
+        ),
         null,
       ),
       IncomingShareState.invalid => (
         Icons.error_outline,
-        'From $owner • This share could not be verified and was not opened.',
+        _localized(
+          context,
+          en: 'From $owner • This share could not be verified and was not opened.',
+          ru: 'От $owner • Этот доступ не прошёл проверку и не был открыт.',
+        ),
         null,
       ),
     };
     return ListTile(
       leading: Icon(icon),
-      title: Text(view.folderName ?? 'Shared folder'),
+      title: Text(
+        view.folderName ??
+            _localized(context, en: 'Shared folder', ru: 'Общая папка'),
+      ),
       subtitle: Text(subtitle),
       trailing: action,
       onTap: view.state == IncomingShareState.ready ? onOpen : null,
@@ -365,10 +432,20 @@ final class _IncomingShareTile extends StatelessWidget {
     if (fingerprint == null) return;
     final confirmed = await _confirmFingerprint(
       context,
-      title: 'Verify ${view.share.ownerUsername}',
-      explanation:
-          'Ask ${view.share.ownerUsername} to open Family in HomeBox and read out their account fingerprint. '
-          'It must match this one exactly.',
+      title: _localized(
+        context,
+        en: 'Verify ${view.share.ownerUsername}',
+        ru: 'Проверка ${view.share.ownerUsername}',
+      ),
+      explanation: _localized(
+        context,
+        en:
+            'Ask ${view.share.ownerUsername} to open Family in HomeBox and read out their account fingerprint. '
+            'It must match this one exactly.',
+        ru:
+            'Попросите ${view.share.ownerUsername} открыть раздел «Семья» в HomeBox и зачитать отпечаток аккаунта. '
+            'Он должен полностью совпадать с этим.',
+      ),
       fingerprint: fingerprint,
     );
     if (confirmed) await controller.trustOwner(view);
@@ -387,10 +464,10 @@ final class _OutgoingShareTile extends StatelessWidget {
     title: Text(view.folderName),
     subtitle: Text(
       '${view.share.targetUsername} • ${_permissionLabel(context, view.share.permission)}'
-      '${view.recipientTrusted ? '' : ' • Not verified on this device'}',
+      '${view.recipientTrusted ? '' : _localized(context, en: ' • Not verified on this device', ru: ' • не проверен на этом устройстве')}',
     ),
     trailing: PopupMenuButton<String>(
-      tooltip: 'More actions',
+      tooltip: _localized(context, en: 'More actions', ru: 'Другие действия'),
       enabled: !controller.busy,
       onSelected: (value) => switch (value) {
         'deliver' => _deliver(context),
@@ -402,11 +479,24 @@ final class _OutgoingShareTile extends StatelessWidget {
           value: 'deliver',
           child: Text(
             view.recipientTrusted
-                ? 'Give access to new devices'
-                : 'Verify and give access to new devices…',
+                ? _localized(
+                    context,
+                    en: 'Give access to new devices',
+                    ru: 'Дать доступ новым устройствам',
+                  )
+                : _localized(
+                    context,
+                    en: 'Verify and give access to new devices…',
+                    ru: 'Проверить и дать доступ новым устройствам…',
+                  ),
           ),
         ),
-        const PopupMenuItem(value: 'revoke', child: Text('Remove access…')),
+        PopupMenuItem(
+          value: 'revoke',
+          child: Text(
+            _localized(context, en: 'Remove access…', ru: 'Закрыть доступ…'),
+          ),
+        ),
       ],
     ),
   );
@@ -418,9 +508,16 @@ final class _OutgoingShareTile extends StatelessWidget {
       if (candidate == null || !context.mounted) return;
       final confirmed = await _confirmFingerprint(
         context,
-        title: 'Verify ${view.share.targetUsername}',
-        explanation:
-            'Ask ${view.share.targetUsername} to read out the account fingerprint shown in Family on their device.',
+        title: _localized(
+          context,
+          en: 'Verify ${view.share.targetUsername}',
+          ru: 'Проверка ${view.share.targetUsername}',
+        ),
+        explanation: _localized(
+          context,
+          en: 'Ask ${view.share.targetUsername} to read out the account fingerprint shown in Family on their device.',
+          ru: 'Попросите ${view.share.targetUsername} зачитать отпечаток аккаунта из раздела «Семья» на своём устройстве.',
+        ),
         fingerprint: candidate.fingerprint,
       );
       if (!confirmed) return;
@@ -441,20 +538,36 @@ Future<void> _confirmAndRevoke(
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
-      title: Text('Remove ${view.share.targetUsername}?'),
-      content: const Text(
-        'They lose access to this folder immediately and HomeBox switches the folder to a new key, '
-        'so they cannot read anything added from now on. Files they already opened or downloaded '
-        'cannot be taken back.',
+      title: Text(
+        _localized(
+          context,
+          en: 'Remove ${view.share.targetUsername}?',
+          ru: 'Закрыть доступ для ${view.share.targetUsername}?',
+        ),
+      ),
+      content: Text(
+        _localized(
+          context,
+          en:
+              'They lose access to this folder immediately and HomeBox switches the folder to a new key, '
+              'so they cannot read anything added from now on. Files they already opened or downloaded '
+              'cannot be taken back.',
+          ru:
+              'Доступ к папке пропадёт сразу, а HomeBox переведёт папку на новый ключ, '
+              'поэтому новые файлы будут недоступны. Уже открытые или скачанные файлы '
+              'вернуть нельзя.',
+        ),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context, false),
-          child: const Text('Cancel'),
+          child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
         ),
         FilledButton(
           onPressed: () => Navigator.pop(context, true),
-          child: const Text('Remove access'),
+          child: Text(
+            _localized(context, en: 'Remove access', ru: 'Закрыть доступ'),
+          ),
         ),
       ],
     ),
@@ -490,18 +603,24 @@ Future<bool> _confirmFingerprint(
               contentPadding: EdgeInsets.zero,
               value: compared,
               onChanged: (value) => setState(() => compared = value ?? false),
-              title: const Text('Every group matches'),
+              title: Text(
+                _localized(
+                  context,
+                  en: 'Every group matches',
+                  ru: 'Все группы совпадают',
+                ),
+              ),
             ),
           ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             onPressed: compared ? () => Navigator.pop(context, true) : null,
-            child: const Text('Trust'),
+            child: Text(_localized(context, en: 'Trust', ru: 'Доверять')),
           ),
         ],
       ),
@@ -563,7 +682,13 @@ Future<void> _showShareFolderDialog(
           }
 
           return AlertDialog(
-            title: Text('Share "$folderName"'),
+            title: Text(
+              _localized(
+                context,
+                en: 'Share "$folderName"',
+                ru: 'Доступ к «$folderName»',
+              ),
+            ),
             content: SizedBox(
               width: 480,
               child: SingleChildScrollView(
@@ -571,14 +696,21 @@ Future<void> _showShareFolderDialog(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Everything in this folder is encrypted with its own key, '
-                      'which only the members you add receive. The server never sees it.',
+                    Text(
+                      _localized(
+                        context,
+                        en:
+                            'Everything in this folder is encrypted with its own key, '
+                            'which only the members you add receive. The server never sees it.',
+                        ru:
+                            'Всё в этой папке шифруется её собственным ключом, '
+                            'который получают только добавленные вами участники. Сервер его не видит.',
+                      ),
                     ),
                     const SizedBox(height: 16),
                     if (members.isNotEmpty) ...[
                       Text(
-                        'Members',
+                        _localized(context, en: 'Members', ru: 'Участники'),
                         style: Theme.of(context).textTheme.titleSmall,
                       ),
                       for (final member in members)
@@ -590,7 +722,11 @@ Future<void> _showShareFolderDialog(
                             _permissionLabel(context, member.share.permission),
                           ),
                           trailing: IconButton(
-                            tooltip: 'Remove access',
+                            tooltip: _localized(
+                              context,
+                              en: 'Remove access',
+                              ru: 'Закрыть доступ',
+                            ),
                             icon: const Icon(Icons.person_remove_outlined),
                             onPressed: working
                                 ? null
@@ -606,10 +742,17 @@ Future<void> _showShareFolderDialog(
                     TextField(
                       controller: accountController,
                       enabled: !working && candidate == null,
-                      decoration: const InputDecoration(
-                        labelText: 'Family member\'s account ID',
-                        helperText:
-                            'They find it under Family → Your family identity.',
+                      decoration: InputDecoration(
+                        labelText: _localized(
+                          context,
+                          en: 'Family member\'s account ID',
+                          ru: 'ID аккаунта члена семьи',
+                        ),
+                        helperText: _localized(
+                          context,
+                          en: 'They find it under Family → Your family identity.',
+                          ru: 'Он указан в разделе «Семья → Ваш семейный идентификатор».',
+                        ),
                       ),
                       onSubmitted: (_) => find(),
                     ),
@@ -644,9 +787,16 @@ Future<void> _showShareFolderDialog(
                     ),
                     if (candidate != null && !candidate!.alreadyTrusted) ...[
                       const SizedBox(height: 16),
-                      const Text(
-                        'Ask the family member to read out the account fingerprint shown in Family on their device. '
-                        'It must match exactly; otherwise someone could be intercepting the share.',
+                      Text(
+                        _localized(
+                          context,
+                          en:
+                              'Ask the family member to read out the account fingerprint shown in Family on their device. '
+                              'It must match exactly; otherwise someone could be intercepting the share.',
+                          ru:
+                              'Попросите члена семьи зачитать отпечаток аккаунта из раздела «Семья» на его устройстве. '
+                              'Он должен совпасть полностью, иначе доступ может быть перехвачен.',
+                        ),
                       ),
                       const SizedBox(height: 8),
                       SelectableText(
@@ -660,14 +810,24 @@ Future<void> _showShareFolderDialog(
                             ? null
                             : (value) =>
                                   setState(() => compared = value ?? false),
-                        title: const Text('Every group matches'),
+                        title: Text(
+                          _localized(
+                            context,
+                            en: 'Every group matches',
+                            ru: 'Все группы совпадают',
+                          ),
+                        ),
                       ),
                     ],
                     if (candidate != null && candidate!.alreadyTrusted)
-                      const Padding(
+                      Padding(
                         padding: EdgeInsets.only(top: 12),
                         child: Text(
-                          'You verified this family member on this device before.',
+                          _localized(
+                            context,
+                            en: 'You verified this family member on this device before.',
+                            ru: 'Вы уже проверяли этого члена семьи на этом устройстве.',
+                          ),
                         ),
                       ),
                     if (working) ...[
@@ -699,17 +859,19 @@ Future<void> _showShareFolderDialog(
             actions: [
               TextButton(
                 onPressed: working ? null : () => Navigator.pop(dialogContext),
-                child: const Text('Close'),
+                child: Text(_localized(context, en: 'Close', ru: 'Закрыть')),
               ),
               if (candidate == null)
                 FilledButton(
                   onPressed: working ? null : find,
-                  child: const Text('Find'),
+                  child: Text(_localized(context, en: 'Find', ru: 'Найти')),
                 )
               else
                 FilledButton(
                   onPressed: working || !compared ? null : share,
-                  child: const Text('Share'),
+                  child: Text(
+                    _localized(context, en: 'Share', ru: 'Поделиться'),
+                  ),
                 ),
             ],
           );
@@ -745,8 +907,11 @@ final class _SharedFolderView extends StatelessWidget {
         },
         child: _PageFrame(
           title: browser.rootName,
-          subtitle:
-              'Shared by ${browser.share.ownerUsername} • ${_permissionLabel(context, browser.share.permission)}',
+          subtitle: _localized(
+            context,
+            en: 'Shared by ${browser.share.ownerUsername} • ${_permissionLabel(context, browser.share.permission)}',
+            ru: 'Владелец: ${browser.share.ownerUsername} • ${_permissionLabel(context, browser.share.permission)}',
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -766,36 +931,58 @@ final class _SharedFolderView extends StatelessWidget {
                     OutlinedButton.icon(
                       onPressed: onClose,
                       icon: const Icon(Icons.close),
-                      label: const Text('Close'),
+                      label: Text(
+                        _localized(context, en: 'Close', ru: 'Закрыть'),
+                      ),
                     ),
                     if (browser.canGoUp)
                       OutlinedButton.icon(
                         onPressed: browser.goUp,
                         icon: const Icon(Icons.arrow_upward),
-                        label: const Text('Up'),
+                        label: Text(_localized(context, en: 'Up', ru: 'Вверх')),
                       ),
                     if (browser.canWrite) ...[
                       FilledButton.icon(
                         onPressed: browser.busy ? null : () => _upload(context),
                         icon: const Icon(Icons.upload_file),
-                        label: const Text('Upload files'),
+                        label: Text(
+                          _localized(
+                            context,
+                            en: 'Upload files',
+                            ru: 'Загрузить файлы',
+                          ),
+                        ),
                       ),
                       OutlinedButton.icon(
                         onPressed: browser.busy
                             ? null
                             : () => _createFolder(context),
                         icon: const Icon(Icons.create_new_folder_outlined),
-                        label: const Text('New folder'),
+                        label: Text(
+                          _localized(
+                            context,
+                            en: 'New folder',
+                            ru: 'Новая папка',
+                          ),
+                        ),
                       ),
                     ],
                     if (browser.entries.isNotEmpty)
                       IconButton(
-                        tooltip: 'Select',
+                        tooltip: _localized(
+                          context,
+                          en: 'Select',
+                          ru: 'Выбрать',
+                        ),
                         onPressed: browser.startSelection,
                         icon: const Icon(Icons.checklist),
                       ),
                     IconButton(
-                      tooltip: 'Refresh',
+                      tooltip: _localized(
+                        context,
+                        en: 'Refresh',
+                        ru: 'Обновить',
+                      ),
                       onPressed: browser.refresh,
                       icon: const Icon(Icons.refresh),
                     ),
@@ -837,9 +1024,13 @@ final class _SharedFolderView extends StatelessWidget {
                 ),
               Expanded(
                 child: browser.entries.isEmpty && !browser.loading
-                    ? const _FilesMessageState(
+                    ? _FilesMessageState(
                         icon: Icons.folder_open_outlined,
-                        message: 'This folder is empty.',
+                        message: _localized(
+                          context,
+                          en: 'This folder is empty.',
+                          ru: 'Папка пуста.',
+                        ),
                       )
                     : ListView.separated(
                         itemCount: browser.entries.length,
@@ -880,7 +1071,11 @@ final class _SharedFolderView extends StatelessWidget {
                             trailing: selecting
                                 ? null
                                 : PopupMenuButton<String>(
-                                    tooltip: 'More actions',
+                                    tooltip: _localized(
+                                      context,
+                                      en: 'More actions',
+                                      ru: 'Другие действия',
+                                    ),
                                     enabled: !browser.busy,
                                     onSelected: (value) => switch (value) {
                                       'save_as' => _download(context, entry),
@@ -891,25 +1086,49 @@ final class _SharedFolderView extends StatelessWidget {
                                     },
                                     itemBuilder: (context) => [
                                       if (!entry.isDirectory)
-                                        const PopupMenuItem(
+                                        PopupMenuItem(
                                           value: 'save_as',
-                                          child: Text('Save as…'),
+                                          child: Text(
+                                            _localized(
+                                              context,
+                                              en: 'Save as…',
+                                              ru: 'Сохранить как…',
+                                            ),
+                                          ),
                                         ),
                                       if (browser.canWrite &&
                                           !entry.isDirectory)
-                                        const PopupMenuItem(
+                                        PopupMenuItem(
                                           value: 'replace',
-                                          child: Text('Replace content…'),
+                                          child: Text(
+                                            _localized(
+                                              context,
+                                              en: 'Replace content…',
+                                              ru: 'Заменить содержимое…',
+                                            ),
+                                          ),
                                         ),
                                       if (browser.canWrite)
-                                        const PopupMenuItem(
+                                        PopupMenuItem(
                                           value: 'rename',
-                                          child: Text('Rename'),
+                                          child: Text(
+                                            _localized(
+                                              context,
+                                              en: 'Rename',
+                                              ru: 'Переименовать',
+                                            ),
+                                          ),
                                         ),
                                       if (browser.canWrite)
-                                        const PopupMenuItem(
+                                        PopupMenuItem(
                                           value: 'delete',
-                                          child: Text('Move to trash'),
+                                          child: Text(
+                                            _localized(
+                                              context,
+                                              en: 'Move to trash',
+                                              ru: 'В корзину',
+                                            ),
+                                          ),
                                         ),
                                     ],
                                   ),
@@ -930,8 +1149,16 @@ final class _SharedFolderView extends StatelessWidget {
     final target = await _pickFolder(
       context,
       title: entries.length == 1
-          ? 'Move "${entries.single.name}" to…'
-          : 'Move ${entries.length} items to…',
+          ? _localized(
+              context,
+              en: 'Move "${entries.single.name}" to…',
+              ru: 'Переместить «${entries.single.name}» в…',
+            )
+          : _localized(
+              context,
+              en: 'Move ${_itemCount(context, entries.length)} to…',
+              ru: 'Переместить ${_itemCount(context, entries.length)} в…',
+            ),
       rootName: browser.rootName,
       rootId: browser.share.nodeId,
       // The picker starts at the shared folder, never the member's root.
@@ -947,7 +1174,14 @@ final class _SharedFolderView extends StatelessWidget {
       entries,
       target.id ?? browser.share.nodeId,
     );
-    if (context.mounted) _reportBulk(context, moved, entries.length, 'Moved');
+    if (context.mounted) {
+      _reportBulk(
+        context,
+        moved,
+        entries.length,
+        _localized(context, en: 'Moved', ru: 'Перемещено'),
+      );
+    }
   }
 
   Future<void> _downloadSelected(BuildContext context) => _bulkDownload(
@@ -969,20 +1203,34 @@ final class _SharedFolderView extends StatelessWidget {
       builder: (context) => AlertDialog(
         title: Text(
           entries.length == 1
-              ? 'Move "${entries.single.name}" to trash?'
-              : 'Move ${entries.length} items to trash?',
+              ? _localized(
+                  context,
+                  en: 'Move "${entries.single.name}" to Trash?',
+                  ru: 'Переместить «${entries.single.name}» в корзину?',
+                )
+              : _localized(
+                  context,
+                  en: 'Move ${_itemCount(context, entries.length)} to Trash?',
+                  ru: 'Переместить в корзину ${_itemCount(context, entries.length)}?',
+                ),
         ),
         content: Text(
-          'They move to ${browser.share.ownerUsername}\'s Trash, where they can restore them.',
+          _localized(
+            context,
+            en: 'They move to ${browser.share.ownerUsername}\'s Trash, where they can restore them.',
+            ru: 'Они попадут в корзину пользователя ${browser.share.ownerUsername}, откуда их можно восстановить.',
+          ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Move to trash'),
+            child: Text(
+              _localized(context, en: 'Move to trash', ru: 'В корзину'),
+            ),
           ),
         ],
       ),
@@ -990,7 +1238,12 @@ final class _SharedFolderView extends StatelessWidget {
     if (confirmed != true || !context.mounted) return;
     final deleted = await browser.deleteEntries(entries);
     if (context.mounted) {
-      _reportBulk(context, deleted, entries.length, 'Moved to trash');
+      _reportBulk(
+        context,
+        deleted,
+        entries.length,
+        _localized(context, en: 'Moved to Trash', ru: 'В корзину перемещено'),
+      );
     }
   }
 
@@ -1000,9 +1253,12 @@ final class _SharedFolderView extends StatelessWidget {
       SnackBar(
         content: Text(
           done == total
-              ? '$verb ${done == 1 ? '1 item' : '$done items'}.'
-              : '$verb $done of $total items. ${browser.errorMessage ?? ''}'
-                    .trim(),
+              ? '$verb: ${_itemCount(context, done)}.'
+              : _localized(
+                  context,
+                  en: '$verb $done of ${_itemCount(context, total)}. ${browser.errorMessage ?? ''}',
+                  ru: '$verb $done из ${_itemCount(context, total)}. ${browser.errorMessage ?? ''}',
+                ).trim(),
         ),
       ),
     );
@@ -1029,8 +1285,17 @@ final class _SharedFolderView extends StatelessWidget {
     if (destination == null) return;
     final ok = await browser.download(entry, destination.path);
     if (ok && context.mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Saved ${entry.name}.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _localized(
+              context,
+              en: 'Saved ${entry.name}.',
+              ru: 'Сохранено: ${entry.name}.',
+            ),
+          ),
+        ),
+      );
     }
   }
 
@@ -1047,12 +1312,22 @@ final class _SharedFolderView extends StatelessWidget {
   }
 
   Future<void> _createFolder(BuildContext context) async {
-    final name = await _askName(context, title: 'New folder', initial: '');
+    final name = await _askName(
+      context,
+      title: _localized(context, en: 'New folder', ru: 'Новая папка'),
+      confirm: _localized(context, en: 'Create', ru: 'Создать'),
+      initial: '',
+    );
     if (name != null) await browser.createFolder(name);
   }
 
   Future<void> _rename(BuildContext context, SharedEntry entry) async {
-    final name = await _askName(context, title: 'Rename', initial: entry.name);
+    final name = await _askName(
+      context,
+      title: _localized(context, en: 'Rename', ru: 'Переименовать'),
+      confirm: _localized(context, en: 'Rename', ru: 'Переименовать'),
+      initial: entry.name,
+    );
     if (name != null && name != entry.name) await browser.rename(entry, name);
   }
 
@@ -1060,18 +1335,30 @@ final class _SharedFolderView extends StatelessWidget {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Move "${entry.name}" to trash?'),
+        title: Text(
+          _localized(
+            context,
+            en: 'Move "${entry.name}" to trash?',
+            ru: 'Переместить «${entry.name}» в корзину?',
+          ),
+        ),
         content: Text(
-          'It moves to ${browser.share.ownerUsername}\'s Trash, where they can restore it.',
+          _localized(
+            context,
+            en: 'It moves to ${browser.share.ownerUsername}\'s Trash, where they can restore it.',
+            ru: 'Элемент попадёт в корзину пользователя ${browser.share.ownerUsername}, откуда его можно восстановить.',
+          ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Move to trash'),
+            child: Text(
+              _localized(context, en: 'Move to trash', ru: 'В корзину'),
+            ),
           ),
         ],
       ),
@@ -1192,7 +1479,11 @@ final class _SharedSelectionBar extends StatelessWidget {
           tristate: true,
           value: count == 0 ? false : (count == total ? true : null),
           onChanged: (_) => browser.toggleSelectAll(),
-          semanticLabel: 'Select all',
+          semanticLabel: _localized(
+            context,
+            en: 'Select all',
+            ru: 'Выбрать все',
+          ),
         ),
         Text(
           _localized(context, en: '$count selected', ru: 'Выбрано: $count'),

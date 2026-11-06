@@ -46,7 +46,11 @@ Future<({String? id})?> _pickFolder(
                               children = null;
                             }),
                       icon: const Icon(Icons.arrow_upward),
-                      tooltip: 'Up one level',
+                      tooltip: _localized(
+                        context,
+                        en: 'Up one level',
+                        ru: 'На уровень вверх',
+                      ),
                     ),
                     Expanded(
                       child: Text(
@@ -64,14 +68,28 @@ Future<({String? id})?> _pickFolder(
                     builder: (context, snapshot) {
                       if (!snapshot.hasData) {
                         return snapshot.hasError
-                            ? const Center(
-                                child: Text('Could not load folders.'),
+                            ? Center(
+                                child: Text(
+                                  _localized(
+                                    context,
+                                    en: 'Could not load folders.',
+                                    ru: 'Не удалось загрузить папки.',
+                                  ),
+                                ),
                               )
                             : const Center(child: CircularProgressIndicator());
                       }
                       final folders = snapshot.data!;
                       if (folders.isEmpty) {
-                        return const Center(child: Text('No folders here.'));
+                        return Center(
+                          child: Text(
+                            _localized(
+                              context,
+                              en: 'No folders here.',
+                              ru: 'Здесь нет папок.',
+                            ),
+                          ),
+                        );
                       }
                       return ListView(
                         children: [
@@ -122,15 +140,19 @@ Future<void> _bulkDownload(
   final archiveName =
       'HomeBox ${DateTime.now().toIso8601String().substring(0, 10)}.zip';
   final messenger = ScaffoldMessenger.of(context);
+  // Read now: [context] may be gone after the dialogs and the transfer.
+  final russian = Localizations.localeOf(context).languageCode == 'ru';
+  String saved(int n, String location) => russian
+      ? 'Сохранено $n ${_pluralRu(n, 'файл', 'файла', 'файлов')} в $location.'
+      : 'Saved $n ${n == 1 ? 'file' : 'files'} to $location.';
   void report(int? written, String location) {
     messenger.showSnackBar(
       SnackBar(
         content: Text(
           written == null
-              ? errorMessage() ?? 'Download failed.'
-              : written == 1
-              ? 'Saved 1 file to $location.'
-              : 'Saved $written files to $location.',
+              ? errorMessage() ??
+                    (russian ? 'Не удалось скачать.' : 'Download failed.')
+              : saved(written, location),
         ),
       ),
     );
@@ -175,7 +197,13 @@ Future<void> _bulkDownload(
                 ru: 'Сохранить в папку',
               ),
             ),
-            subtitle: const Text('Keeps the folder structure.'),
+            subtitle: Text(
+              _localized(
+                context,
+                en: 'Keeps the folder structure.',
+                ru: 'Структура папок сохранится.',
+              ),
+            ),
           ),
         ),
         SimpleDialogOption(
@@ -189,7 +217,13 @@ Future<void> _bulkDownload(
                 ru: 'Сохранить как ZIP',
               ),
             ),
-            subtitle: const Text('One file you can send or keep.'),
+            subtitle: Text(
+              _localized(
+                context,
+                en: 'One file you can send or keep.',
+                ru: 'Один файл, который удобно отправить или хранить.',
+              ),
+            ),
           ),
         ),
       ],
@@ -199,8 +233,11 @@ Future<void> _bulkDownload(
   if (asZip) {
     final location = await getSaveLocation(
       suggestedName: archiveName,
-      acceptedTypeGroups: const [
-        XTypeGroup(label: 'ZIP archive', extensions: ['zip']),
+      acceptedTypeGroups: [
+        XTypeGroup(
+          label: russian ? 'ZIP-архив' : 'ZIP archive',
+          extensions: ['zip'],
+        ),
       ],
     );
     if (location == null) return;
@@ -283,7 +320,7 @@ final class _SearchPageState extends State<_SearchPage> {
               _run('');
             },
             icon: const Icon(Icons.clear),
-            tooltip: 'Clear',
+            tooltip: _localized(context, en: 'Clear', ru: 'Очистить'),
           ),
       ],
     ),
@@ -350,7 +387,12 @@ final class _FavoritesPageState extends State<_FavoritesPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            widget.controller.errorMessage ?? 'Could not change favorites.',
+            widget.controller.errorMessage ??
+                _localized(
+                  context,
+                  en: 'Could not change favorites.',
+                  ru: 'Не удалось изменить избранное.',
+                ),
           ),
         ),
       );

@@ -14,6 +14,7 @@ import '../../core/transport/pinned_http_client.dart';
 import '../../core/transport/pinned_server_store.dart';
 import 'session_store.dart';
 import '../../core/util/user_facing_error.dart';
+import '../../core/localization/user_text.dart';
 
 enum ServerConnectionStatus {
   /// No server has been pinned yet.
@@ -126,7 +127,10 @@ final class ServerConnectionController extends ChangeNotifier {
       _discoveredFingerprint = fingerprint;
       _setStatus(ServerConnectionStatus.awaitingTrust);
     } catch (e) {
-      _errorMessage = 'Could not reach that server. ${describeError(e)}';
+      _errorMessage = UserText.of(
+        en: 'Could not reach that server. ${describeError(e)}',
+        ru: 'Не удалось связаться с сервером. ${describeError(e)}',
+      );
       _setStatus(ServerConnectionStatus.failed);
     }
   }
@@ -183,7 +187,10 @@ final class ServerConnectionController extends ChangeNotifier {
       _errorMessage = describeError(e);
       _setStatus(ServerConnectionStatus.connectedLoggedOut);
     } on Exception catch (e) {
-      _errorMessage = 'Login failed. ${describeError(e)}';
+      _errorMessage = UserText.of(
+        en: 'Login failed. ${describeError(e)}',
+        ru: 'Не удалось войти. ${describeError(e)}',
+      );
       _setStatus(ServerConnectionStatus.connectedLoggedOut);
     } finally {
       identity?.destroy();
@@ -305,8 +312,10 @@ final class ServerConnectionController extends ChangeNotifier {
       } else {
         // Preserve the durable token and current UI session. The next
         // authenticated operation retries refresh instead of forcing login.
-        _errorMessage =
-            'Could not refresh the saved session. ${describeError(e)}';
+        _errorMessage = UserText.of(
+          en: 'Could not refresh the saved session. ${describeError(e)}',
+          ru: 'Не удалось обновить сохранённый сеанс. ${describeError(e)}',
+        );
         notifyListeners();
       }
       return false;
@@ -345,8 +354,10 @@ final class ServerConnectionController extends ChangeNotifier {
         await _sessionStore.clearRefreshToken();
         _setStatus(ServerConnectionStatus.connectedLoggedOut);
       } else {
-        _errorMessage =
-            'Could not restore the saved session. ${describeError(e)}';
+        _errorMessage = UserText.of(
+          en: 'Could not restore the saved session. ${describeError(e)}',
+          ru: 'Не удалось восстановить сохранённый сеанс. ${describeError(e)}',
+        );
         _setStatus(ServerConnectionStatus.failed);
       }
       return null;
@@ -410,7 +421,12 @@ Uri _normalizeBaseUrl(String text) {
   final withScheme = trimmed.contains('://') ? trimmed : 'https://$trimmed';
   final uri = Uri.parse(withScheme);
   if (uri.host.isEmpty) {
-    throw const FormatException('Enter a server address like host:8787.');
+    throw FormatException(
+      UserText.of(
+        en: 'Enter a server address like host:8787.',
+        ru: 'Введите адрес сервера в виде host:8787.',
+      ),
+    );
   }
   return Uri(
     scheme: 'https',

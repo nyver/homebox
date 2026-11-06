@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:homebox_client/core/e2ee/device_identity.dart';
 import 'package:homebox_client/core/e2ee/vault_key_store.dart';
+import 'package:homebox_client/core/localization/app_locale_controller.dart';
 import 'package:homebox_client/core/platform/biometric_authenticator.dart';
 import 'package:homebox_client/core/transport/pinned_server_store.dart';
 import 'package:homebox_client/features/server/server_connection_controller.dart';
@@ -56,6 +57,29 @@ void main() {
       ),
       findsOneWidget,
     );
+  });
+
+  testWidgets('the whole shell follows the Russian language setting', (
+    tester,
+  ) async {
+    final locale = AppLocaleController(_MemoryLanguageStorage());
+    addTearDown(locale.dispose);
+    await locale.setLanguage(AppLanguage.russian);
+
+    await tester.pumpWidget(_testApp(localeController: locale));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Синхронизация не настроена'), findsOneWidget);
+    expect(find.text('Открыть настройки'), findsOneWidget);
+
+    await tester.tap(find.text('Настройки'));
+    await tester.pumpAndSettle();
+    expect(find.text('Это устройство'), findsOneWidget);
+    expect(find.text('Подготовить'), findsOneWidget);
+    expect(find.text('Сервер'), findsOneWidget);
+    expect(find.text('Подключить'), findsOneWidget);
+
+    await locale.setLanguage(AppLanguage.english);
   });
 
   testWidgets('header statuses and empty states lead to where to act', (
@@ -177,7 +201,10 @@ void main() {
   );
 }
 
-HomeBoxApp _testApp({BiometricAuthenticator? biometricAuthenticator}) {
+HomeBoxApp _testApp({
+  BiometricAuthenticator? biometricAuthenticator,
+  AppLocaleController? localeController,
+}) {
   final deviceIdentityStore = DeviceIdentityStore(
     MemoryDevicePrivateKeyStorage(),
   );
@@ -195,7 +222,18 @@ HomeBoxApp _testApp({BiometricAuthenticator? biometricAuthenticator}) {
     syncFolderStore: SyncFolderStore(MemorySyncFolderStorage()),
     biometricAuthenticator:
         biometricAuthenticator ?? const _UnavailableBiometricAuthenticator(),
+    localeController: localeController,
   );
+}
+
+final class _MemoryLanguageStorage implements AppLanguageStorage {
+  String? value;
+
+  @override
+  Future<String?> read() async => value;
+
+  @override
+  Future<void> write(String languageCode) async => value = languageCode;
 }
 
 final class _UnavailableBiometricAuthenticator

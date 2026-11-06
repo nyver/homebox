@@ -211,7 +211,12 @@ final class _DeviceProvisioningCard extends StatelessWidget {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            controller.errorMessage ?? 'No other active device is registered yet. Sign in on the new device first.',
+            controller.errorMessage ??
+                _localized(
+                  context,
+                  en: 'No other active device is registered yet. Sign in on the new device first.',
+                  ru: 'Других активных устройств пока нет. Сначала войдите в аккаунт на новом устройстве.',
+                ),
           ),
         ),
       );
@@ -220,7 +225,13 @@ final class _DeviceProvisioningCard extends StatelessWidget {
     final target = await showDialog<transport.HomeBoxDevice>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Choose a device to approve'),
+        title: Text(
+          _localized(
+            context,
+            en: 'Choose a device to approve',
+            ru: 'Выберите устройство для подтверждения',
+          ),
+        ),
         content: SizedBox(
           width: 420,
           child: ListView.separated(
@@ -237,7 +248,11 @@ final class _DeviceProvisioningCard extends StatelessWidget {
                 ),
                 title: Text('${device.name} (${_deviceCode(device.id)})'),
                 subtitle: Text(
-                  '${device.platform} · Last seen ${device.lastSeenAt.toLocal()}',
+                  _localized(
+                    context,
+                    en: '${device.platform} · Last seen ${device.lastSeenAt.toLocal()}',
+                    ru: '${device.platform} · был в сети ${_formatLocalDateTime(device.lastSeenAt)}',
+                  ),
                 ),
                 onTap: () => Navigator.pop(context, device),
               );
@@ -247,7 +262,7 @@ final class _DeviceProvisioningCard extends StatelessWidget {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
         ],
       ),
@@ -262,7 +277,13 @@ final class _DeviceProvisioningCard extends StatelessWidget {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Verify and approve device'),
+          title: Text(
+            _localized(
+              context,
+              en: 'Verify and approve device',
+              ru: 'Проверьте и подтвердите устройство',
+            ),
+          ),
           content: SizedBox(
             width: 460,
             child: Column(
@@ -270,7 +291,11 @@ final class _DeviceProvisioningCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'On ${target.name}, open Settings → This device. Compare the full pairing fingerprint before sharing the vault key.',
+                  _localized(
+                    context,
+                    en: 'On ${target.name}, open Settings → This device. Compare the full pairing fingerprint before sharing the vault key.',
+                    ru: 'На устройстве ${target.name} откройте «Настройки → Это устройство». Сверьте отпечаток полностью, прежде чем передавать ключ хранилища.',
+                  ),
                 ),
                 const SizedBox(height: 12),
                 SelectableText(
@@ -284,8 +309,12 @@ final class _DeviceProvisioningCard extends StatelessWidget {
                   onChanged: (value) => setDialogState(
                     () => fingerprintVerified = value ?? false,
                   ),
-                  title: const Text(
-                    'The fingerprint exactly matches the new device',
+                  title: Text(
+                    _localized(
+                      context,
+                      en: 'The fingerprint exactly matches the new device',
+                      ru: 'Отпечаток полностью совпадает с новым устройством',
+                    ),
                   ),
                   controlAffinity: ListTileControlAffinity.leading,
                 ),
@@ -295,13 +324,19 @@ final class _DeviceProvisioningCard extends StatelessWidget {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
+              child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
             ),
             FilledButton(
               onPressed: fingerprintVerified
                   ? () => Navigator.pop(context, true)
                   : null,
-              child: const Text('Sign and approve'),
+              child: Text(
+                _localized(
+                  context,
+                  en: 'Sign and approve',
+                  ru: 'Подписать и подтвердить',
+                ),
+              ),
             ),
           ],
         ),
@@ -317,8 +352,17 @@ final class _DeviceProvisioningCard extends StatelessWidget {
       SnackBar(
         content: Text(
           approved
-              ? 'Device approved. Open Settings there and choose Check approval.'
-              : (controller.errorMessage ?? 'Could not approve this device.'),
+              ? _localized(
+                  context,
+                  en: 'Device approved. Open Settings there and choose Check approval.',
+                  ru: 'Устройство подтверждено. Откройте на нём настройки и нажмите «Проверить подтверждение».',
+                )
+              : (controller.errorMessage ??
+                    _localized(
+                      context,
+                      en: 'Could not approve this device.',
+                      ru: 'Не удалось подтвердить устройство.',
+                    )),
         ),
       ),
     );
@@ -329,10 +373,23 @@ final class _DeviceProvisioningCard extends StatelessWidget {
     if (provisioned) await onVaultProvisioned();
     if (!context.mounted) return;
     final message = provisioned
-        ? 'This device is approved and the vault is unlocked.'
+        ? _localized(
+            context,
+            en: 'This device is approved and the vault is unlocked.',
+            ru: 'Устройство подтверждено, хранилище разблокировано.',
+          )
         : controller.status == DeviceProvisioningStatus.awaitingApproval
-        ? 'Waiting for approval from a trusted device.'
-        : (controller.errorMessage ?? 'Could not check device approval.');
+        ? _localized(
+            context,
+            en: 'Waiting for approval from a trusted device.',
+            ru: 'Ожидается подтверждение с доверенного устройства.',
+          )
+        : (controller.errorMessage ??
+              _localized(
+                context,
+                en: 'Could not check device approval.',
+                ru: 'Не удалось проверить подтверждение устройства.',
+              ));
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
   }
@@ -358,23 +415,55 @@ final class _DeviceProvisioningCard extends StatelessWidget {
           ? _deviceCode(serverConnectionController.session!.device.id)
           : null;
       final subtitle = switch (controller.status) {
-        DeviceProvisioningStatus.loading =>
-          'Exchanging the encrypted vault key…',
-        DeviceProvisioningStatus.awaitingApproval =>
-          'Waiting for a trusted device to approve this device.',
+        DeviceProvisioningStatus.loading => _localized(
+          context,
+          en: 'Exchanging the encrypted vault key…',
+          ru: 'Обмен зашифрованным ключом хранилища…',
+        ),
+        DeviceProvisioningStatus.awaitingApproval => _localized(
+          context,
+          en: 'Waiting for a trusted device to approve this device.',
+          ru: 'Ожидается подтверждение этого устройства с доверенного.',
+        ),
         DeviceProvisioningStatus.ready =>
           vaultReady
-              ? 'This device can approve another signed-in device.'
-              : 'Vault key received from a trusted device.',
+              ? _localized(
+                  context,
+                  en: 'This device can approve another signed-in device.',
+                  ru: 'Это устройство может подтверждать другие устройства аккаунта.',
+                )
+              : _localized(
+                  context,
+                  en: 'Vault key received from a trusted device.',
+                  ru: 'Ключ хранилища получен с доверенного устройства.',
+                ),
         DeviceProvisioningStatus.failed =>
-          controller.errorMessage ?? 'Provisioning failed.',
-        DeviceProvisioningStatus.idle when !signedIn =>
-          'Sign in on both devices before linking them.',
-        DeviceProvisioningStatus.idle when !deviceReady =>
-          'Prepare this device identity before linking it.',
-        DeviceProvisioningStatus.idle when vaultReady =>
-          'Approve another device that has signed in to this account.',
-        DeviceProvisioningStatus.idle => 'Sign in on a trusted device, approve this one there, then check here.',
+          controller.errorMessage ??
+              _localized(
+                context,
+                en: 'Provisioning failed.',
+                ru: 'Не удалось подключить устройство.',
+              ),
+        DeviceProvisioningStatus.idle when !signedIn => _localized(
+          context,
+          en: 'Sign in on both devices before linking them.',
+          ru: 'Войдите в аккаунт на обоих устройствах, прежде чем связывать их.',
+        ),
+        DeviceProvisioningStatus.idle when !deviceReady => _localized(
+          context,
+          en: 'Prepare this device identity before linking it.',
+          ru: 'Подготовьте ключ этого устройства, прежде чем связывать его.',
+        ),
+        DeviceProvisioningStatus.idle when vaultReady => _localized(
+          context,
+          en: 'Approve another device that has signed in to this account.',
+          ru: 'Подтвердите другое устройство, вошедшее в этот аккаунт.',
+        ),
+        DeviceProvisioningStatus.idle => _localized(
+          context,
+          en: 'Sign in on a trusted device, approve this one there, then check here.',
+          ru: 'Подтвердите это устройство на доверенном, затем проверьте здесь.',
+        ),
       };
       final trailing = controller.busy
           ? const SizedBox.square(
@@ -384,22 +473,44 @@ final class _DeviceProvisioningCard extends StatelessWidget {
           : canApproveAnother
           ? OutlinedButton(
               onPressed: () => _addDevice(context),
-              child: const Text('Add device'),
+              child: Text(
+                _localized(
+                  context,
+                  en: 'Add device',
+                  ru: 'Добавить устройство',
+                ),
+              ),
             )
           : canCollectApproval
           ? FilledButton(
               onPressed: () => _checkApproval(context),
-              child: const Text('Check approval'),
+              child: Text(
+                _localized(
+                  context,
+                  en: 'Check approval',
+                  ru: 'Проверить подтверждение',
+                ),
+              ),
             )
           : null;
       return Card(
         child: ListTile(
           leading: const Icon(Icons.phonelink_lock_outlined),
-          title: const Text('Trusted devices'),
+          title: Text(
+            _localized(
+              context,
+              en: 'Trusted devices',
+              ru: 'Доверенные устройства',
+            ),
+          ),
           subtitle: Text(
             deviceCode == null
                 ? subtitle
-                : '$subtitle\nDevice code: $deviceCode',
+                : _localized(
+                    context,
+                    en: '$subtitle\nDevice code: $deviceCode',
+                    ru: '$subtitle\nКод устройства: $deviceCode',
+                  ),
           ),
           trailing: trailing,
           isThreeLine: true,
@@ -500,21 +611,35 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Revoke this device?'),
+        title: Text(
+          _localized(
+            context,
+            en: 'Revoke this device?',
+            ru: 'Отозвать это устройство?',
+          ),
+        ),
         content: Text(
-          '${device.name} (${_deviceCode(device.id)}) will be signed out '
-          'immediately and must be approved again by a trusted device before '
-          'it can access the vault. This cannot retract a vault key it has '
-          'already received.',
+          _localized(
+            context,
+            en:
+                '${device.name} (${_deviceCode(device.id)}) will be signed out '
+                'immediately and must be approved again by a trusted device before '
+                'it can access the vault. This cannot retract a vault key it has '
+                'already received.',
+            ru:
+                '${device.name} (${_deviceCode(device.id)}) сразу выйдет из аккаунта и '
+                'получит доступ к хранилищу только после повторного подтверждения. '
+                'Уже полученный устройством ключ отозвать нельзя.',
+          ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Revoke'),
+            child: Text(_localized(context, en: 'Revoke', ru: 'Отозвать')),
           ),
         ],
       ),
@@ -528,9 +653,17 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
       SnackBar(
         content: Text(
           revoked
-              ? '${device.name} has been revoked.'
+              ? _localized(
+                  context,
+                  en: '${device.name} has been revoked.',
+                  ru: 'Устройство ${device.name} отозвано.',
+                )
               : (widget.controller.errorMessage ??
-                    'Could not revoke this device.'),
+                    _localized(
+                      context,
+                      en: 'Could not revoke this device.',
+                      ru: 'Не удалось отозвать устройство.',
+                    )),
         ),
       ),
     );
@@ -552,13 +685,30 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
           children: [
             ListTile(
               leading: const Icon(Icons.devices_other_outlined),
-              title: const Text('Account devices'),
-              subtitle: const Text(
-                'Approved devices hold the vault key; pending devices are '
-                'signed in but still waiting for approval.',
+              title: Text(
+                _localized(
+                  context,
+                  en: 'Account devices',
+                  ru: 'Устройства аккаунта',
+                ),
+              ),
+              subtitle: Text(
+                _localized(
+                  context,
+                  en:
+                      'Approved devices hold the vault key; pending devices are '
+                      'signed in but still waiting for approval.',
+                  ru:
+                      'У подтверждённых устройств есть ключ хранилища; ожидающие вошли '
+                      'в аккаунт, но ещё не подтверждены.',
+                ),
               ),
               trailing: IconButton(
-                tooltip: 'Refresh devices',
+                tooltip: _localized(
+                  context,
+                  en: 'Refresh devices',
+                  ru: 'Обновить список',
+                ),
                 onPressed: !signedIn || _loading ? null : _load,
                 icon: _loading
                     ? const SizedBox.square(
@@ -577,11 +727,17 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
                 ),
               )
             else if (signedIn && !_loading && _devices.isEmpty)
-              const Padding(
+              Padding(
                 padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('No other device is signed in yet.'),
+                  child: Text(
+                    _localized(
+                      context,
+                      en: 'No other device is signed in yet.',
+                      ru: 'Других устройств в аккаунте пока нет.',
+                    ),
+                  ),
                 ),
               )
             else
@@ -598,7 +754,7 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
                   ),
                   title: Text(
                     '${device.name} (${_deviceCode(device.id)})'
-                    '${device.id == currentDeviceId ? ' · this device' : ''}',
+                    '${device.id == currentDeviceId ? _localized(context, en: ' · this device', ru: ' · это устройство') : ''}',
                   ),
                   subtitle: Row(
                     children: [
@@ -616,9 +772,21 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
                         child: Text(
                           device.hasVaultKey
                               ? (device.lastSyncAt != null
-                                    ? 'Approved · Last sync: ${_formatLocalDateTime(device.lastSyncAt!)}'
-                                    : 'Approved')
-                              : 'Pending approval',
+                                    ? _localized(
+                                        context,
+                                        en: 'Approved · Last sync: ${_formatLocalDateTime(device.lastSyncAt!)}',
+                                        ru: 'Подтверждено · синхронизация: ${_formatLocalDateTime(device.lastSyncAt!)}',
+                                      )
+                                    : _localized(
+                                        context,
+                                        en: 'Approved',
+                                        ru: 'Подтверждено',
+                                      ))
+                              : _localized(
+                                  context,
+                                  en: 'Pending approval',
+                                  ru: 'Ожидает подтверждения',
+                                ),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
@@ -627,7 +795,11 @@ final class _AccountDevicesCardState extends State<_AccountDevicesCard> {
                   trailing: device.id == currentDeviceId
                       ? null
                       : IconButton(
-                          tooltip: 'Revoke device',
+                          tooltip: _localized(
+                            context,
+                            en: 'Revoke device',
+                            ru: 'Отозвать устройство',
+                          ),
                           onPressed: _revoking ? null : () => _revoke(device),
                           icon: const Icon(Icons.block_outlined),
                         ),
@@ -689,11 +861,25 @@ final class _AutostartCardState extends State<_AutostartCard> {
   Widget build(BuildContext context) => Card(
     child: SwitchListTile(
       secondary: const Icon(Icons.rocket_launch_outlined),
-      title: const Text('Start HomeBox with Windows'),
+      title: Text(
+        _localized(
+          context,
+          en: 'Start HomeBox with Windows',
+          ru: 'Запускать HomeBox вместе с Windows',
+        ),
+      ),
       subtitle: Text(
         _enabled == null
-            ? 'Available in the Windows desktop build.'
-            : 'Uses your current Windows account only.',
+            ? _localized(
+                context,
+                en: 'Available in the Windows desktop build.',
+                ru: 'Доступно в версии для Windows.',
+              )
+            : _localized(
+                context,
+                en: 'Uses your current Windows account only.',
+                ru: 'Только для текущей учётной записи Windows.',
+              ),
       ),
       value: _enabled ?? false,
       onChanged: _loading || _enabled == null ? null : _set,
@@ -710,7 +896,13 @@ final class _DeviceIdentityCard extends StatelessWidget {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Prepare this device?'),
+        title: Text(
+          _localized(
+            context,
+            en: 'Prepare this device?',
+            ru: 'Подготовить это устройство?',
+          ),
+        ),
         content: Text(
           _localized(
             context,
@@ -725,11 +917,13 @@ final class _DeviceIdentityCard extends StatelessWidget {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Create identity'),
+            child: Text(
+              _localized(context, en: 'Create identity', ru: 'Создать ключ'),
+            ),
           ),
         ],
       ),
@@ -740,9 +934,17 @@ final class _DeviceIdentityCard extends StatelessWidget {
   Future<void> _copyFingerprint(BuildContext context, String value) async {
     await Clipboard.setData(ClipboardData(text: value));
     if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Device fingerprint copied.')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          _localized(
+            context,
+            en: 'Device fingerprint copied.',
+            ru: 'Отпечаток устройства скопирован.',
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -751,18 +953,31 @@ final class _DeviceIdentityCard extends StatelessWidget {
     builder: (context, _) {
       final fingerprint = controller.publicKeyFingerprint;
       final subtitle = switch (controller.status) {
-        DeviceSetupStatus.checking => 'Checking secure storage…',
-        DeviceSetupStatus.missing =>
-          'No device identity. Create one before requesting provisioning.',
+        DeviceSetupStatus.checking => _localized(
+          context,
+          en: 'Checking secure storage…',
+          ru: 'Проверка защищённого хранилища…',
+        ),
+        DeviceSetupStatus.missing => _localized(
+          context,
+          en: 'No device identity. Create one before requesting provisioning.',
+          ru: 'У устройства ещё нет ключа. Создайте его перед подключением.',
+        ),
         DeviceSetupStatus.creating => _localized(
           context,
           en: 'Creating this device\'s key…',
           ru: 'Создание ключа устройства…',
         ),
-        DeviceSetupStatus.ready =>
-          'Identity ready · Not provisioned\nFingerprint: $fingerprint',
-        DeviceSetupStatus.failed =>
-          'Secure storage is unavailable or contains invalid data.',
+        DeviceSetupStatus.ready => _localized(
+          context,
+          en: 'Identity ready · Not provisioned\nFingerprint: $fingerprint',
+          ru: 'Ключ создан · не подключено\nОтпечаток: $fingerprint',
+        ),
+        DeviceSetupStatus.failed => _localized(
+          context,
+          en: 'Secure storage is unavailable or contains invalid data.',
+          ru: 'Защищённое хранилище недоступно или содержит некорректные данные.',
+        ),
       };
       final trailing = switch (controller.status) {
         DeviceSetupStatus.checking ||
@@ -773,10 +988,16 @@ final class _DeviceIdentityCard extends StatelessWidget {
         DeviceSetupStatus.missing => FilledButton(
           key: const ValueKey('prepare-device'),
           onPressed: () => _confirmPreparation(context),
-          child: const Text('Prepare device'),
+          child: Text(
+            _localized(context, en: 'Prepare device', ru: 'Подготовить'),
+          ),
         ),
         DeviceSetupStatus.ready => IconButton(
-          tooltip: 'Copy public-key fingerprint',
+          tooltip: _localized(
+            context,
+            en: 'Copy public-key fingerprint',
+            ru: 'Скопировать отпечаток',
+          ),
           onPressed: fingerprint == null
               ? null
               : () => _copyFingerprint(context, fingerprint),
@@ -784,13 +1005,15 @@ final class _DeviceIdentityCard extends StatelessWidget {
         ),
         DeviceSetupStatus.failed => TextButton(
           onPressed: controller.initialize,
-          child: const Text('Retry'),
+          child: Text(_localized(context, en: 'Retry', ru: 'Повторить')),
         ),
       };
       return Card(
         child: ListTile(
           leading: const Icon(Icons.devices_other_outlined),
-          title: const Text('This device'),
+          title: Text(
+            _localized(context, en: 'This device', ru: 'Это устройство'),
+          ),
           subtitle: Text(subtitle),
           trailing: trailing,
           isThreeLine: controller.status == DeviceSetupStatus.ready,
@@ -810,12 +1033,22 @@ final class _ServerConnectionCard extends StatelessWidget {
     final entered = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Connect to a HomeBox server'),
+        title: Text(
+          _localized(
+            context,
+            en: 'Connect to a HomeBox server',
+            ru: 'Подключение к серверу HomeBox',
+          ),
+        ),
         content: TextField(
           controller: urlController,
           autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Server address',
+          decoration: InputDecoration(
+            labelText: _localized(
+              context,
+              en: 'Server address',
+              ru: 'Адрес сервера',
+            ),
             hintText: 'homebox.local:8787',
           ),
           onSubmitted: (value) => Navigator.pop(context, value),
@@ -823,11 +1056,11 @@ final class _ServerConnectionCard extends StatelessWidget {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, urlController.text),
-            child: const Text('Continue'),
+            child: Text(_localized(context, en: 'Continue', ru: 'Продолжить')),
           ),
         ],
       ),
@@ -891,14 +1124,27 @@ final class _ServerConnectionCard extends StatelessWidget {
     final trust = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Verify server identity'),
+        title: Text(
+          _localized(
+            context,
+            en: 'Verify server identity',
+            ru: 'Проверьте подлинность сервера',
+          ),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Compare this fingerprint with the one printed by "homebox server fingerprint" '
-              'on the server, over a channel you trust, before continuing.',
+            Text(
+              _localized(
+                context,
+                en:
+                    'Compare this fingerprint with the one printed by "homebox server fingerprint" '
+                    'on the server, over a channel you trust, before continuing.',
+                ru:
+                    'Сравните этот отпечаток с выводом команды «homebox server fingerprint» '
+                    'на сервере по надёжному каналу, прежде чем продолжить.',
+              ),
             ),
             const SizedBox(height: 12),
             SelectableText(
@@ -912,11 +1158,17 @@ final class _ServerConnectionCard extends StatelessWidget {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Trust this server'),
+            child: Text(
+              _localized(
+                context,
+                en: 'Trust this server',
+                ru: 'Доверять серверу',
+              ),
+            ),
           ),
         ],
       ),
@@ -934,19 +1186,27 @@ final class _ServerConnectionCard extends StatelessWidget {
     final submitted = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Sign in'),
+        title: Text(_localized(context, en: 'Sign in', ru: 'Войти')),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
               controller: usernameController,
               autofocus: true,
-              decoration: const InputDecoration(labelText: 'Username'),
+              decoration: InputDecoration(
+                labelText: _localized(
+                  context,
+                  en: 'Username',
+                  ru: 'Имя пользователя',
+                ),
+              ),
             ),
             TextField(
               controller: passwordController,
               obscureText: true,
-              decoration: const InputDecoration(labelText: 'Password'),
+              decoration: InputDecoration(
+                labelText: _localized(context, en: 'Password', ru: 'Пароль'),
+              ),
               onSubmitted: (_) => Navigator.pop(context, true),
             ),
           ],
@@ -954,11 +1214,11 @@ final class _ServerConnectionCard extends StatelessWidget {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Sign in'),
+            child: Text(_localized(context, en: 'Sign in', ru: 'Войти')),
           ),
         ],
       ),
@@ -976,8 +1236,11 @@ final class _ServerConnectionCard extends StatelessWidget {
         Card(
           child: ListTile(
             leading: const Icon(Icons.dns_outlined),
-            title: const Text('Server'),
-            subtitle: Text(controller.server?.baseUrl ?? 'Not connected'),
+            title: Text(_localized(context, en: 'Server', ru: 'Сервер')),
+            subtitle: Text(
+              controller.server?.baseUrl ??
+                  _localized(context, en: 'Not connected', ru: 'Не подключено'),
+            ),
             trailing: switch (controller.status) {
               ServerConnectionStatus.discovering ||
               ServerConnectionStatus.authenticating => const SizedBox.square(
@@ -987,7 +1250,9 @@ final class _ServerConnectionCard extends StatelessWidget {
               ServerConnectionStatus.disconnected ||
               ServerConnectionStatus.failed => FilledButton(
                 onPressed: () => _promptForServer(context),
-                child: const Text('Connect'),
+                child: Text(
+                  _localized(context, en: 'Connect', ru: 'Подключить'),
+                ),
               ),
               _ => TextButton(
                 onPressed: () => _confirmForget(context),
@@ -1004,7 +1269,13 @@ final class _ServerConnectionCard extends StatelessWidget {
           Card(
             child: ListTile(
               leading: const Icon(Icons.error_outline),
-              title: const Text('Connection failed'),
+              title: Text(
+                _localized(
+                  context,
+                  en: 'Connection failed',
+                  ru: 'Не удалось подключиться',
+                ),
+              ),
               subtitle: Text(controller.errorMessage!),
             ),
           ),
@@ -1024,8 +1295,16 @@ final class _ServerConnectionCard extends StatelessWidget {
               ),
               title: Text(
                 session != null
-                    ? 'Signed in as ${session.user.username}'
-                    : 'Not signed in',
+                    ? _localized(
+                        context,
+                        en: 'Signed in as ${session.user.username}',
+                        ru: 'Вы вошли как ${session.user.username}',
+                      )
+                    : _localized(
+                        context,
+                        en: 'Not signed in',
+                        ru: 'Вход не выполнен',
+                      ),
               ),
               subtitle: session == null && controller.errorMessage != null
                   ? Text(controller.errorMessage!)
@@ -1033,11 +1312,15 @@ final class _ServerConnectionCard extends StatelessWidget {
               trailing: session != null
                   ? TextButton(
                       onPressed: () => controller.logout(),
-                      child: const Text('Sign out'),
+                      child: Text(
+                        _localized(context, en: 'Sign out', ru: 'Выйти'),
+                      ),
                     )
                   : FilledButton(
                       onPressed: () => _promptForLogin(context),
-                      child: const Text('Sign in'),
+                      child: Text(
+                        _localized(context, en: 'Sign in', ru: 'Войти'),
+                      ),
                     ),
             ),
           ),
@@ -1068,8 +1351,14 @@ final class _VaultSetupCard extends StatelessWidget {
     final userId = serverConnectionController.session?.user.id;
     if (userId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Sign in to the server before creating a vault.'),
+        SnackBar(
+          content: Text(
+            _localized(
+              context,
+              en: 'Sign in to the server before creating a vault.',
+              ru: 'Войдите на сервер, прежде чем создавать хранилище.',
+            ),
+          ),
         ),
       );
       return;
@@ -1077,19 +1366,34 @@ final class _VaultSetupCard extends StatelessWidget {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Create this account\'s vault?'),
-        content: const Text(
-          'HomeBox generates the encryption keys that protect your files on this server, plus a Recovery Secret you must save. '
-          'If every trusted device and the Recovery Secret are lost, nobody — including HomeBox — can recover your files.',
+        title: Text(
+          _localized(
+            context,
+            en: 'Create this account\'s vault?',
+            ru: 'Создать хранилище этого аккаунта?',
+          ),
+        ),
+        content: Text(
+          _localized(
+            context,
+            en:
+                'HomeBox generates the encryption keys that protect your files on this server, plus a Recovery Secret you must save. '
+                'If every trusted device and the Recovery Secret are lost, nobody — including HomeBox — can recover your files.',
+            ru:
+                'HomeBox создаст ключи шифрования, защищающие ваши файлы на сервере, и Recovery Secret, который нужно сохранить. '
+                'Если потерять все доверенные устройства и Recovery Secret, восстановить файлы не сможет никто — даже HomeBox.',
+          ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Create vault'),
+            child: Text(
+              _localized(context, en: 'Create vault', ru: 'Создать хранилище'),
+            ),
           ),
         ],
       ),
@@ -1101,7 +1405,12 @@ final class _VaultSetupCard extends StatelessWidget {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              controller.errorMessage ?? 'Could not create the vault.',
+              controller.errorMessage ??
+                  _localized(
+                    context,
+                    en: 'Could not create the vault.',
+                    ru: 'Не удалось создать хранилище.',
+                  ),
             ),
           ),
         );
@@ -1119,9 +1428,17 @@ final class _VaultSetupCard extends StatelessWidget {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Vault created, but this device could not record its own approval: '
-            '${deviceProvisioningController.errorMessage ?? 'unknown error'}. '
-            'It may show as pending in Account devices until this is retried.',
+            _localized(
+              context,
+              en:
+                  'Vault created, but this device could not record its own approval: '
+                  '${deviceProvisioningController.errorMessage ?? 'unknown error'}. '
+                  'It may show as pending in Account devices until this is retried.',
+              ru:
+                  'Хранилище создано, но устройство не смогло записать своё подтверждение: '
+                  '${deviceProvisioningController.errorMessage ?? 'неизвестная ошибка'}. '
+                  'В списке устройств оно может отображаться как ожидающее, пока это не будет повторено.',
+            ),
           ),
         ),
       );
@@ -1244,12 +1561,33 @@ final class _VaultSetupCard extends StatelessWidget {
     animation: Listenable.merge([controller, recoveryController]),
     builder: (context, _) {
       final subtitle = switch (controller.status) {
-        VaultSetupStatus.checking => 'Checking for an existing vault…',
-        VaultSetupStatus.locked => 'No vault on this device yet. Create one here, or unlock this device from an existing trusted device / Recovery Secret.',
-        VaultSetupStatus.creating => 'Creating vault keys…',
-        VaultSetupStatus.ready => 'Vault ready on this device.',
+        VaultSetupStatus.checking => _localized(
+          context,
+          en: 'Checking for an existing vault…',
+          ru: 'Поиск существующего хранилища…',
+        ),
+        VaultSetupStatus.locked => _localized(
+          context,
+          en: 'No vault on this device yet. Create one here, or unlock this device from an existing trusted device / Recovery Secret.',
+          ru: 'На этом устройстве ещё нет хранилища. Создайте его или разблокируйте с доверенного устройства либо по Recovery Secret.',
+        ),
+        VaultSetupStatus.creating => _localized(
+          context,
+          en: 'Creating vault keys…',
+          ru: 'Создание ключей хранилища…',
+        ),
+        VaultSetupStatus.ready => _localized(
+          context,
+          en: 'Vault ready on this device.',
+          ru: 'Хранилище готово на этом устройстве.',
+        ),
         VaultSetupStatus.failed =>
-          controller.errorMessage ?? 'Vault storage is unavailable.',
+          controller.errorMessage ??
+              _localized(
+                context,
+                en: 'Vault storage is unavailable.',
+                ru: 'Хранилище ключей недоступно.',
+              ),
       };
       final restoring =
           controller.status == VaultSetupStatus.locked &&
@@ -1268,7 +1606,7 @@ final class _VaultSetupCard extends StatelessWidget {
         VaultSetupStatus.ready => const Icon(Icons.check_circle_outline),
         VaultSetupStatus.failed => TextButton(
           onPressed: controller.initialize,
-          child: const Text('Retry'),
+          child: Text(_localized(context, en: 'Retry', ru: 'Повторить')),
         ),
       };
       return Card(
@@ -1277,7 +1615,13 @@ final class _VaultSetupCard extends StatelessWidget {
           children: [
             ListTile(
               leading: const Icon(Icons.enhanced_encryption_outlined),
-              title: const Text('Personal vault'),
+              title: Text(
+                _localized(
+                  context,
+                  en: 'Personal vault',
+                  ru: 'Личное хранилище',
+                ),
+              ),
               subtitle: Text(subtitle),
               trailing: trailing,
               isThreeLine: true,
@@ -1305,7 +1649,13 @@ final class _VaultSetupCard extends StatelessWidget {
                     ),
                     FilledButton(
                       onPressed: restoring ? null : () => _createVault(context),
-                      child: const Text('Create vault'),
+                      child: Text(
+                        _localized(
+                          context,
+                          en: 'Create vault',
+                          ru: 'Создать хранилище',
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -1329,13 +1679,23 @@ Future<void> _showRecoverySecretDialog(BuildContext context, String secret) =>
         // own rebuild scope and never see the other's state change.
         return StatefulBuilder(
           builder: (context, setState) => AlertDialog(
-            title: const Text('Save your Recovery Secret'),
+            title: Text(
+              _localized(
+                context,
+                en: 'Save your Recovery Secret',
+                ru: 'Сохраните Recovery Secret',
+              ),
+            ),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'This is shown only once. Without it — and without another trusted device — your files can never be recovered.',
+                Text(
+                  _localized(
+                    context,
+                    en: 'This is shown only once. Without it — and without another trusted device — your files can never be recovered.',
+                    ru: 'Он показывается только один раз. Без него и без другого доверенного устройства восстановить файлы будет невозможно.',
+                  ),
                 ),
                 const SizedBox(height: 12),
                 SelectableText(
@@ -1351,8 +1711,12 @@ Future<void> _showRecoverySecretDialog(BuildContext context, String secret) =>
                   controlAffinity: ListTileControlAffinity.leading,
                   onChanged: (value) =>
                       setState(() => confirmedSaved = value ?? false),
-                  title: const Text(
-                    'I have saved this Recovery Secret somewhere safe.',
+                  title: Text(
+                    _localized(
+                      context,
+                      en: 'I have saved this Recovery Secret somewhere safe.',
+                      ru: 'Я сохранил(а) Recovery Secret в надёжном месте.',
+                    ),
                   ),
                 ),
               ],
@@ -1361,11 +1725,11 @@ Future<void> _showRecoverySecretDialog(BuildContext context, String secret) =>
               TextButton.icon(
                 onPressed: () => Clipboard.setData(ClipboardData(text: secret)),
                 icon: const Icon(Icons.copy_outlined),
-                label: const Text('Copy'),
+                label: Text(_localized(context, en: 'Copy', ru: 'Копировать')),
               ),
               FilledButton(
                 onPressed: confirmedSaved ? () => Navigator.pop(context) : null,
-                child: const Text('Done'),
+                child: Text(_localized(context, en: 'Done', ru: 'Готово')),
               ),
             ],
           ),

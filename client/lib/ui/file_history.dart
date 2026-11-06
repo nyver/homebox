@@ -225,7 +225,11 @@ final class _TrashPageState extends State<_TrashPage> {
             trailing: _selecting
                 ? null
                 : PopupMenuButton<String>(
-                    tooltip: 'More actions',
+                    tooltip: _localized(
+                      context,
+                      en: 'More actions',
+                      ru: 'Другие действия',
+                    ),
                     enabled: !_working,
                     onSelected: (value) => switch (value) {
                       'restore' => _restore([item]),
@@ -290,7 +294,11 @@ final class _TrashPageState extends State<_TrashPage> {
                     tristate: true,
                     value: count == 0 ? false : (count == total ? true : null),
                     onChanged: _working ? null : (_) => _toggleAll(),
-                    semanticLabel: 'Select all',
+                    semanticLabel: _localized(
+                      context,
+                      en: 'Select all',
+                      ru: 'Выбрать все',
+                    ),
                   ),
                   IconButton(
                     onPressed: count == 0 || _working

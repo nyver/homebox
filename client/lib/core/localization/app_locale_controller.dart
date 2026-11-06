@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'user_text.dart';
+
 enum AppLanguage {
   english('en'),
   russian('ru');
@@ -54,12 +56,14 @@ final class AppLocaleController extends ChangeNotifier {
         .firstOrNull;
     if (language == null || language == _language) return;
     _language = language;
+    UserText.languageCode = language.languageCode;
     notifyListeners();
   }
 
   Future<void> setLanguage(AppLanguage language) async {
     if (language == _language) return;
     _language = language;
+    UserText.languageCode = language.languageCode;
     notifyListeners();
     try {
       await _storage.write(language.languageCode);

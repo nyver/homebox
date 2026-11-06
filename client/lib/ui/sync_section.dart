@@ -584,9 +584,19 @@ final class _ResyncCard extends StatelessWidget {
         children: [
           ListTile(
             leading: const Icon(Icons.restart_alt_outlined),
-            title: const Text('Resync from local folder'),
-            subtitle: const Text(
-              'Move the current server Vault to Trash, then upload this folder again from scratch.',
+            title: Text(
+              _localized(
+                context,
+                en: 'Resync from local folder',
+                ru: 'Пересоздать хранилище из локальной папки',
+              ),
+            ),
+            subtitle: Text(
+              _localized(
+                context,
+                en: 'Move the current server Vault to Trash, then upload this folder again from scratch.',
+                ru: 'Текущее хранилище на сервере переместится в корзину, затем эта папка загрузится заново.',
+              ),
             ),
             trailing: FilledButton.icon(
               key: const ValueKey('resync-vault'),
@@ -601,7 +611,11 @@ final class _ResyncCard extends StatelessWidget {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.restart_alt_outlined),
-              label: Text(resyncing ? 'Resyncing…' : 'Resync'),
+              label: Text(
+                resyncing
+                    ? _localized(context, en: 'Resyncing…', ru: 'Пересоздание…')
+                    : _localized(context, en: 'Resync', ru: 'Пересоздать'),
+              ),
             ),
           ),
         ],

@@ -550,8 +550,14 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('HomeBox could not recover the captured photo.'),
+          SnackBar(
+            content: Text(
+              _localized(
+                context,
+                en: 'HomeBox could not recover the captured photo.',
+                ru: 'HomeBox не удалось восстановить снятое фото.',
+              ),
+            ),
           ),
         );
       }
@@ -566,7 +572,15 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('HomeBox could not open the camera.')),
+          SnackBar(
+            content: Text(
+              _localized(
+                context,
+                en: 'HomeBox could not open the camera.',
+                ru: 'HomeBox не удалось открыть камеру.',
+              ),
+            ),
+          ),
         );
       }
     }
@@ -598,9 +612,22 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
         content: Text(
           uploaded
               ? (recovered
-                    ? 'Recovered camera photo encrypted and uploaded.'
-                    : 'Camera photo encrypted and uploaded.')
-              : (files.errorMessage ?? 'Could not upload the camera photo.'),
+                    ? _localized(
+                        context,
+                        en: 'Recovered camera photo encrypted and uploaded.',
+                        ru: 'Восстановленное фото зашифровано и загружено.',
+                      )
+                    : _localized(
+                        context,
+                        en: 'Camera photo encrypted and uploaded.',
+                        ru: 'Фото зашифровано и загружено.',
+                      ))
+              : (files.errorMessage ??
+                    _localized(
+                      context,
+                      en: 'Could not upload the camera photo.',
+                      ru: 'Не удалось загрузить фото.',
+                    )),
         ),
       ),
     );
@@ -690,9 +717,13 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     if (engine.isPaused) {
       if (_resyncRecoveryRequired) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Text(
-              'Resync did not finish. Retry Resync before resuming normal synchronization.',
+              _localized(
+                context,
+                en: 'Resync did not finish. Retry Resync before resuming normal synchronization.',
+                ru: 'Пересоздание не завершилось. Повторите его, прежде чем продолжать обычную синхронизацию.',
+              ),
             ),
           ),
         );
@@ -718,21 +749,35 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Rebuild Vault from local folder?'),
-        content: const Text(
-          'All current files and folders in the server Vault will be moved to Trash. '
-          'The selected local sync folder will then be uploaded as a new Vault.\n\n'
-          'Do not edit the folder or use another HomeBox device until Resync finishes.',
+        title: Text(
+          _localized(
+            context,
+            en: 'Rebuild Vault from local folder?',
+            ru: 'Пересоздать хранилище из локальной папки?',
+          ),
+        ),
+        content: Text(
+          _localized(
+            context,
+            en:
+                'All current files and folders in the server Vault will be moved to Trash. '
+                'The selected local sync folder will then be uploaded as a new Vault.\n\n'
+                'Do not edit the folder or use another HomeBox device until Resync finishes.',
+            ru:
+                'Все текущие файлы и папки хранилища на сервере будут перемещены в корзину. '
+                'Затем выбранная локальная папка загрузится как новое хранилище.\n\n'
+                'Не меняйте папку и не пользуйтесь другими устройствами HomeBox до завершения.',
+          ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(_localized(context, en: 'Cancel', ru: 'Отмена')),
           ),
           FilledButton(
             key: const ValueKey('confirm-resync-vault'),
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Resync'),
+            child: Text(_localized(context, en: 'Resync', ru: 'Пересоздать')),
           ),
         ],
       ),
@@ -773,10 +818,22 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
       SnackBar(
         content: Text(
           succeeded
-              ? 'Resync completed. The local folder is now the active Vault.'
+              ? _localized(
+                  context,
+                  en: 'Resync completed. The local folder is now the active Vault.',
+                  ru: 'Готово. Локальная папка стала текущим хранилищем.',
+                )
               : requiresRecovery
-              ? 'Resync stopped safely and normal sync remains paused. Fix the issue and retry Resync: ${uploader.errorMessage ?? 'unknown error'}'
-              : 'Resync could not start: ${uploader.errorMessage ?? 'unknown error'}',
+              ? _localized(
+                  context,
+                  en: 'Resync stopped safely and normal sync remains paused. Fix the issue and retry Resync: ${uploader.errorMessage ?? 'unknown error'}',
+                  ru: 'Пересоздание безопасно остановлено, обычная синхронизация на паузе. Устраните проблему и повторите: ${uploader.errorMessage ?? 'неизвестная ошибка'}',
+                )
+              : _localized(
+                  context,
+                  en: 'Resync could not start: ${uploader.errorMessage ?? 'unknown error'}',
+                  ru: 'Не удалось начать пересоздание: ${uploader.errorMessage ?? 'неизвестная ошибка'}',
+                ),
         ),
       ),
     );
@@ -871,7 +928,13 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     try {
       final folder = defaultTargetPlatform == TargetPlatform.android
           ? await _androidSyncFolder.selectFolder()
-          : await getDirectoryPath(confirmButtonText: 'Use as HomeBox folder');
+          : await getDirectoryPath(
+              confirmButtonText: _localized(
+                context,
+                en: 'Use as HomeBox folder',
+                ru: 'Использовать для HomeBox',
+              ),
+            );
       if (!mounted || folder == null) return;
       setState(() => _syncFolder = folder);
       await _syncFolderStore.save(folder);
@@ -884,8 +947,14 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
     } on Exception {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('HomeBox could not open the folder picker.'),
+          SnackBar(
+            content: Text(
+              _localized(
+                context,
+                en: 'HomeBox could not open the folder picker.',
+                ru: 'HomeBox не удалось открыть выбор папки.',
+              ),
+            ),
           ),
         );
       }
@@ -897,7 +966,15 @@ class _HomeBoxDesktopPageState extends State<HomeBoxDesktopPage>
   Future<void> _openSyncFolder() async {
     if (await _windowsSyncFolder.open() || !mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('HomeBox could not open the sync folder.')),
+      SnackBar(
+        content: Text(
+          _localized(
+            context,
+            en: 'HomeBox could not open the sync folder.',
+            ru: 'HomeBox не удалось открыть папку синхронизации.',
+          ),
+        ),
+      ),
     );
   }
 

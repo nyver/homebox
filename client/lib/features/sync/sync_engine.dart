@@ -25,6 +25,7 @@ import 'sync_conflict_log.dart';
 import '../server/server_connection_controller.dart';
 import '../../core/util/user_facing_error.dart';
 import '../../core/transport/network_errors.dart';
+import '../../core/localization/user_text.dart';
 
 enum SyncStatus { idle, syncing, paused, offline, error }
 
@@ -259,7 +260,10 @@ final class SyncEngine extends ChangeNotifier {
         // unreachable server is an expected mobile-network condition. Keep
         // the outbox intact and let the periodic pass retry rather than
         // presenting it as a sync failure.
-        _errorMessage = 'Cannot reach the HomeBox server. Check the network and server address.';
+        _errorMessage = UserText.of(
+          en: 'Cannot reach the HomeBox server. Check the network and server address.',
+          ru: 'Нет связи с сервером HomeBox. Проверьте сеть и адрес сервера.',
+        );
         if (!_paused) _setStatus(SyncStatus.offline);
       } else {
         _errorMessage = describeError(e);

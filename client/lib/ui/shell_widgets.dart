@@ -145,19 +145,31 @@ final class _BiometricLockScreen extends StatelessWidget {
               const Icon(Icons.fingerprint, size: 72),
               const SizedBox(height: 20),
               Text(
-                'HomeBox locked',
+                _localized(
+                  context,
+                  en: 'HomeBox locked',
+                  ru: 'HomeBox заблокирован',
+                ),
                 style: Theme.of(context).textTheme.headlineSmall,
               ),
               const SizedBox(height: 8),
-              const Text(
-                'Use your enrolled biometric to access encrypted files.',
+              Text(
+                _localized(
+                  context,
+                  en: 'Use your enrolled biometric to access encrypted files.',
+                  ru: 'Подтвердите личность биометрией, чтобы открыть зашифрованные файлы.',
+                ),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 24),
               FilledButton.icon(
                 onPressed: authenticating ? null : onUnlock,
                 icon: const Icon(Icons.fingerprint),
-                label: Text(authenticating ? 'Checking…' : 'Unlock'),
+                label: Text(
+                  authenticating
+                      ? _localized(context, en: 'Checking…', ru: 'Проверка…')
+                      : _localized(context, en: 'Unlock', ru: 'Разблокировать'),
+                ),
               ),
             ],
           ),
@@ -186,14 +198,28 @@ class _VaultStateChip extends StatelessWidget {
       final ready = controller.status == VaultSetupStatus.ready;
       return _headerStatusIndicator(
         icon: ready ? Icons.lock_open_outlined : Icons.lock_outline,
-        label: ready ? 'Vault unlocked' : 'Vault locked',
+        label: ready
+            ? _localized(
+                context,
+                en: 'Vault unlocked',
+                ru: 'Хранилище разблокировано',
+              )
+            : _localized(
+                context,
+                en: 'Vault locked',
+                ru: 'Хранилище заблокировано',
+              ),
         tooltip: ready
             ? _localized(
                 context,
                 en: 'Vault unlocked on this device. Open Settings for devices and recovery.',
                 ru: 'Хранилище разблокировано на этом устройстве. Устройства и восстановление — в настройках.',
               )
-            : 'Create or restore this account\'s vault in Settings to unlock E2EE data.',
+            : _localized(
+                context,
+                en: 'Create or restore this account\'s vault in Settings to unlock E2EE data.',
+                ru: 'Создайте или восстановите хранилище аккаунта в настройках, чтобы открыть зашифрованные данные.',
+              ),
         dense: true,
         onTap: onTap,
       );

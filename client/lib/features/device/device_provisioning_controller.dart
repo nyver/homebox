@@ -10,6 +10,7 @@ import '../../core/e2ee/opaque_id.dart';
 import '../../core/e2ee/vault_key_store.dart';
 import '../../core/transport/homebox_api_client.dart' as transport;
 import '../server/server_connection_controller.dart';
+import '../../core/localization/user_text.dart';
 
 enum DeviceProvisioningStatus { idle, loading, awaitingApproval, ready, failed }
 
@@ -92,14 +93,22 @@ final class DeviceProvisioningController extends ChangeNotifier {
     if (context == null) return false;
     if (target.isRevoked || target.id == context.deviceId) {
       _fail(
-        const FormatException('Select another active device to provision.'),
+        FormatException(
+          UserText.of(
+            en: 'Select another active device to provision.',
+            ru: 'Выберите другое активное устройство.',
+          ),
+        ),
       );
       return false;
     }
     if (!fingerprintVerified) {
       _fail(
-        const FormatException(
-          'Compare the pairing fingerprint on both devices before approval.',
+        FormatException(
+          UserText.of(
+            en: 'Compare the pairing fingerprint on both devices before approval.',
+            ru: 'Перед подтверждением сверьте отпечаток на обоих устройствах.',
+          ),
         ),
       );
       return false;
@@ -113,7 +122,12 @@ final class DeviceProvisioningController extends ChangeNotifier {
     try {
       vaultKey = await _vaultKeyStore.loadVaultKey();
       if (vaultKey == null) {
-        throw StateError('This device does not have an unlocked vault key.');
+        throw StateError(
+          UserText.of(
+            en: 'This device does not have an unlocked vault key.',
+            ru: 'На этом устройстве нет разблокированного ключа хранилища.',
+          ),
+        );
       }
       accountIdentity = await AccountIdentity.derive(
         vaultKey: vaultKey,
@@ -193,11 +207,21 @@ final class DeviceProvisioningController extends ChangeNotifier {
     try {
       identity = await _deviceIdentityStore.load();
       if (identity == null) {
-        throw StateError('Prepare this device before creating a vault.');
+        throw StateError(
+          UserText.of(
+            en: 'Prepare this device before creating a vault.',
+            ru: 'Подготовьте устройство, прежде чем создавать хранилище.',
+          ),
+        );
       }
       vaultKey = await _vaultKeyStore.loadVaultKey();
       if (vaultKey == null) {
-        throw StateError('This device does not have an unlocked vault key.');
+        throw StateError(
+          UserText.of(
+            en: 'This device does not have an unlocked vault key.',
+            ru: 'На этом устройстве нет разблокированного ключа хранилища.',
+          ),
+        );
       }
       accountIdentity = await AccountIdentity.derive(
         vaultKey: vaultKey,
@@ -253,8 +277,11 @@ final class DeviceProvisioningController extends ChangeNotifier {
     if (context == null) return false;
     if (target.id == context.deviceId) {
       _fail(
-        const FormatException(
-          'Sign out from this device instead of revoking it here.',
+        FormatException(
+          UserText.of(
+            en: 'Sign out from this device instead of revoking it here.',
+            ru: 'Чтобы отключить это устройство, выйдите из аккаунта, а не отзывайте его.',
+          ),
         ),
       );
       return false;
@@ -307,7 +334,12 @@ final class DeviceProvisioningController extends ChangeNotifier {
       }
       identity = await _deviceIdentityStore.load();
       if (identity == null) {
-        throw StateError('Prepare this device before collecting approval.');
+        throw StateError(
+          UserText.of(
+            en: 'Prepare this device before collecting approval.',
+            ru: 'Подготовьте устройство, прежде чем проверять подтверждение.',
+          ),
+        );
       }
       vaultId = uuidStringToBytes(context.userId);
       deviceId = uuidStringToBytes(context.deviceId);
@@ -379,7 +411,10 @@ final class DeviceProvisioningController extends ChangeNotifier {
     // _requireContext for why (mobile OSes suspend background timers).
     final session = await _serverConnection.ensureFreshSession();
     if (api == null || session == null) {
-      _errorMessage = 'Connect and sign in before provisioning a device.';
+      _errorMessage = UserText.of(
+        en: 'Connect and sign in before provisioning a device.',
+        ru: 'Подключитесь и войдите, прежде чем подключать устройство.',
+      );
       _setStatus(DeviceProvisioningStatus.failed);
       return null;
     }

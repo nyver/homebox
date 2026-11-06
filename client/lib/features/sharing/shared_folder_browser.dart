@@ -16,6 +16,7 @@ import '../../core/util/user_facing_error.dart';
 import '../files/bulk_download.dart';
 import '../files/file_transfer.dart';
 import '../server/server_connection_controller.dart';
+import '../../core/localization/user_text.dart';
 
 /// One decrypted entry of a folder shared with this account.
 final class SharedEntry {
@@ -240,11 +241,21 @@ final class SharedFolderBrowser extends ChangeNotifier {
     return _bulk(entries, (ctx, entry) async {
       if (entry.node.parentId == targetFolderId) return;
       if (entry.node.id == targetFolderId) {
-        throw StateError('"${entry.name}" cannot be moved into itself.');
+        throw StateError(
+          UserText.of(
+            en: '"${entry.name}" cannot be moved into itself.',
+            ru: '«${entry.name}» нельзя переместить в само себя.',
+          ),
+        );
       }
       final key = PortableName.comparisonKey(entry.name);
       if (!taken.add(key)) {
-        throw StateError('"${entry.name}" already exists in the destination.');
+        throw StateError(
+          UserText.of(
+            en: '"${entry.name}" already exists in the destination.',
+            ru: '«${entry.name}» уже есть в папке назначения.',
+          ),
+        );
       }
       await ctx.api.updateNode(
         ctx.accessToken,
@@ -427,7 +438,12 @@ final class SharedFolderBrowser extends ChangeNotifier {
       try {
         final name = basenameOfLocalPath(path);
         if (!taken.add(PortableName.comparisonKey(name))) {
-          throw StateError('"$name" already exists in this folder.');
+          throw StateError(
+            UserText.of(
+              en: '"$name" already exists in this folder.',
+              ru: '«$name» уже есть в этой папке.',
+            ),
+          );
         }
         await _uploadNew(ctx, File(path), name, (progress) {
           _setProgress((index + progress) / localPaths.length);
@@ -557,7 +573,12 @@ final class SharedFolderBrowser extends ChangeNotifier {
   ) async {
     final length = await file.length();
     if (length > homeBoxMaxPlaintextFileSize) {
-      throw const FormatException('HomeBox files are limited to 500 MiB.');
+      throw FormatException(
+        UserText.of(
+          en: 'HomeBox files are limited to 500 MiB.',
+          ru: 'Размер файла в HomeBox ограничен 500 МиБ.',
+        ),
+      );
     }
     final hash = await plaintextFileSha256(file);
     final key = await _keys.current(share.nodeId);
@@ -603,14 +624,24 @@ final class SharedFolderBrowser extends ChangeNotifier {
     for (final entry in _entries) {
       if (identical(entry, except)) continue;
       if (PortableName.comparisonKey(entry.name) == key) {
-        throw StateError('"$name" already exists in this folder.');
+        throw StateError(
+          UserText.of(
+            en: '"$name" already exists in this folder.',
+            ru: '«$name» уже есть в этой папке.',
+          ),
+        );
       }
     }
   }
 
   void _requireWrite() {
     if (!canWrite) {
-      throw StateError('This folder was shared with you as view only.');
+      throw StateError(
+        UserText.of(
+          en: 'This folder was shared with you as view only.',
+          ru: 'Эта папка доступна вам только для просмотра.',
+        ),
+      );
     }
   }
 
@@ -675,7 +706,10 @@ final class SharedFolderBrowser extends ChangeNotifier {
     final api = _serverConnection.api;
     final session = await _serverConnection.ensureFreshSession();
     if (api == null || session == null) {
-      _errorMessage = 'Connect to the server and sign in first.';
+      _errorMessage = UserText.of(
+        en: 'Connect to the server and sign in first.',
+        ru: 'Сначала подключитесь к серверу и войдите.',
+      );
       _notify();
       return null;
     }
